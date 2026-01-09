@@ -281,8 +281,11 @@ The rebates bot runs separately from the main trading bot to capture maker rebat
 # SSH into trading server
 ssh trading
 
-# Start in screen session (recommended)
+# Start in dry-run mode (default - simulates trades)
 screen -dmS rebates bash -c 'cd /home/polymaker/poly-maker && source .venv/bin/activate && python -u -m rebates.rebates_bot 2>&1 | tee /tmp/rebates.log'
+
+# Start with LIVE trading enabled
+screen -dmS rebates bash -c 'cd /home/polymaker/poly-maker && source .venv/bin/activate && REBATES_DRY_RUN=false python -u -m rebates.rebates_bot 2>&1 | tee /tmp/rebates.log'
 
 # Attach to see live output
 screen -r rebates
@@ -292,6 +295,23 @@ tail -f /tmp/rebates.log
 
 # Stop the bot
 screen -S rebates -X quit
+```
+
+**Remote commands (from local machine):**
+```bash
+# Start rebates bot (dry-run)
+ssh trading "screen -S rebates -X quit 2>/dev/null || true"
+ssh trading "cd /home/polymaker/poly-maker && screen -dmS rebates bash -c 'source .venv/bin/activate && python -u -m rebates.rebates_bot 2>&1 | tee /tmp/rebates.log'"
+
+# Start rebates bot (LIVE trading)
+ssh trading "screen -S rebates -X quit 2>/dev/null || true"
+ssh trading "cd /home/polymaker/poly-maker && screen -dmS rebates bash -c 'source .venv/bin/activate && REBATES_DRY_RUN=false python -u -m rebates.rebates_bot 2>&1 | tee /tmp/rebates.log'"
+
+# Check status
+ssh trading "pgrep -f 'rebates.rebates_bot' && echo 'Rebates bot running' || echo 'Rebates bot stopped'"
+
+# View logs
+ssh trading "tail -30 /tmp/rebates.log"
 ```
 
 **Configuration (via environment variables):**
