@@ -88,17 +88,23 @@ node poly_merger/merge.js [amount] [condition_id] [is_neg_risk]
 ## VPS Deployment
 
 ### SSH Access
-```bash
-# Connect to VPS (replace <server-ip> with actual IP or Tailscale hostname)
-ssh -i ~/.ssh/hetzner root@<server-ip>
 
-# Or configure ~/.ssh/config for convenience:
-# Host trading
-#     HostName <server-ip-or-tailscale-name>
-#     User root
-#     IdentityFile ~/.ssh/hetzner
-# Then just: ssh trading
+SSH config is set up in `~/.ssh/config`:
 ```
+Host trading
+    HostName 77.42.39.205
+    User root
+    IdentityFile ~/.ssh/hetzner
+
+Host updater
+    HostName 46.224.186.58
+    User root
+    IdentityFile ~/.ssh/hetzner
+```
+
+Connect with: `ssh trading` or `ssh updater`
+
+**Project directory on VPS:** `/home/polymaker/poly-maker`
 
 ### Initial Setup
 ```bash
@@ -189,30 +195,31 @@ http://100.84.112.124:8080    # Using Tailscale IP directly
 # SSH into trading server first
 ssh trading
 
-# Start manually (foreground)
+# Start in screen session (recommended - persists after SSH disconnect)
+screen -dmS webui bash -c 'cd /home/polymaker/poly-maker && source .venv/bin/activate && uvicorn web.app:app --host 0.0.0.0 --port 8080 2>&1 | tee /tmp/webui.log'
+
+# Attach to see live output
+screen -r webui
+
+# Start manually (foreground, useful for debugging)
 cd /home/polymaker/poly-maker
 source .venv/bin/activate
 uvicorn web.app:app --host 0.0.0.0 --port 8080
-
-# Start in background
-cd /home/polymaker/poly-maker
-source .venv/bin/activate
-nohup uvicorn web.app:app --host 0.0.0.0 --port 8080 > /tmp/webui.log 2>&1 &
 ```
 
 **Stopping the Web UI:**
 ```bash
-# Find and kill the process
-pkill -f 'uvicorn.*app:app'
+# Stop screen session
+screen -S webui -X quit
 
-# Or find PID and kill manually
-pgrep -f 'uvicorn.*app:app'
-kill <PID>
+# Or kill the process directly
+pkill -f 'uvicorn.*app:app'
 ```
 
 **Checking Web UI status:**
 ```bash
 # Check if running
+screen -ls                    # Shows webui screen session
 pgrep -f 'uvicorn.*app:app'
 
 # Test locally on server
@@ -221,6 +228,34 @@ curl http://localhost:8080/api/status
 # View logs
 tail -f /tmp/webui.log
 ```
+
+### Remote Commands (from local machine)
+
+Run commands on VPS without interactive SSH session:
+
+```bash
+# Pull latest code
+ssh trading "cd /home/polymaker/poly-maker && git pull origin main"
+
+# Restart trading bot
+ssh trading "pkill -f 'python.*main.py' || true; screen -S trading -X quit 2>/dev/null || true"
+ssh trading "cd /home/polymaker/poly-maker && screen -dmS trading bash -c 'source .venv/bin/activate && python -u main.py 2>&1 | tee /tmp/trading.log'"
+
+# Restart web UI
+ssh trading "pkill -f 'uvicorn.*app:app' || true; screen -S webui -X quit 2>/dev/null || true"
+ssh trading "cd /home/polymaker/poly-maker && screen -dmS webui bash -c 'source .venv/bin/activate && uvicorn web.app:app --host 0.0.0.0 --port 8080 2>&1 | tee /tmp/webui.log'"
+
+# Check bot status
+ssh trading "pgrep -f 'python.*main.py' && echo 'Bot running' || echo 'Bot stopped'"
+
+# View recent logs
+ssh trading "tail -50 /tmp/trading.log"
+
+# Check API status
+ssh trading "curl -s http://localhost:8080/api/status"
+```
+
+**Note:** When running commands via SSH that start background processes, use `screen -dmS` rather than `nohup`. The `nohup` approach can cause SSH exit code 255 issues.
 
 ### State Management
 
