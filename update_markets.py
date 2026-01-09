@@ -124,6 +124,13 @@ def fetch_and_process_data():
         wk_vol = spreadsheet.worksheet("Volatility Markets")
         wk_full = spreadsheet.worksheet("Full Markets")
         sel_df = get_sel_df(spreadsheet, "Selected Markets")
+    else:
+        # Load selected markets from database
+        from db.supabase_client import get_selected_markets
+        sel_df = get_selected_markets()
+        if sel_df.empty:
+            # Create empty DataFrame with required column to avoid KeyError
+            sel_df = pd.DataFrame(columns=['question'])
 
     # Fetch all markets from Polymarket API
     all_df = get_all_markets(client)
