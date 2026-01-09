@@ -33,10 +33,25 @@ def process_price_change(asset, side, price_level, new_size):
         book[price_level] = new_size
 
 def process_data(json_datas, trade=True):
+    # Handle unexpected data types (strings, None, etc.)
+    if json_datas is None:
+        return
+    if isinstance(json_datas, str):
+        # Sometimes websocket sends string messages (ping, etc.) - skip them
+        return
+    if isinstance(json_datas, dict):
+        # Single event instead of list - wrap it
+        json_datas = [json_datas]
+    if not isinstance(json_datas, list):
+        return
 
     for json_data in json_datas:
-        event_type = json_data['event_type']
-        asset = json_data['market']
+        if not isinstance(json_data, dict):
+            continue
+        event_type = json_data.get('event_type')
+        asset = json_data.get('market')
+        if not event_type or not asset:
+            continue
 
         if event_type == 'book':
             process_book_data(asset, json_data)
