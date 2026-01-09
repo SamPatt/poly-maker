@@ -4,6 +4,7 @@ FastAPI application for managing the market making bot.
 """
 
 import os
+import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 from pathlib import Path
@@ -55,6 +56,43 @@ def get_bot_status() -> dict:
     }
 
 
+def get_trading_bot_status() -> dict:
+    """Check if the trading bot process is running."""
+    try:
+        # Check for main.py process
+        result = subprocess.run(
+            ["pgrep", "-f", "python.*main.py"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        is_running = result.returncode == 0
+        pid = result.stdout.strip().split('\n')[0] if is_running else None
+
+        # Check screen session
+        screen_result = subprocess.run(
+            ["screen", "-ls"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        has_screen = "trading" in screen_result.stdout
+
+        return {
+            "running": is_running,
+            "pid": pid,
+            "screen_session": has_screen,
+            "error": None
+        }
+    except Exception as e:
+        return {
+            "running": False,
+            "pid": None,
+            "screen_session": False,
+            "error": str(e)
+        }
+
+
 # ============== Dashboard ==============
 
 @app.get("/", response_class=HTMLResponse)
@@ -62,6 +100,7 @@ async def dashboard(request: Request):
     """Main dashboard showing overview of positions and stats."""
     db_status = get_db_status()
     bot_status = get_bot_status()
+    trading_bot_status = get_trading_bot_status()
 
     # Get summary data
     positions = []
@@ -105,6 +144,7 @@ async def dashboard(request: Request):
         "page": "dashboard",
         "db_status": db_status,
         "bot_status": bot_status,
+        "trading_bot_status": trading_bot_status,
         "positions": positions,
         "recent_trades": recent_trades,
         "daily_pnl": daily_pnl,
@@ -134,6 +174,7 @@ async def markets_list(
             pass
 
     db_status = get_db_status()
+    trading_bot_status = get_trading_bot_status()
 
     all_markets = []
     selected_questions = set()
@@ -203,6 +244,7 @@ async def markets_list(
         "request": request,
         "page": "markets",
         "db_status": db_status,
+        "trading_bot_status": trading_bot_status,
         "markets": all_markets,
         "selected_questions": selected_questions,
         "search": search,
@@ -261,6 +303,7 @@ async def toggle_market(
 async def parameters_list(request: Request):
     """View and edit trading parameters."""
     db_status = get_db_status()
+    trading_bot_status = get_trading_bot_status()
 
     params_by_type = {}
 
@@ -275,6 +318,7 @@ async def parameters_list(request: Request):
         "request": request,
         "page": "parameters",
         "db_status": db_status,
+        "trading_bot_status": trading_bot_status,
         "params_by_type": params_by_type,
     })
 
@@ -315,6 +359,7 @@ async def add_parameter(
 async def trades_list(request: Request, limit: int = 50):
     """View trade history."""
     db_status = get_db_status()
+    trading_bot_status = get_trading_bot_status()
 
     trades = []
     total_pnl = 0.0
@@ -335,6 +380,7 @@ async def trades_list(request: Request, limit: int = 50):
         "request": request,
         "page": "trades",
         "db_status": db_status,
+        "trading_bot_status": trading_bot_status,
         "trades": trades,
         "total_pnl": total_pnl,
         "limit": limit,
@@ -348,12 +394,90 @@ async def api_status():
     """Get system status as JSON."""
     db_status = get_db_status()
     bot_status = get_bot_status()
+    trading_bot_status = get_trading_bot_status()
 
     return {
         "database": db_status,
         "bot": bot_status,
+        "trading_bot": trading_bot_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@app.post("/api/bot/restart")
+async def restart_bot():
+    """Restart the trading bot."""
+    try:
+        # Get the directory where the bot should run
+        bot_dir = Path(__file__).resolve().parent.parent
+
+        # Kill existing bot process
+        subprocess.run(
+            ["pkill", "-f", "python.*main.py"],
+            capture_output=True,
+            timeout=10
+        )
+
+        # Kill existing screen session
+        subprocess.run(
+            ["screen", "-S", "trading", "-X", "quit"],
+            capture_output=True,
+            timeout=5
+        )
+
+        # Small delay to ensure cleanup
+        import time
+        time.sleep(1)
+
+        # Start new bot in screen session
+        # Using bash -c to handle the complex command
+        start_cmd = f"cd {bot_dir} && source .venv/bin/activate && python -u main.py 2>&1 | tee /tmp/trading.log"
+        result = subprocess.run(
+            ["screen", "-dmS", "trading", "bash", "-c", start_cmd],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode != 0:
+            return {"success": False, "error": result.stderr or "Failed to start bot"}
+
+        # Wait a moment and check if it started
+        time.sleep(2)
+        status = get_trading_bot_status()
+
+        return {
+            "success": True,
+            "message": "Bot restart initiated",
+            "status": status
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/bot/stop")
+async def stop_bot():
+    """Stop the trading bot."""
+    try:
+        # Kill bot process
+        subprocess.run(
+            ["pkill", "-f", "python.*main.py"],
+            capture_output=True,
+            timeout=10
+        )
+
+        # Kill screen session
+        subprocess.run(
+            ["screen", "-S", "trading", "-X", "quit"],
+            capture_output=True,
+            timeout=5
+        )
+
+        return {"success": True, "message": "Bot stopped"}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 @app.get("/api/markets")

@@ -339,12 +339,20 @@
                     <span class="status-dot {% if db_status.connected %}connected{% else %}disconnected{% endif %}"></span>
                     Database
                 </div>
+                <div class="status-item" id="bot-status-item">
+                    <span id="bot-status-dot" class="status-dot {% if trading_bot_status and trading_bot_status.running %}connected{% else %}disconnected{% endif %}"></span>
+                    <span id="bot-status-text">Bot {% if trading_bot_status and trading_bot_status.running %}Running{% else %}Stopped{% endif %}</span>
+                </div>
                 {% if bot_status %}
                 <div class="status-item">
                     <span class="status-dot {% if bot_status.dry_run %}warning{% else %}connected{% endif %}"></span>
                     {% if bot_status.dry_run %}Dry Run{% else %}Live{% endif %}
                 </div>
                 {% endif %}
+                <div class="status-item">
+                    <button id="restart-btn" class="btn btn-sm btn-secondary" onclick="restartBot()" title="Restart trading bot">Restart</button>
+                    <button id="stop-btn" class="btn btn-sm btn-danger" onclick="stopBot()" title="Stop trading bot" style="margin-left: 5px;">Stop</button>
+                </div>
             </div>
         </div>
     </header>
@@ -354,6 +362,17 @@
     </main>
 
     <script>
+        // Update bot status UI
+        function updateBotStatus(data) {
+            const botDot = document.getElementById('bot-status-dot');
+            const botText = document.getElementById('bot-status-text');
+            if (botDot && botText && data.trading_bot) {
+                const isRunning = data.trading_bot.running;
+                botDot.className = 'status-dot ' + (isRunning ? 'connected' : 'disconnected');
+                botText.textContent = 'Bot ' + (isRunning ? 'Running' : 'Stopped');
+            }
+        }
+
         // Auto-refresh status every 30 seconds
         setInterval(() => {
             fetch('/api/status')
@@ -363,9 +382,74 @@
                     if (dbDot) {
                         dbDot.className = 'status-dot ' + (data.database.connected ? 'connected' : 'disconnected');
                     }
+                    updateBotStatus(data);
                 })
                 .catch(() => {});
         }, 30000);
+
+        // Restart bot
+        function restartBot() {
+            if (!confirm('Are you sure you want to restart the trading bot?')) {
+                return;
+            }
+            const btn = document.getElementById('restart-btn');
+            btn.disabled = true;
+            btn.textContent = 'Restarting...';
+
+            fetch('/api/bot/restart', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Bot restart initiated. Please wait a moment for it to fully start.');
+                        // Update status after a delay
+                        setTimeout(() => {
+                            fetch('/api/status')
+                                .then(r => r.json())
+                                .then(updateBotStatus);
+                        }, 3000);
+                    } else {
+                        alert('Failed to restart bot: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    alert('Error restarting bot: ' + err.message);
+                })
+                .finally(() => {
+                    btn.disabled = false;
+                    btn.textContent = 'Restart';
+                });
+        }
+
+        // Stop bot
+        function stopBot() {
+            if (!confirm('Are you sure you want to stop the trading bot? This will cancel all open orders.')) {
+                return;
+            }
+            const btn = document.getElementById('stop-btn');
+            btn.disabled = true;
+            btn.textContent = 'Stopping...';
+
+            fetch('/api/bot/stop', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Bot stopped.');
+                        // Update status
+                        fetch('/api/status')
+                            .then(r => r.json())
+                            .then(updateBotStatus);
+                    } else {
+                        alert('Failed to stop bot: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(err => {
+                    alert('Error stopping bot: ' + err.message);
+                })
+                .finally(() => {
+                    btn.disabled = false;
+                    btn.textContent = 'Stop';
+                });
+        }
     </script>
 </body>
 </html>

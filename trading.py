@@ -50,14 +50,16 @@ def send_buy_order(order):
 
     This function:
     1. Checks if wallet has sufficient available balance
-    2. Cancels any existing orders for the token
+    2. Cancels any existing orders for the token if needed
     3. Checks if the order price is within acceptable range
     4. Creates a new buy order if conditions are met
+    5. Updates local order state immediately to prevent duplicates
 
     Args:
         order (dict): Order details including token, price, size, and market parameters
     """
     client = global_state.client
+    token = order['token']
 
     # Check available balance before placing order
     order_cost = order['price'] * order['size']
@@ -72,23 +74,27 @@ def send_buy_order(order):
     # Only cancel existing orders if we need to make significant changes
     existing_buy_size = order['orders']['buy']['size']
     existing_buy_price = order['orders']['buy']['price']
-    
+
     # Cancel orders if price changed significantly or size needs major adjustment
     price_diff = abs(existing_buy_price - order['price']) if existing_buy_price > 0 else float('inf')
     size_diff = abs(existing_buy_size - order['size']) if existing_buy_size > 0 else float('inf')
-    
+
     should_cancel = (
         price_diff > 0.005 or  # Cancel if price diff > 0.5 cents
         size_diff > order['size'] * 0.1 or  # Cancel if size diff > 10%
         existing_buy_size == 0  # Cancel if no existing buy order
     )
-    
+
     if should_cancel and (existing_buy_size > 0 or order['orders']['sell']['size'] > 0):
         print(f"Cancelling buy orders - price diff: {price_diff:.4f}, size diff: {size_diff:.1f}")
         if DRY_RUN:
             print(f"[DRY RUN] Would cancel orders for {order['token']}")
         else:
             client.cancel_all_asset(order['token'])
+            # Clear local order state after cancellation
+            if str(token) in global_state.orders:
+                global_state.orders[str(token)]['buy'] = {'price': 0, 'size': 0}
+                global_state.orders[str(token)]['sell'] = {'price': 0, 'size': 0}
     elif not should_cancel:
         print(f"Keeping existing buy orders - minor changes: price diff: {price_diff:.4f}, size diff: {size_diff:.1f}")
         return  # Don't place new order if existing one is fine
@@ -123,6 +129,16 @@ def send_buy_order(order):
                 # Track committed funds immediately to prevent over-ordering
                 global_state.committed_buy_orders += order['price'] * order['size']
 
+                # CRITICAL: Update local order state immediately to prevent duplicate orders
+                # This prevents the race condition where the next loop runs before websocket updates
+                token_str = str(order['token'])
+                if token_str not in global_state.orders:
+                    global_state.orders[token_str] = {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
+                global_state.orders[token_str]['buy'] = {
+                    'price': order['price'],
+                    'size': order['size']
+                }
+
                 # Send Telegram alert and record trade
                 if TELEGRAM_ENABLED:
                     market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
@@ -139,36 +155,42 @@ def send_buy_order(order):
 def send_sell_order(order):
     """
     Create a SELL order for a specific token.
-    
+
     This function:
-    1. Cancels any existing orders for the token
+    1. Cancels any existing orders for the token if needed
     2. Creates a new sell order with the specified parameters
-    
+    3. Updates local order state immediately to prevent duplicates
+
     Args:
         order (dict): Order details including token, price, size, and market parameters
     """
     client = global_state.client
+    token = order['token']
 
     # Only cancel existing orders if we need to make significant changes
     existing_sell_size = order['orders']['sell']['size']
     existing_sell_price = order['orders']['sell']['price']
-    
+
     # Cancel orders if price changed significantly or size needs major adjustment
     price_diff = abs(existing_sell_price - order['price']) if existing_sell_price > 0 else float('inf')
     size_diff = abs(existing_sell_size - order['size']) if existing_sell_size > 0 else float('inf')
-    
+
     should_cancel = (
         price_diff > 0.005 or  # Cancel if price diff > 0.5 cents
         size_diff > order['size'] * 0.1 or  # Cancel if size diff > 10%
         existing_sell_size == 0  # Cancel if no existing sell order
     )
-    
+
     if should_cancel and (existing_sell_size > 0 or order['orders']['buy']['size'] > 0):
         print(f"Cancelling sell orders - price diff: {price_diff:.4f}, size diff: {size_diff:.1f}")
         if DRY_RUN:
             print(f"[DRY RUN] Would cancel orders for {order['token']}")
         else:
             client.cancel_all_asset(order['token'])
+            # Clear local order state after cancellation
+            if str(token) in global_state.orders:
+                global_state.orders[str(token)]['buy'] = {'price': 0, 'size': 0}
+                global_state.orders[str(token)]['sell'] = {'price': 0, 'size': 0}
     elif not should_cancel:
         print(f"Keeping existing sell orders - minor changes: price diff: {price_diff:.4f}, size diff: {size_diff:.1f}")
         return  # Don't place new order if existing one is fine
@@ -185,6 +207,16 @@ def send_sell_order(order):
             order['size'],
             True if order['neg_risk'] == 'TRUE' else False
         )
+
+        # CRITICAL: Update local order state immediately to prevent duplicate orders
+        token_str = str(order['token'])
+        if token_str not in global_state.orders:
+            global_state.orders[token_str] = {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
+        global_state.orders[token_str]['sell'] = {
+            'price': order['price'],
+            'size': order['size']
+        }
+
         # Send Telegram alert and record trade
         if TELEGRAM_ENABLED:
             market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
