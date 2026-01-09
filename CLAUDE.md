@@ -1,0 +1,189 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Poly-Maker is an automated market making bot for Polymarket prediction markets. It provides liquidity by maintaining two-sided orders (bids and asks) on selected markets, earning from bid-ask spreads and Polymarket's liquidity rewards program.
+
+## Commands
+
+### Setup
+```bash
+uv sync                           # Install Python dependencies
+uv sync --extra dev               # Install with dev dependencies (black, pytest)
+cd poly_merger && npm install     # Install Node.js dependencies for position merging
+cp .env.example .env              # Create environment file
+```
+
+### Running
+```bash
+uv run python main.py             # Run the market making bot
+uv run python update_markets.py   # Update market data (run continuously, separate IP recommended)
+uv run python update_stats.py     # Update account statistics
+```
+
+### Development
+```bash
+uv run black .                    # Format code (line-length=100)
+uv run pytest                     # Run tests
+```
+
+### Position Merging (standalone)
+```bash
+node poly_merger/merge.js [amount] [condition_id] [is_neg_risk]
+# Example: node poly_merger/merge.js 1000000 0xabc123 true
+```
+
+## Architecture
+
+### Data Flow
+1. **Supabase/Google Sheets** → Configuration source for markets, hyperparameters (configurable via DATA_SOURCE env)
+2. **WebSocket** → Real-time orderbook updates trigger trading decisions
+3. **Trading Logic** → Analyzes spreads, positions, volatility to place/cancel orders
+4. **CLOB API** → Order execution via `py-clob-client`
+5. **Blockchain** → Position merging via Node.js subprocess
+6. **Telegram** → Trade alerts and daily summaries (optional)
+
+### Key Modules
+
+**`main.py`** - Entry point. Initializes client, starts background update thread, maintains WebSocket connections.
+
+**`trading.py`** - Core trading logic in `perform_trade()`:
+- Position merging when holding both YES/NO
+- Order placement with spread/incentive calculations
+- Stop-loss triggers based on PnL and volatility
+- Take-profit sell order management
+- Risk-off periods after stop-loss
+
+**`poly_data/`**
+- `global_state.py` - Shared mutable state (positions, orders, market data, params)
+- `polymarket_client.py` - Wrapper around `py-clob-client` with blockchain interactions
+- `websocket_handlers.py` - Market and user WebSocket connections
+- `data_processing.py` - Processes WebSocket events, triggers trades
+- `data_utils.py` - Position/order state management, Google Sheets sync
+- `trading_utils.py` - Price calculations, order sizing logic
+
+**`poly_merger/`** - Node.js utility for on-chain position merging via Gnosis Safe
+
+**`data_updater/`** - Separate module for fetching all available markets and calculating volatility metrics
+
+**`db/`** - Supabase integration (alternative to Google Sheets)
+- `supabase_client.py` - Database connection and queries
+- `schema.sql` - Table definitions for Supabase setup
+
+**`alerts/`** - Telegram notification system
+- `telegram.py` - Trade alerts, errors, daily summaries
+
+**`deploy/`** - Deployment configurations
+- `trading.service` - systemd service for trading bot
+- `updater.service` - systemd service for data updater
+- `webui.service` - systemd service for web UI
+- `setup.sh` - VPS setup script
+
+**`web/`** - Web UI for configuration
+- `app.py` - FastAPI application
+- `templates/` - Jinja2 HTML templates
+
+## VPS Deployment
+
+### SSH Access
+```bash
+# Connect to VPS (replace <server-ip> with actual IP or Tailscale hostname)
+ssh -i ~/.ssh/hetzner root@<server-ip>
+
+# Or configure ~/.ssh/config for convenience:
+# Host trading
+#     HostName <server-ip-or-tailscale-name>
+#     User root
+#     IdentityFile ~/.ssh/hetzner
+# Then just: ssh trading
+```
+
+### Initial Setup
+```bash
+# On VPS as root, run the setup script:
+./deploy/setup.sh trading   # For VPS 1 (trading bot + PostgreSQL)
+./deploy/setup.sh updater   # For VPS 2 (data updater only)
+```
+
+### Service Management
+```bash
+# Start/stop/restart services
+sudo systemctl start trading
+sudo systemctl stop trading
+sudo systemctl restart trading
+
+# View logs
+sudo tail -f /var/log/polymaker/trading.log
+sudo journalctl -u trading -f
+
+# Check status
+sudo systemctl status trading
+```
+
+### Web UI Access
+The web UI runs on port 8080, accessible only via Tailscale:
+```
+http://trading:8080  # Using Tailscale hostname
+```
+
+### State Management
+
+Global state in `poly_data/global_state.py` tracks:
+- `df` - Market configuration DataFrame from Google Sheets
+- `params` - Hyperparameters by market type (stop_loss_threshold, take_profit_threshold, volatility_threshold, etc.)
+- `positions` - Current token positions {token_id: {size, avgPrice}}
+- `orders` - Open orders {token_id: {buy: {price, size}, sell: {price, size}}}
+- `all_data` - Real-time orderbook data from WebSocket
+- `performing` - Trade IDs currently being processed (prevents duplicate trades)
+- `REVERSE_TOKENS` - Maps YES↔NO token pairs
+
+### Trading Parameters (from Google Sheets)
+
+Key hyperparameters per market type:
+- `stop_loss_threshold` - PnL % to trigger stop-loss
+- `take_profit_threshold` - Profit % target for sells
+- `volatility_threshold` - Max volatility to accept trades
+- `spread_threshold` - Spread required for stop-loss execution
+- `sleep_period` - Hours to pause trading after stop-loss
+
+Per-market settings:
+- `trade_size`, `max_size`, `min_size` - Position sizing
+- `max_spread` - Maximum spread for incentive calculations
+- `tick_size` - Price precision (0.01, 0.001, etc.)
+- `neg_risk` - Whether market uses negative risk adapter
+
+### Important Patterns
+
+**Negative Risk Markets**: Some Polymarket markets use a "negative risk" structure requiring different contract calls. Check `row['neg_risk'] == 'TRUE'` before order creation and position merging.
+
+**Position Merging**: When holding both YES and NO positions in same market, merging recovers USDC. Triggered when `min(pos_YES, pos_NO) > MIN_MERGE_SIZE` (20). Uses Node.js subprocess to interact with Polygon smart contracts.
+
+**Risk-Off Periods**: After stop-loss triggers, bot writes to `positions/{market}.json` with `sleep_till` timestamp. New buys are blocked until this period expires.
+
+**WebSocket Reconnection**: Main loop in `main.py` automatically reconnects when WebSocket connections drop.
+
+## Environment Variables
+
+Key settings in `.env`:
+- `PK` - Polymarket private key
+- `BROWSER_ADDRESS` - Wallet address
+- `DATA_SOURCE` - `postgres` or `sheets` (default: sheets)
+- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` - PostgreSQL connection
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` - Telegram alerts (optional)
+- `DRY_RUN` - Set to `true` to simulate trades without executing
+
+## External Dependencies
+
+- **Polymarket API** (CLOB): `py-clob-client` for order management
+- **Polygon RPC**: `https://polygon-rpc.com` for blockchain queries
+- **PostgreSQL** (local) or **Google Sheets API**: Configuration and market selection
+- **Gnosis Safe**: Wallet infrastructure for position merging
+- **Telegram Bot API**: Trade notifications (optional)
+
+## Contract Addresses (Polygon)
+
+- Negative Risk Adapter: `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`
+- Conditional Tokens: `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`
+- USDC: `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`

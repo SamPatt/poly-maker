@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Poly-Maker{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 30px;">Dashboard</h1>
+
+<!-- Stats Overview -->
+<div class="grid-4 mb-20">
+    <div class="card">
+        <div class="stat">
+            <div class="stat-value {% if daily_pnl >= 0 %}positive{% else %}negative{% endif %}">
+                ${{ "%.2f"|format(daily_pnl) }}
+            </div>
+            <div class="stat-label">Today's P&L</div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="stat">
+            <div class="stat-value {% if total_earnings >= 0 %}positive{% else %}negative{% endif %}">
+                ${{ "%.2f"|format(total_earnings) }}
+            </div>
+            <div class="stat-label">Total Earnings</div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="stat">
+            <div class="stat-value">{{ positions|length }}</div>
+            <div class="stat-label">Active Positions</div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="stat">
+            <div class="stat-value">{{ recent_trades|length }}</div>
+            <div class="stat-label">Recent Trades</div>
+        </div>
+    </div>
+</div>
+
+<div class="grid-2">
+    <!-- Current Positions -->
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Current Positions</span>
+            <a href="/markets" class="btn btn-secondary btn-sm">Manage Markets</a>
+        </div>
+        {% if positions %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Market</th>
+                    <th>Side</th>
+                    <th>Size</th>
+                    <th>Earnings</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pos in positions %}
+                <tr>
+                    <td>
+                        <div style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ pos.question }}">
+                            {{ pos.question[:50] }}{% if pos.question|length > 50 %}...{% endif %}
+                        </div>
+                    </td>
+                    <td>
+                        <span class="badge {% if pos.answer == 'Yes' %}badge-success{% else %}badge-danger{% endif %}">
+                            {{ pos.answer }}
+                        </span>
+                    </td>
+                    <td>${{ "%.2f"|format(pos.position_size) }}</td>
+                    <td class="{% if pos.earnings >= 0 %}text-success{% else %}text-danger{% endif %}">
+                        ${{ "%.2f"|format(pos.earnings) }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <h3>No Active Positions</h3>
+            <p>Positions will appear here once the bot starts trading.</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Recent Trades -->
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Recent Trades</span>
+            <a href="/trades" class="btn btn-secondary btn-sm">View All</a>
+        </div>
+        {% if recent_trades %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Side</th>
+                    <th>Price</th>
+                    <th>Size</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for trade in recent_trades %}
+                <tr>
+                    <td class="text-muted">
+                        {{ trade.timestamp.strftime('%H:%M:%S') if trade.timestamp else 'N/A' }}
+                    </td>
+                    <td>
+                        <span class="badge {% if trade.side == 'BUY' %}badge-success{% else %}badge-danger{% endif %}">
+                            {{ trade.side }}
+                        </span>
+                    </td>
+                    <td>{{ "%.3f"|format(trade.price) }}</td>
+                    <td>${{ "%.2f"|format(trade.size) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <h3>No Recent Trades</h3>
+            <p>Trades will appear here as they execute.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- System Status -->
+<div class="card mt-20">
+    <div class="card-header">
+        <span class="card-title">System Status</span>
+        <span class="text-muted">Last updated: {{ now.strftime('%Y-%m-%d %H:%M:%S UTC') }}</span>
+    </div>
+    <div class="grid-3">
+        <div>
+            <label>Database</label>
+            <div>
+                {% if db_status.connected %}
+                <span class="badge badge-success">Connected</span>
+                {% else %}
+                <span class="badge badge-danger">Disconnected</span>
+                <p class="text-danger" style="margin-top: 5px; font-size: 0.85rem;">{{ db_status.error }}</p>
+                {% endif %}
+            </div>
+        </div>
+        <div>
+            <label>Data Source</label>
+            <div>
+                <span class="badge badge-info">{{ bot_status.data_source|upper }}</span>
+            </div>
+        </div>
+        <div>
+            <label>Trading Mode</label>
+            <div>
+                {% if bot_status.dry_run %}
+                <span class="badge badge-warning">Dry Run</span>
+                {% else %}
+                <span class="badge badge-success">Live</span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

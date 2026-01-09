@@ -1,0 +1,32 @@
+[Unit]
+Description=Poly-Maker Web UI
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=polymaker
+Group=polymaker
+WorkingDirectory=/home/polymaker/poly-maker
+Environment="PATH=/home/polymaker/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Load environment from .env file
+EnvironmentFile=/home/polymaker/poly-maker/.env
+
+# Run the FastAPI server
+ExecStart=/home/polymaker/.local/bin/uv run uvicorn web.app:app --host 0.0.0.0 --port 8080
+
+# Restart on failure
+Restart=on-failure
+RestartSec=10
+
+# Logging
+StandardOutput=append:/var/log/polymaker/webui.log
+StandardError=append:/var/log/polymaker/webui.log
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

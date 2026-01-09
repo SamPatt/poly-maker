@@ -1,8 +1,11 @@
 import gc                      # Garbage collection
+import os                      # Operating system interface
 import time                    # Time functions
 import asyncio                 # Asynchronous I/O
 import traceback               # Exception handling
 import threading               # Thread management
+import signal                  # Signal handling
+import sys                     # System functions
 
 from poly_data.polymarket_client import PolymarketClient
 from poly_data.data_utils import update_markets, update_positions, update_orders
@@ -12,6 +15,30 @@ from poly_data.data_processing import remove_from_performing
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Dry-run mode check
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+
+# Try to import Telegram alerts (optional)
+try:
+    from alerts.telegram import send_startup_alert, send_shutdown_alert, send_error_alert
+    TELEGRAM_ENABLED = True
+except ImportError:
+    TELEGRAM_ENABLED = False
+    print("Telegram alerts not available - install alerts module")
+
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    print(f"\nReceived signal {signum}, shutting down...")
+    if TELEGRAM_ENABLED:
+        send_shutdown_alert("Received shutdown signal")
+    sys.exit(0)
+
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 def update_once():
     """
@@ -80,9 +107,27 @@ async def main():
     """
     Main application entry point. Initializes client, data, and manages websocket connections.
     """
+    # Display startup banner
+    print("=" * 60)
+    print("POLY-MAKER - Polymarket Market Making Bot")
+    print("=" * 60)
+
+    if DRY_RUN:
+        print("")
+        print("*" * 60)
+        print("*  DRY RUN MODE ENABLED                                    *")
+        print("*  No real orders will be placed                           *")
+        print("*  Set DRY_RUN=false in .env to enable live trading        *")
+        print("*" * 60)
+        print("")
+
+    # Send startup alert via Telegram
+    if TELEGRAM_ENABLED:
+        send_startup_alert(dry_run=DRY_RUN)
+
     # Initialize client
     global_state.client = PolymarketClient()
-    
+
     # Initialize state and fetch initial data
     global_state.all_tokens = []
     update_once()

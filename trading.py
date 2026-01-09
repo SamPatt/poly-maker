@@ -5,6 +5,7 @@ import asyncio                  # Asynchronous I/O
 import traceback                # Exception handling
 import pandas as pd             # Data analysis library
 import math                     # Mathematical functions
+from dotenv import load_dotenv
 
 import poly_data.global_state as global_state
 import poly_data.CONSTANTS as CONSTANTS
@@ -12,6 +13,32 @@ import poly_data.CONSTANTS as CONSTANTS
 # Import utility functions for trading
 from poly_data.trading_utils import get_best_bid_ask_deets, get_order_prices, get_buy_sell_amount, round_down, round_up
 from poly_data.data_utils import get_position, get_order, set_position
+
+# Load environment variables
+load_dotenv()
+
+# Dry-run mode: log orders instead of executing them
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+
+if DRY_RUN:
+    print("=" * 50)
+    print("DRY RUN MODE ENABLED - No real orders will be placed")
+    print("=" * 50)
+
+# Try to import Telegram alerts (optional)
+try:
+    from alerts.telegram import send_trade_alert, send_stop_loss_alert, send_error_alert
+    TELEGRAM_ENABLED = True
+except ImportError:
+    TELEGRAM_ENABLED = False
+    print("Telegram alerts not available")
+
+# Try to import database for trade recording (optional)
+try:
+    from db.supabase_client import record_trade
+    DB_ENABLED = True
+except ImportError:
+    DB_ENABLED = False
 
 # Create directory for storing position risk information
 if not os.path.exists('positions/'):
@@ -47,7 +74,10 @@ def send_buy_order(order):
     
     if should_cancel and (existing_buy_size > 0 or order['orders']['sell']['size'] > 0):
         print(f"Cancelling buy orders - price diff: {price_diff:.4f}, size diff: {size_diff:.1f}")
-        client.cancel_all_asset(order['token'])
+        if DRY_RUN:
+            print(f"[DRY RUN] Would cancel orders for {order['token']}")
+        else:
+            client.cancel_all_asset(order['token'])
     elif not should_cancel:
         print(f"Keeping existing buy orders - minor changes: price diff: {price_diff:.4f}, size diff: {size_diff:.1f}")
         return  # Don't place new order if existing one is fine
@@ -66,13 +96,24 @@ def send_buy_order(order):
         if order['price'] >= 0.1 and order['price'] < 0.9:
             print(f'Creating new order for {order["size"]} at {order["price"]}')
             print(order['token'], 'BUY', order['price'], order['size'])
-            client.create_order(
-                order['token'], 
-                'BUY', 
-                order['price'], 
-                order['size'], 
-                True if order['neg_risk'] == 'TRUE' else False
-            )
+
+            if DRY_RUN:
+                print(f"[DRY RUN] Would create BUY order: {order['token']} @ {order['price']} x {order['size']}")
+            else:
+                client.create_order(
+                    order['token'],
+                    'BUY',
+                    order['price'],
+                    order['size'],
+                    True if order['neg_risk'] == 'TRUE' else False
+                )
+                # Send Telegram alert and record trade
+                if TELEGRAM_ENABLED:
+                    market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
+                    send_trade_alert('BUY', order['token'], order['price'], order['size'], market_question)
+                if DB_ENABLED:
+                    market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
+                    record_trade(order['token'], 'BUY', order['price'], order['size'], market_question)
         else:
             print("Not creating buy order because its outside acceptable price range (0.1-0.9)")
     else:
@@ -108,19 +149,33 @@ def send_sell_order(order):
     
     if should_cancel and (existing_sell_size > 0 or order['orders']['buy']['size'] > 0):
         print(f"Cancelling sell orders - price diff: {price_diff:.4f}, size diff: {size_diff:.1f}")
-        client.cancel_all_asset(order['token'])
+        if DRY_RUN:
+            print(f"[DRY RUN] Would cancel orders for {order['token']}")
+        else:
+            client.cancel_all_asset(order['token'])
     elif not should_cancel:
         print(f"Keeping existing sell orders - minor changes: price diff: {price_diff:.4f}, size diff: {size_diff:.1f}")
         return  # Don't place new order if existing one is fine
 
     print(f'Creating new order for {order["size"]} at {order["price"]}')
-    client.create_order(
-        order['token'], 
-        'SELL', 
-        order['price'], 
-        order['size'], 
-        True if order['neg_risk'] == 'TRUE' else False
-    )
+
+    if DRY_RUN:
+        print(f"[DRY RUN] Would create SELL order: {order['token']} @ {order['price']} x {order['size']}")
+    else:
+        client.create_order(
+            order['token'],
+            'SELL',
+            order['price'],
+            order['size'],
+            True if order['neg_risk'] == 'TRUE' else False
+        )
+        # Send Telegram alert and record trade
+        if TELEGRAM_ENABLED:
+            market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
+            send_trade_alert('SELL', order['token'], order['price'], order['size'], market_question)
+        if DB_ENABLED:
+            market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
+            record_trade(order['token'], 'SELL', order['price'], order['size'], market_question)
 
 # Dictionary to store locks for each market to prevent concurrent trading on the same market
 market_locks = {}

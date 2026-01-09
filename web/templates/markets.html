@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block title %}Markets - Poly-Maker{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
+    <h1>Markets</h1>
+    <div>
+        <span class="badge badge-success" style="font-size: 0.9rem; padding: 6px 12px;">
+            {{ selected_count }} Selected
+        </span>
+    </div>
+</div>
+
+<!-- Search and Filter -->
+<div class="card mb-20">
+    <form method="get" action="/markets">
+        <div class="search-bar">
+            <input type="text" name="search" placeholder="Search markets..." value="{{ search }}">
+            <label style="display: flex; align-items: center; gap: 8px; color: #e0e0e0; margin: 0; white-space: nowrap;">
+                <input type="checkbox" name="show_selected" value="true" {% if show_selected %}checked{% endif %}
+                       style="width: auto;" onchange="this.form.submit()">
+                Show selected only
+            </label>
+            <button type="submit" class="btn btn-primary">Search</button>
+            {% if search or show_selected %}
+            <a href="/markets" class="btn btn-secondary">Clear</a>
+            {% endif %}
+        </div>
+    </form>
+</div>
+
+<!-- Markets Table -->
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">
+            {% if show_selected %}Selected Markets{% elif search %}Search Results{% else %}All Markets{% endif %}
+            <span class="text-muted" style="font-weight: normal;">({{ markets|length }})</span>
+        </span>
+    </div>
+
+    {% if markets %}
+    <div style="overflow-x: auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 40%;">Market</th>
+                    <th>Bid/Ask</th>
+                    <th>Reward/100</th>
+                    <th>Volatility</th>
+                    <th>Min Size</th>
+                    <th>Neg Risk</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for market in markets %}
+                {% set is_selected = market.question in selected_questions %}
+                <tr style="{% if is_selected %}background: rgba(0, 212, 170, 0.05);{% endif %}">
+                    <td>
+                        <div style="max-width: 400px;">
+                            <div style="font-weight: 500; color: #fff; margin-bottom: 4px;"
+                                 title="{{ market.question }}">
+                                {{ market.question[:60] }}{% if market.question|length > 60 %}...{% endif %}
+                            </div>
+                            <div class="text-muted" style="font-size: 0.8rem;">
+                                {{ market.answer1 }} / {{ market.answer2 }}
+                            </div>
+                        </div>
+                    </td>
+                    <td>
+                        <span class="text-success">{{ "%.2f"|format(market.best_bid or 0) }}</span>
+                        /
+                        <span class="text-danger">{{ "%.2f"|format(market.best_ask or 0) }}</span>
+                    </td>
+                    <td>
+                        {% if market.gm_reward_per_100 %}
+                        <span class="{% if market.gm_reward_per_100 > 1 %}text-success{% endif %}">
+                            ${{ "%.2f"|format(market.gm_reward_per_100) }}
+                        </span>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if market.volatility_sum is not none %}
+                        <span class="{% if market.volatility_sum < 10 %}text-success{% elif market.volatility_sum < 20 %}text-warning{% else %}text-danger{% endif %}">
+                            {{ "%.1f"|format(market.volatility_sum) }}
+                        </span>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if market.min_size %}
+                        ${{ "%.0f"|format(market.min_size) }}
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if market.neg_risk %}
+                        <span class="badge badge-info">Yes</span>
+                        {% else %}
+                        <span class="text-muted">No</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <form method="post" action="/markets/toggle" style="display: inline;">
+                            <input type="hidden" name="question" value="{{ market.question }}">
+                            {% if is_selected %}
+                            <input type="hidden" name="action" value="disable">
+                            <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+                            {% else %}
+                            <input type="hidden" name="action" value="enable">
+                            <button type="submit" class="btn btn-primary btn-sm">Add</button>
+                            {% endif %}
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        {% if show_selected %}
+        <h3>No Markets Selected</h3>
+        <p>Search for markets above and add them to start trading.</p>
+        {% elif search %}
+        <h3>No Markets Found</h3>
+        <p>Try a different search term.</p>
+        {% else %}
+        <h3>No Markets Available</h3>
+        <p>Run the data updater to fetch market data.</p>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- Legend -->
+<div class="card mt-20">
+    <div class="card-header">
+        <span class="card-title">Column Legend</span>
+    </div>
+    <div class="grid-3" style="font-size: 0.85rem;">
+        <div>
+            <strong>Bid/Ask:</strong> Best bid and ask prices. Look for spreads you can capture.
+        </div>
+        <div>
+            <strong>Reward/100:</strong> Estimated daily reward per $100 liquidity from Polymarket's incentive program.
+        </div>
+        <div>
+            <strong>Volatility:</strong> Sum of price movements over multiple timeframes. Lower is better for market making.
+        </div>
+        <div>
+            <strong>Min Size:</strong> Minimum order size required for rewards eligibility.
+        </div>
+        <div>
+            <strong>Neg Risk:</strong> Whether market uses negative risk adapter (affects contract calls).
+        </div>
+    </div>
+</div>
+{% endblock %}

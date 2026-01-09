@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+
+{% block title %}Parameters - Poly-Maker{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
+    <h1>Trading Parameters</h1>
+</div>
+
+{% if not db_status.connected %}
+<div class="flash flash-error">
+    Database not connected. Cannot load or save parameters.
+</div>
+{% endif %}
+
+{% if params_by_type %}
+<!-- Parameter Groups -->
+{% for param_type, params in params_by_type.items() %}
+<div class="card mb-20">
+    <div class="card-header">
+        <span class="card-title">
+            {{ param_type|title }} Parameters
+        </span>
+        <span class="badge badge-info">{{ params|length }} params</span>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Parameter</th>
+                <th>Value</th>
+                <th>Description</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for param_name, param_value in params.items() %}
+            <tr>
+                <td>
+                    <code style="background: #333; padding: 2px 6px; border-radius: 4px;">
+                        {{ param_name }}
+                    </code>
+                </td>
+                <td>
+                    <form method="post" action="/parameters/update" style="display: flex; gap: 10px; align-items: center;">
+                        <input type="hidden" name="param_type" value="{{ param_type }}">
+                        <input type="hidden" name="param_name" value="{{ param_name }}">
+                        <input type="number" name="param_value" value="{{ param_value }}"
+                               step="any" style="width: 120px;">
+                        <button type="submit" class="btn btn-primary btn-sm">Update</button>
+                    </form>
+                </td>
+                <td class="text-muted" style="font-size: 0.85rem;">
+                    {% if param_name == 'stop_loss_threshold' %}
+                    P&L % to trigger stop-loss
+                    {% elif param_name == 'take_profit_threshold' %}
+                    Profit % target for sells
+                    {% elif param_name == 'volatility_threshold' %}
+                    Max volatility to accept trades
+                    {% elif param_name == 'spread_threshold' %}
+                    Spread required for stop-loss
+                    {% elif param_name == 'sleep_period' %}
+                    Hours to pause after stop-loss
+                    {% elif param_name == 'trade_size' %}
+                    Default order size ($)
+                    {% elif param_name == 'max_size' %}
+                    Maximum position size ($)
+                    {% elif param_name == 'min_size' %}
+                    Minimum order size ($)
+                    {% elif param_name == 'max_spread' %}
+                    Maximum spread for incentives
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endfor %}
+
+{% else %}
+<div class="card">
+    <div class="empty-state">
+        <h3>No Parameters Found</h3>
+        <p>Add your first parameter below or run the database schema to add defaults.</p>
+    </div>
+</div>
+{% endif %}
+
+<!-- Add New Parameter -->
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">Add New Parameter</span>
+    </div>
+
+    <form method="post" action="/parameters/add">
+        <div class="grid-3">
+            <div class="form-group">
+                <label>Parameter Type</label>
+                <select name="param_type">
+                    <option value="default">default</option>
+                    <option value="crypto">crypto</option>
+                    <option value="sports">sports</option>
+                    <option value="politics">politics</option>
+                    <option value="high_volatility">high_volatility</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Parameter Name</label>
+                <input type="text" name="param_name" placeholder="e.g., stop_loss_threshold" required>
+            </div>
+            <div class="form-group">
+                <label>Value</label>
+                <input type="number" name="param_value" step="any" placeholder="0.0" required>
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary">Add Parameter</button>
+    </form>
+</div>
+
+<!-- Parameter Reference -->
+<div class="card mt-20">
+    <div class="card-header">
+        <span class="card-title">Parameter Reference</span>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Parameter</th>
+                <th>Typical Range</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>stop_loss_threshold</code></td>
+                <td>-0.05 to -0.15</td>
+                <td>When position P&L drops below this %, trigger stop-loss. More negative = more tolerance.</td>
+            </tr>
+            <tr>
+                <td><code>take_profit_threshold</code></td>
+                <td>0.03 to 0.10</td>
+                <td>When position profit exceeds this %, place sell orders. Higher = hold longer.</td>
+            </tr>
+            <tr>
+                <td><code>volatility_threshold</code></td>
+                <td>10 to 30</td>
+                <td>Skip markets with volatility_sum above this. Lower = safer but fewer opportunities.</td>
+            </tr>
+            <tr>
+                <td><code>spread_threshold</code></td>
+                <td>0.02 to 0.05</td>
+                <td>Minimum spread to execute stop-loss. Prevents selling into thin orderbooks.</td>
+            </tr>
+            <tr>
+                <td><code>sleep_period</code></td>
+                <td>1 to 24</td>
+                <td>Hours to pause trading on a market after stop-loss. Prevents immediate re-entry.</td>
+            </tr>
+            <tr>
+                <td><code>trade_size</code></td>
+                <td>10 to 100</td>
+                <td>Default order size in USDC.</td>
+            </tr>
+            <tr>
+                <td><code>max_size</code></td>
+                <td>100 to 1000</td>
+                <td>Maximum position size per market in USDC.</td>
+            </tr>
+            <tr>
+                <td><code>min_size</code></td>
+                <td>5 to 20</td>
+                <td>Minimum order size. Must meet Polymarket's reward threshold.</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}

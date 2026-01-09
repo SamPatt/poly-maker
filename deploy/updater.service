@@ -1,0 +1,26 @@
+[Unit]
+Description=Poly-Maker Market Data Updater
+After=network.target
+
+[Service]
+Type=simple
+User=polymaker
+WorkingDirectory=/home/polymaker/poly-maker
+ExecStart=/home/polymaker/.local/bin/uv run python update_markets.py
+Restart=always
+RestartSec=60
+StandardOutput=append:/var/log/polymaker/updater.log
+StandardError=append:/var/log/polymaker/updater.log
+
+# Environment
+Environment=PATH=/home/polymaker/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/polymaker/poly-maker/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

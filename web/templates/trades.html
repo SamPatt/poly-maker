@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block title %}Trades - Poly-Maker{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
+    <h1>Trade History</h1>
+    <div>
+        <span class="badge {% if total_pnl >= 0 %}badge-success{% else %}badge-danger{% endif %}"
+              style="font-size: 0.9rem; padding: 6px 12px;">
+            Today: ${{ "%.2f"|format(total_pnl) }}
+        </span>
+    </div>
+</div>
+
+<!-- Filters -->
+<div class="card mb-20">
+    <form method="get" action="/trades">
+        <div class="search-bar">
+            <div class="form-group" style="margin-bottom: 0; width: 150px;">
+                <label style="margin-bottom: 4px;">Show last</label>
+                <select name="limit" onchange="this.form.submit()">
+                    <option value="25" {% if limit == 25 %}selected{% endif %}>25 trades</option>
+                    <option value="50" {% if limit == 50 %}selected{% endif %}>50 trades</option>
+                    <option value="100" {% if limit == 100 %}selected{% endif %}>100 trades</option>
+                    <option value="250" {% if limit == 250 %}selected{% endif %}>250 trades</option>
+                </select>
+            </div>
+        </div>
+    </form>
+</div>
+
+<!-- Trades Table -->
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">
+            Recent Trades
+            <span class="text-muted" style="font-weight: normal;">({{ trades|length }})</span>
+        </span>
+    </div>
+
+    {% if trades %}
+    <div style="overflow-x: auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Token</th>
+                    <th>Side</th>
+                    <th>Price</th>
+                    <th>Size</th>
+                    <th>Value</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for trade in trades %}
+                <tr>
+                    <td class="text-muted">
+                        {% if trade.timestamp %}
+                        <div>{{ trade.timestamp.strftime('%Y-%m-%d') }}</div>
+                        <div style="font-size: 0.8rem;">{{ trade.timestamp.strftime('%H:%M:%S') }}</div>
+                        {% else %}
+                        N/A
+                        {% endif %}
+                    </td>
+                    <td>
+                        <code style="background: #333; padding: 2px 6px; border-radius: 4px; font-size: 0.8rem;">
+                            {{ trade.token[:16] }}...
+                        </code>
+                    </td>
+                    <td>
+                        <span class="badge {% if trade.side == 'BUY' %}badge-success{% else %}badge-danger{% endif %}">
+                            {{ trade.side }}
+                        </span>
+                    </td>
+                    <td>{{ "%.4f"|format(trade.price) }}</td>
+                    <td>{{ "%.2f"|format(trade.size) }}</td>
+                    <td>${{ "%.2f"|format(trade.price * trade.size) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <h3>No Trades Yet</h3>
+        <p>Trade history will appear here as the bot executes orders.</p>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Trade Stats -->
+{% if trades %}
+<div class="card mt-20">
+    <div class="card-header">
+        <span class="card-title">Quick Stats</span>
+    </div>
+    <div class="grid-4">
+        <div class="stat">
+            <div class="stat-value">{{ trades|length }}</div>
+            <div class="stat-label">Total Trades</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value text-success">
+                {{ trades|selectattr('side', 'equalto', 'BUY')|list|length }}
+            </div>
+            <div class="stat-label">Buys</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value text-danger">
+                {{ trades|selectattr('side', 'equalto', 'SELL')|list|length }}
+            </div>
+            <div class="stat-label">Sells</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value">
+                ${{ "%.2f"|format(trades|sum(attribute='size')) }}
+            </div>
+            <div class="stat-label">Total Volume</div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
