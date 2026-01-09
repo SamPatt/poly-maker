@@ -47,16 +47,27 @@ if not os.path.exists('positions/'):
 def send_buy_order(order):
     """
     Create a BUY order for a specific token.
-    
+
     This function:
-    1. Cancels any existing orders for the token
-    2. Checks if the order price is within acceptable range
-    3. Creates a new buy order if conditions are met
-    
+    1. Checks if wallet has sufficient available balance
+    2. Cancels any existing orders for the token
+    3. Checks if the order price is within acceptable range
+    4. Creates a new buy order if conditions are met
+
     Args:
         order (dict): Order details including token, price, size, and market parameters
     """
     client = global_state.client
+
+    # Check available balance before placing order
+    order_cost = order['price'] * order['size']
+    available_balance = global_state.wallet_balance - global_state.committed_buy_orders
+
+    if available_balance < order_cost + global_state.MIN_AVAILABLE_BALANCE:
+        print(f"[BALANCE CHECK] Insufficient funds for buy order. "
+              f"Available: ${available_balance:.2f}, Order cost: ${order_cost:.2f}, "
+              f"Min reserve: ${global_state.MIN_AVAILABLE_BALANCE:.2f}")
+        return
 
     # Only cancel existing orders if we need to make significant changes
     existing_buy_size = order['orders']['buy']['size']
@@ -99,6 +110,8 @@ def send_buy_order(order):
 
             if DRY_RUN:
                 print(f"[DRY RUN] Would create BUY order: {order['token']} @ {order['price']} x {order['size']}")
+                # Track committed funds even in dry-run mode for testing
+                global_state.committed_buy_orders += order['price'] * order['size']
             else:
                 client.create_order(
                     order['token'],
@@ -107,6 +120,9 @@ def send_buy_order(order):
                     order['size'],
                     True if order['neg_risk'] == 'TRUE' else False
                 )
+                # Track committed funds immediately to prevent over-ordering
+                global_state.committed_buy_orders += order['price'] * order['size']
+
                 # Send Telegram alert and record trade
                 if TELEGRAM_ENABLED:
                     market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
@@ -442,8 +458,11 @@ async def perform_trade(market):
                         if row['3_hour'] > params['volatility_threshold'] or price_change >= 0.05:
                             print(f'3 Hour Volatility of {row["3_hour"]} is greater than max volatility of '
                                   f'{params["volatility_threshold"]} or price of {order["price"]} is outside '
-                                  f'0.05 of {sheet_value}. Cancelling all orders')
-                            client.cancel_all_asset(order['token'])
+                                  f'0.05 of {sheet_value}. Skipping new orders.')
+                            # Only cancel if we have orders - don't cancel repeatedly
+                            if orders['buy']['size'] > 0:
+                                print(f'Cancelling existing orders due to volatility/price conditions')
+                                client.cancel_all_asset(order['token'])
                         else:
                             # Check for reverse position (holding opposite outcome)
                             rev_token = global_state.REVERSE_TOKENS[str(token)]
@@ -462,7 +481,9 @@ async def perform_trade(market):
                             if overall_ratio < 0:
                                 send_buy = False
                                 print(f"Not sending a buy order because overall ratio is {overall_ratio}")
-                                client.cancel_all_asset(order['token'])
+                                # Only cancel if we have orders - don't cancel repeatedly
+                                if orders['buy']['size'] > 0:
+                                    client.cancel_all_asset(order['token'])
                             else:
                                 # Place new buy order if any of these conditions are met:
                                 # 1. We can get a better price than current order

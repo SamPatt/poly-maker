@@ -13,8 +13,12 @@ from poly_data.websocket_handlers import connect_market_websocket, connect_user_
 import poly_data.global_state as global_state
 from poly_data.data_processing import remove_from_performing
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
+
+# Balance update interval in seconds (5 minutes)
+BALANCE_UPDATE_INTERVAL = 300
 
 # Dry-run mode check
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
@@ -40,6 +44,63 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
+
+def update_wallet_balance():
+    """
+    Fetch current USDC wallet balance from blockchain.
+    Only updates if enough time has passed since last check to avoid rate limiting.
+    """
+    try:
+        current_time = time.time()
+
+        # Check if we need to update (first time or interval passed)
+        if (global_state.last_balance_check is None or
+            current_time - global_state.last_balance_check > BALANCE_UPDATE_INTERVAL):
+
+            balance = global_state.client.get_usdc_balance()
+            global_state.wallet_balance = balance
+            global_state.last_balance_check = current_time
+
+            # Also update committed funds when refreshing balance
+            update_committed_funds()
+
+            print(f"Wallet balance updated: ${balance:.2f} USDC, "
+                  f"Committed: ${global_state.committed_buy_orders:.2f}, "
+                  f"Available: ${balance - global_state.committed_buy_orders:.2f}")
+    except Exception as e:
+        print(f"Error updating wallet balance: {e}")
+
+
+def update_committed_funds():
+    """
+    Calculate total funds committed to open buy orders.
+    This is tracked locally to determine available balance for new orders.
+    """
+    try:
+        total_committed = 0.0
+
+        # Sum up all open buy orders
+        for token_id, order_data in global_state.orders.items():
+            buy_order = order_data.get('buy', {})
+            price = buy_order.get('price', 0)
+            size = buy_order.get('size', 0)
+
+            # Committed amount = price * size (what we'd pay if filled)
+            if price > 0 and size > 0:
+                total_committed += price * size
+
+        global_state.committed_buy_orders = total_committed
+    except Exception as e:
+        print(f"Error calculating committed funds: {e}")
+
+
+def get_available_balance():
+    """
+    Get available balance for new orders (wallet balance - committed funds).
+    """
+    return global_state.wallet_balance - global_state.committed_buy_orders
+
+
 def update_once():
     """
     Initialize the application state by fetching market data, positions, and orders.
@@ -47,6 +108,9 @@ def update_once():
     update_markets()    # Get market information from Google Sheets
     update_positions()  # Get current positions from Polymarket
     update_orders()     # Get current orders from Polymarket
+
+    # Fetch initial wallet balance
+    update_wallet_balance()
 
 def remove_from_pending():
     """
@@ -91,6 +155,12 @@ def update_periodically():
             # Update positions and orders every cycle
             update_positions(avgOnly=True)  # Only update average price, not position size
             update_orders()
+
+            # Update committed funds after orders refresh (fast, local calculation)
+            update_committed_funds()
+
+            # Update wallet balance periodically (blockchain call, rate-limited internally)
+            update_wallet_balance()
 
             # Update market data every 6th cycle (30 seconds)
             if i % 6 == 0:

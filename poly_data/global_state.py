@@ -47,3 +47,18 @@ orders = {}
 # Format: {token_id: {'size': float, 'avgPrice': float}}
 positions = {}
 
+# ============ Wallet Balance Tracking ============
+
+# Current USDC balance in wallet
+wallet_balance = 0.0
+
+# Timestamp of last balance check
+last_balance_check = None
+
+# Minimum available balance before blocking new buys (in USDC)
+MIN_AVAILABLE_BALANCE = 10.0
+
+# Estimated committed funds from open buy orders
+# This is tracked locally to avoid API calls on every trade
+committed_buy_orders = 0.0
+
