@@ -21,6 +21,7 @@ cp .env.example .env              # Create environment file
 uv run python main.py             # Run the market making bot
 uv run python update_markets.py   # Update market data (run continuously, separate IP recommended)
 uv run python update_stats.py     # Update account statistics
+uv run python -m rebates.rebates_bot  # Run 15-minute rebates bot (separate process)
 ```
 
 ### Development
@@ -84,6 +85,12 @@ node poly_merger/merge.js [amount] [condition_id] [is_neg_risk]
 **`web/`** - Web UI for configuration
 - `app.py` - FastAPI application
 - `templates/` - Jinja2 HTML templates
+
+**`rebates/`** - 15-Minute Crypto Rebates Bot
+- `rebates_bot.py` - Main entry point, runs continuously to find and trade 15-minute markets
+- `market_finder.py` - Discovers upcoming BTC/ETH/SOL 15-minute Up/Down markets from Gamma API
+- `strategy.py` - Delta-neutral order placement (buys both Up and Down at 50%)
+- `config.py` - Configuration (trade size, safety buffer, dry run mode)
 
 ## VPS Deployment
 
@@ -257,6 +264,54 @@ ssh trading "curl -s http://localhost:8080/api/status"
 
 **Note:** When running commands via SSH that start background processes, use `screen -dmS` rather than `nohup`. The `nohup` approach can cause SSH exit code 255 issues.
 
+### 15-Minute Rebates Bot
+
+The rebates bot runs separately from the main trading bot to capture maker rebates on Polymarket's 15-minute crypto Up/Down markets.
+
+**Strategy:**
+- Finds upcoming BTC/ETH/SOL 15-minute markets
+- Places delta-neutral orders (both Up and Down at 50% price)
+- Earns maker rebates when takers fill orders (up to 1.56% at 50%)
+- No directional risk - profits regardless of market outcome
+
+**CRITICAL:** Only trades on UPCOMING markets (before eventStartTime), never on LIVE markets.
+
+**Running the Rebates Bot:**
+```bash
+# SSH into trading server
+ssh trading
+
+# Start in screen session (recommended)
+screen -dmS rebates bash -c 'cd /home/polymaker/poly-maker && source .venv/bin/activate && python -u -m rebates.rebates_bot 2>&1 | tee /tmp/rebates.log'
+
+# Attach to see live output
+screen -r rebates
+
+# View logs
+tail -f /tmp/rebates.log
+
+# Stop the bot
+screen -S rebates -X quit
+```
+
+**Configuration (via environment variables):**
+- `REBATES_DRY_RUN=true` - Simulate trades without executing (default: true)
+- `REBATES_TRADE_SIZE=10` - USDC per side (default: 10)
+- `REBATES_SAFETY_BUFFER=30` - Seconds before market start to stop trading (default: 30)
+- `REBATES_CHECK_INTERVAL=60` - Seconds between market scans (default: 60)
+
+**Testing:**
+```bash
+# Dry run (default) - watch logs for market discovery
+REBATES_DRY_RUN=true python -m rebates.rebates_bot
+
+# Small capital test
+REBATES_DRY_RUN=false REBATES_TRADE_SIZE=5 python -m rebates.rebates_bot
+
+# Full operation
+REBATES_DRY_RUN=false REBATES_TRADE_SIZE=10 python -m rebates.rebates_bot
+```
+
 ### State Management
 
 Global state in `poly_data/global_state.py` tracks:
@@ -302,6 +357,12 @@ Key settings in `.env`:
 - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` - PostgreSQL connection
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` - Telegram alerts (optional)
 - `DRY_RUN` - Set to `true` to simulate trades without executing
+
+15-Minute Rebates Bot settings:
+- `REBATES_DRY_RUN` - Set to `true` to simulate rebates trades (default: true)
+- `REBATES_TRADE_SIZE` - USDC per side for rebates bot (default: 10)
+- `REBATES_SAFETY_BUFFER` - Seconds before market start to stop trading (default: 30)
+- `REBATES_CHECK_INTERVAL` - Seconds between market scans (default: 60)
 
 ## External Dependencies
 
