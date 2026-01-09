@@ -110,53 +110,58 @@ ssh -i ~/.ssh/hetzner root@<server-ip>
 ### Service Management
 
 **Trading Bot (on trading server):**
+
+The bot runs in a `screen` session so it persists after SSH disconnect.
+
 ```bash
 # SSH into trading server
 ssh trading
+
+# Start bot in screen session (recommended)
+screen -dmS trading bash -c 'cd /home/polymaker/poly-maker && source .venv/bin/activate && python -u main.py 2>&1 | tee /tmp/trading.log'
+
+# Attach to see live output
+screen -r trading
+# Press Ctrl+A, then D to detach without stopping
+
+# View logs without attaching
+tail -f /tmp/trading.log
+
+# Check if running
+screen -ls              # Shows active screen sessions
+pgrep -f 'python.*main.py'
+
+# Stop the bot
+screen -S trading -X quit
 
 # Start manually (foreground, useful for debugging)
 cd /home/polymaker/poly-maker
 source .venv/bin/activate
 python main.py
-
-# Start in background
-cd /home/polymaker/poly-maker
-source .venv/bin/activate
-nohup python -u main.py > /tmp/trading.log 2>&1 &
-
-# Stop
-pkill -f 'python.*main.py'
-
-# Check if running
-pgrep -f 'python.*main.py'
-
-# View logs
-tail -f /tmp/trading.log
 ```
 
 **Data Updater (on updater server):**
+
 ```bash
 # SSH into updater server
 ssh updater
 
-# Start manually
-cd /home/polymaker/poly-maker
-source .venv/bin/activate
-python update_markets.py
+# Start updater in screen session (recommended)
+screen -dmS updater bash -c 'cd /home/polymaker/poly-maker && source .venv/bin/activate && python -u update_markets.py 2>&1 | tee /tmp/updater.log'
 
-# Start in background
-cd /home/polymaker/poly-maker
-source .venv/bin/activate
-nohup python -u update_markets.py > /tmp/updater.log 2>&1 &
+# Attach to see live output
+screen -r updater
+# Press Ctrl+A, then D to detach without stopping
 
-# Stop
-pkill -f 'python.*update_markets.py'
+# View logs without attaching
+tail -f /tmp/updater.log
 
 # Check if running
+screen -ls
 pgrep -f 'update_markets.py'
 
-# View logs
-tail -f /tmp/updater.log
+# Stop the updater
+screen -S updater -X quit
 ```
 
 **Using systemd (if services are installed):**
