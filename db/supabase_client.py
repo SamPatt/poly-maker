@@ -214,7 +214,7 @@ def upsert_all_markets(df: pd.DataFrame) -> None:
         "bid_reward_per_100", "ask_reward_per_100", "volatility_sum",
         "volatility_reward_ratio", "min_size", "hour_1", "hour_3", "hour_6",
         "hour_12", "hour_24", "day_7", "day_14", "day_30", "volatility_price",
-        "max_spread", "tick_size"
+        "max_spread", "tick_size", "composite_score"
     ]
 
     available_cols = [c for c in columns if c in df.columns]
