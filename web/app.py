@@ -122,9 +122,17 @@ async def markets_list(
     show_selected: bool = False,
     sort: str = "score",
     limit: int = 100,
-    max_volatility: Optional[float] = None
+    max_volatility: Optional[str] = None
 ):
     """Browse and select markets for trading."""
+    # Convert max_volatility from string to float, handling empty strings
+    max_vol_float: Optional[float] = None
+    if max_volatility and max_volatility.strip():
+        try:
+            max_vol_float = float(max_volatility)
+        except ValueError:
+            pass
+
     db_status = get_db_status()
 
     all_markets = []
@@ -160,11 +168,11 @@ async def markets_list(
                         SELECT {base_cols}
                         FROM all_markets
                         WHERE LOWER(question) LIKE LOWER(%(search)s)
-                        {'AND volatility_sum <= %(max_vol)s' if max_volatility else ''}
+                        {'AND volatility_sum <= %(max_vol)s' if max_vol_float else ''}
                         ORDER BY {order_by}
                         LIMIT %(limit)s
                     """
-                    cursor.execute(query, {"search": f"%{search}%", "max_vol": max_volatility, "limit": limit})
+                    cursor.execute(query, {"search": f"%{search}%", "max_vol": max_vol_float, "limit": limit})
                 elif show_selected:
                     query = f"""
                         SELECT m.question, m.answer1, m.answer2, m.best_bid, m.best_ask,
@@ -181,11 +189,11 @@ async def markets_list(
                         SELECT {base_cols}
                         FROM all_markets
                         WHERE 1=1
-                        {'AND volatility_sum <= %(max_vol)s' if max_volatility else ''}
+                        {'AND volatility_sum <= %(max_vol)s' if max_vol_float else ''}
                         ORDER BY {order_by}
                         LIMIT %(limit)s
                     """
-                    cursor.execute(query, {"max_vol": max_volatility, "limit": limit})
+                    cursor.execute(query, {"max_vol": max_vol_float, "limit": limit})
                 all_markets = cursor.fetchall() or []
 
         except Exception as e:
@@ -202,7 +210,7 @@ async def markets_list(
         "selected_count": len(selected_questions),
         "sort": sort,
         "limit": limit,
-        "max_volatility": max_volatility,
+        "max_volatility": max_vol_float,  # Pass float for template comparisons
     })
 
 
