@@ -108,24 +108,113 @@ ssh -i ~/.ssh/hetzner root@<server-ip>
 ```
 
 ### Service Management
+
+**Trading Bot (on trading server):**
 ```bash
-# Start/stop/restart services
+# SSH into trading server
+ssh trading
+
+# Start manually (foreground, useful for debugging)
+cd /home/polymaker/poly-maker
+source .venv/bin/activate
+python main.py
+
+# Start in background
+cd /home/polymaker/poly-maker
+source .venv/bin/activate
+nohup python -u main.py > /tmp/trading.log 2>&1 &
+
+# Stop
+pkill -f 'python.*main.py'
+
+# Check if running
+pgrep -f 'python.*main.py'
+
+# View logs
+tail -f /tmp/trading.log
+```
+
+**Data Updater (on updater server):**
+```bash
+# SSH into updater server
+ssh updater
+
+# Start manually
+cd /home/polymaker/poly-maker
+source .venv/bin/activate
+python update_markets.py
+
+# Start in background
+cd /home/polymaker/poly-maker
+source .venv/bin/activate
+nohup python -u update_markets.py > /tmp/updater.log 2>&1 &
+
+# Stop
+pkill -f 'python.*update_markets.py'
+
+# Check if running
+pgrep -f 'update_markets.py'
+
+# View logs
+tail -f /tmp/updater.log
+```
+
+**Using systemd (if services are installed):**
+```bash
 sudo systemctl start trading
 sudo systemctl stop trading
 sudo systemctl restart trading
+sudo systemctl status trading
+sudo journalctl -u trading -f
+```
+
+### Web UI Management
+
+The web UI runs on port 8080, accessible only via Tailscale.
+
+**Accessing the Web UI:**
+```bash
+# From your local machine (must be on the same Tailscale network)
+http://trading:8080           # Using Tailscale hostname
+http://100.84.112.124:8080    # Using Tailscale IP directly
+```
+
+**Starting the Web UI (on trading server):**
+```bash
+# SSH into trading server first
+ssh trading
+
+# Start manually (foreground)
+cd /home/polymaker/poly-maker
+source .venv/bin/activate
+uvicorn web.app:app --host 0.0.0.0 --port 8080
+
+# Start in background
+cd /home/polymaker/poly-maker
+source .venv/bin/activate
+nohup uvicorn web.app:app --host 0.0.0.0 --port 8080 > /tmp/webui.log 2>&1 &
+```
+
+**Stopping the Web UI:**
+```bash
+# Find and kill the process
+pkill -f 'uvicorn.*app:app'
+
+# Or find PID and kill manually
+pgrep -f 'uvicorn.*app:app'
+kill <PID>
+```
+
+**Checking Web UI status:**
+```bash
+# Check if running
+pgrep -f 'uvicorn.*app:app'
+
+# Test locally on server
+curl http://localhost:8080/api/status
 
 # View logs
-sudo tail -f /var/log/polymaker/trading.log
-sudo journalctl -u trading -f
-
-# Check status
-sudo systemctl status trading
-```
-
-### Web UI Access
-The web UI runs on port 8080, accessible only via Tailscale:
-```
-http://trading:8080  # Using Tailscale hostname
+tail -f /tmp/webui.log
 ```
 
 ### State Management
