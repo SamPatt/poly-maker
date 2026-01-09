@@ -4,7 +4,43 @@ import os
 import requests
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 warnings.filterwarnings("ignore")
+
+
+def fetch_event_slug(market_slug):
+    """Fetch event_slug from Gamma API for a given market_slug."""
+    try:
+        resp = requests.get(
+            f"https://gamma-api.polymarket.com/markets?slug={market_slug}",
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and len(data) > 0 and 'events' in data[0]:
+                events = data[0]['events']
+                if events and len(events) > 0:
+                    return events[0].get('slug', '')
+    except Exception:
+        pass
+    return ''
+
+
+def add_event_slugs(df, max_workers=10):
+    """Add event_slug column to dataframe by fetching from Gamma API."""
+    if 'market_slug' not in df.columns:
+        df['event_slug'] = ''
+        return df
+
+    market_slugs = df['market_slug'].tolist()
+
+    # Fetch event slugs in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        event_slugs = list(executor.map(fetch_event_slug, market_slugs))
+
+    df['event_slug'] = event_slugs
+    print(f"Fetched event slugs for {sum(1 for s in event_slugs if s)} / {len(event_slugs)} markets")
+    return df
 
 
 if not os.path.exists('data'):

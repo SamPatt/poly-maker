@@ -83,7 +83,7 @@
                 <tr style="{% if is_selected %}background: rgba(0, 212, 170, 0.05);{% endif %}">
                     <td>
                         <div style="max-width: 400px;">
-                            <a href="https://polymarket.com/event/{{ market.market_slug }}"
+                            <a href="https://polymarket.com/event/{{ market.event_slug or market.market_slug }}"
                                target="_blank"
                                style="font-weight: 500; color: #fff; margin-bottom: 4px; text-decoration: none;"
                                title="{{ market.question }}"

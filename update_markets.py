@@ -5,7 +5,7 @@ import traceback
 from dotenv import load_dotenv
 
 from data_updater.trading_utils import get_clob_client
-from data_updater.find_markets import get_sel_df, get_all_markets, get_all_results, get_markets, add_volatility_to_df
+from data_updater.find_markets import get_sel_df, get_all_markets, get_all_results, get_markets, add_volatility_to_df, add_event_slugs
 
 load_dotenv()
 
@@ -157,7 +157,7 @@ def fetch_and_process_data():
                      'volatility_sum', 'volatilty/reward', 'min_size',
                      '1_hour', '3_hour', '6_hour', '12_hour', '24_hour', '7_day', '30_day',
                      'best_bid', 'best_ask', 'volatility_price', 'max_spread', 'tick_size',
-                     'neg_risk', 'market_slug', 'token1', 'token2', 'condition_id']]
+                     'neg_risk', 'market_slug', 'event_slug', 'token1', 'token2', 'condition_id']]
 
     # Calculate composite score for smart ranking
     def calculate_composite_score(df):
@@ -210,6 +210,10 @@ def fetch_and_process_data():
         return scored_df
 
     new_df = calculate_composite_score(new_df)
+
+    # Fetch event slugs from Gamma API (for clickable links in web UI)
+    print("Fetching event slugs from Gamma API...")
+    new_df = add_event_slugs(new_df)
 
     # Create volatility-filtered subset
     volatility_df = new_df.copy()

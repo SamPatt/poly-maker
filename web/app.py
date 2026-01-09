@@ -161,7 +161,7 @@ async def markets_list(
             with get_db_cursor(commit=False) as cursor:
                 base_cols = """question, answer1, answer2, best_bid, best_ask,
                                gm_reward_per_100, volatility_sum, min_size, neg_risk,
-                               composite_score, market_slug"""
+                               composite_score, market_slug, event_slug"""
 
                 if search:
                     query = f"""
@@ -177,7 +177,7 @@ async def markets_list(
                     query = f"""
                         SELECT m.question, m.answer1, m.answer2, m.best_bid, m.best_ask,
                                m.gm_reward_per_100, m.volatility_sum, m.min_size, m.neg_risk,
-                               m.composite_score, m.market_slug
+                               m.composite_score, m.market_slug, m.event_slug
                         FROM all_markets m
                         INNER JOIN selected_markets s ON m.question = s.question
                         WHERE s.enabled = true

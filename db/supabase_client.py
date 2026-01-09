@@ -230,7 +230,7 @@ def upsert_all_markets(df: pd.DataFrame) -> None:
     # Get column names that exist in the dataframe
     columns = [
         "question", "answer1", "answer2", "token1", "token2", "condition_id",
-        "market_slug", "neg_risk", "spread", "best_bid", "best_ask",
+        "market_slug", "event_slug", "neg_risk", "spread", "best_bid", "best_ask",
         "rewards_daily_rate", "gm_reward_per_100", "sm_reward_per_100",
         "bid_reward_per_100", "ask_reward_per_100", "volatility_sum",
         "volatility_reward_ratio", "min_size", "hour_1", "hour_3", "hour_6",
@@ -279,7 +279,7 @@ def upsert_volatility_markets(df: pd.DataFrame) -> None:
     # Select only columns that exist in volatility_markets table
     columns = [
         "question", "answer1", "answer2", "token1", "token2",
-        "condition_id", "market_slug", "neg_risk", "spread",
+        "condition_id", "market_slug", "event_slug", "neg_risk", "spread",
         "best_bid", "best_ask", "rewards_daily_rate", "gm_reward_per_100",
         "volatility_sum", "min_size", "max_spread", "tick_size"
     ]
