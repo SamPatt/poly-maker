@@ -159,12 +159,64 @@ def fetch_and_process_data():
                      'best_bid', 'best_ask', 'volatility_price', 'max_spread', 'tick_size',
                      'neg_risk', 'market_slug', 'token1', 'token2', 'condition_id']]
 
+    # Calculate composite score for smart ranking
+    def calculate_composite_score(df):
+        """Calculate a composite score balancing reward, volatility, and price position."""
+        scored_df = df.copy()
+
+        # Normalize reward (higher is better)
+        mean_gm = scored_df['gm_reward_per_100'].mean()
+        std_gm = scored_df['gm_reward_per_100'].std()
+        if std_gm > 0:
+            scored_df['norm_reward'] = (scored_df['gm_reward_per_100'] - mean_gm) / std_gm
+        else:
+            scored_df['norm_reward'] = 0
+
+        # Normalize volatility (lower is better, so we negate)
+        mean_vol = scored_df['volatility_sum'].mean()
+        std_vol = scored_df['volatility_sum'].std()
+        if std_vol > 0:
+            scored_df['norm_volatility'] = -((scored_df['volatility_sum'] - mean_vol) / std_vol)
+        else:
+            scored_df['norm_volatility'] = 0
+
+        # Price position score (prices near 0.10-0.25 or 0.75-0.90 are better)
+        def price_score(bid, ask):
+            score = 0
+            if 0.1 <= bid <= 0.25:
+                score += (0.25 - bid) / 0.15
+            elif 0.75 <= bid <= 0.9:
+                score += (bid - 0.75) / 0.15
+            if 0.1 <= ask <= 0.25:
+                score += (0.25 - ask) / 0.15
+            elif 0.75 <= ask <= 0.9:
+                score += (ask - 0.75) / 0.15
+            return score
+
+        scored_df['price_score'] = scored_df.apply(
+            lambda row: price_score(row['best_bid'] or 0.5, row['best_ask'] or 0.5), axis=1
+        )
+
+        # Composite: reward + inverse volatility + price position
+        scored_df['composite_score'] = (
+            scored_df['norm_reward'] +
+            scored_df['norm_volatility'] +
+            scored_df['price_score']
+        )
+
+        # Drop intermediate columns
+        scored_df = scored_df.drop(columns=['norm_reward', 'norm_volatility', 'price_score'])
+
+        return scored_df
+
+    new_df = calculate_composite_score(new_df)
+
     # Create volatility-filtered subset
     volatility_df = new_df.copy()
     volatility_df = volatility_df[new_df['volatility_sum'] < 20]
-    volatility_df = volatility_df.sort_values('gm_reward_per_100', ascending=False)
+    volatility_df = volatility_df.sort_values('composite_score', ascending=False)
 
-    new_df = new_df.sort_values('gm_reward_per_100', ascending=False)
+    new_df = new_df.sort_values('composite_score', ascending=False)
 
     print(f'{pd.to_datetime("now")}: Fetched select market of length {len(new_df)}.')
 

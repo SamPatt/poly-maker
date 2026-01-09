@@ -115,12 +115,28 @@ async def dashboard(request: Request):
 # ============== Markets ==============
 
 @app.get("/markets", response_class=HTMLResponse)
-async def markets_list(request: Request, search: str = "", show_selected: bool = False):
+async def markets_list(
+    request: Request,
+    search: str = "",
+    show_selected: bool = False,
+    sort: str = "score",
+    limit: int = 100,
+    max_volatility: Optional[float] = None
+):
     """Browse and select markets for trading."""
     db_status = get_db_status()
 
     all_markets = []
     selected_questions = set()
+
+    # Map sort options to SQL
+    sort_options = {
+        "score": "composite_score DESC NULLS LAST",
+        "reward": "gm_reward_per_100 DESC NULLS LAST",
+        "volatility": "volatility_sum ASC NULLS LAST",
+        "spread": "(best_ask - best_bid) ASC NULLS LAST",
+    }
+    order_by = sort_options.get(sort, sort_options["score"])
 
     if db_status["connected"]:
         try:
@@ -132,34 +148,43 @@ async def markets_list(request: Request, search: str = "", show_selected: bool =
                 rows = cursor.fetchall()
                 selected_questions = {row["question"] for row in rows}
 
-            # Get all markets with optional search
+            # Build query with filters
             with get_db_cursor(commit=False) as cursor:
+                base_cols = """question, answer1, answer2, best_bid, best_ask,
+                               gm_reward_per_100, volatility_sum, min_size, neg_risk,
+                               composite_score"""
+
                 if search:
-                    cursor.execute("""
-                        SELECT question, answer1, answer2, best_bid, best_ask,
-                               gm_reward_per_100, volatility_sum, min_size, neg_risk
+                    query = f"""
+                        SELECT {base_cols}
                         FROM all_markets
                         WHERE LOWER(question) LIKE LOWER(%(search)s)
-                        ORDER BY gm_reward_per_100 DESC NULLS LAST
-                        LIMIT 100
-                    """, {"search": f"%{search}%"})
+                        {'AND volatility_sum <= %(max_vol)s' if max_volatility else ''}
+                        ORDER BY {order_by}
+                        LIMIT %(limit)s
+                    """
+                    cursor.execute(query, {"search": f"%{search}%", "max_vol": max_volatility, "limit": limit})
                 elif show_selected:
-                    cursor.execute("""
+                    query = f"""
                         SELECT m.question, m.answer1, m.answer2, m.best_bid, m.best_ask,
-                               m.gm_reward_per_100, m.volatility_sum, m.min_size, m.neg_risk
+                               m.gm_reward_per_100, m.volatility_sum, m.min_size, m.neg_risk,
+                               m.composite_score
                         FROM all_markets m
                         INNER JOIN selected_markets s ON m.question = s.question
                         WHERE s.enabled = true
-                        ORDER BY m.gm_reward_per_100 DESC NULLS LAST
-                    """)
+                        ORDER BY {order_by}
+                    """
+                    cursor.execute(query)
                 else:
-                    cursor.execute("""
-                        SELECT question, answer1, answer2, best_bid, best_ask,
-                               gm_reward_per_100, volatility_sum, min_size, neg_risk
+                    query = f"""
+                        SELECT {base_cols}
                         FROM all_markets
-                        ORDER BY gm_reward_per_100 DESC NULLS LAST
-                        LIMIT 100
-                    """)
+                        WHERE 1=1
+                        {'AND volatility_sum <= %(max_vol)s' if max_volatility else ''}
+                        ORDER BY {order_by}
+                        LIMIT %(limit)s
+                    """
+                    cursor.execute(query, {"max_vol": max_volatility, "limit": limit})
                 all_markets = cursor.fetchall() or []
 
         except Exception as e:
@@ -174,6 +199,9 @@ async def markets_list(request: Request, search: str = "", show_selected: bool =
         "search": search,
         "show_selected": show_selected,
         "selected_count": len(selected_questions),
+        "sort": sort,
+        "limit": limit,
+        "max_volatility": max_volatility,
     })
 
 

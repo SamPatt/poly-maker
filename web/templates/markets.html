@@ -15,15 +15,38 @@
 <!-- Search and Filter -->
 <div class="card mb-20">
     <form method="get" action="/markets">
-        <div class="search-bar">
-            <input type="text" name="search" placeholder="Search markets..." value="{{ search }}">
+        <div class="search-bar" style="flex-wrap: wrap; gap: 15px;">
+            <input type="text" name="search" placeholder="Search markets..." value="{{ search }}" style="flex: 2; min-width: 200px;">
+
+            <select name="sort" style="width: 150px;" onchange="this.form.submit()">
+                <option value="score" {% if sort == 'score' %}selected{% endif %}>Best Score</option>
+                <option value="reward" {% if sort == 'reward' %}selected{% endif %}>Highest Reward</option>
+                <option value="volatility" {% if sort == 'volatility' %}selected{% endif %}>Lowest Volatility</option>
+                <option value="spread" {% if sort == 'spread' %}selected{% endif %}>Tightest Spread</option>
+            </select>
+
+            <select name="max_volatility" style="width: 140px;" onchange="this.form.submit()">
+                <option value="" {% if not max_volatility %}selected{% endif %}>Any Volatility</option>
+                <option value="10" {% if max_volatility == 10 %}selected{% endif %}>Vol &lt; 10</option>
+                <option value="20" {% if max_volatility == 20 %}selected{% endif %}>Vol &lt; 20</option>
+                <option value="50" {% if max_volatility == 50 %}selected{% endif %}>Vol &lt; 50</option>
+            </select>
+
+            <select name="limit" style="width: 100px;" onchange="this.form.submit()">
+                <option value="50" {% if limit == 50 %}selected{% endif %}>50</option>
+                <option value="100" {% if limit == 100 %}selected{% endif %}>100</option>
+                <option value="250" {% if limit == 250 %}selected{% endif %}>250</option>
+                <option value="500" {% if limit == 500 %}selected{% endif %}>500</option>
+            </select>
+
             <label style="display: flex; align-items: center; gap: 8px; color: #e0e0e0; margin: 0; white-space: nowrap;">
                 <input type="checkbox" name="show_selected" value="true" {% if show_selected %}checked{% endif %}
                        style="width: auto;" onchange="this.form.submit()">
-                Show selected only
+                Selected only
             </label>
+
             <button type="submit" class="btn btn-primary">Search</button>
-            {% if search or show_selected %}
+            {% if search or show_selected or max_volatility or sort != 'score' %}
             <a href="/markets" class="btn btn-secondary">Clear</a>
             {% endif %}
         </div>
@@ -44,7 +67,8 @@
         <table>
             <thead>
                 <tr>
-                    <th style="width: 40%;">Market</th>
+                    <th style="width: 35%;">Market</th>
+                    <th>Score</th>
                     <th>Bid/Ask</th>
                     <th>Reward/100</th>
                     <th>Volatility</th>
@@ -67,6 +91,16 @@
                                 {{ market.answer1 }} / {{ market.answer2 }}
                             </div>
                         </div>
+                    </td>
+                    <td>
+                        {% if market.composite_score is not none %}
+                        <span class="{% if market.composite_score > 1 %}text-success{% elif market.composite_score > 0 %}text-warning{% else %}text-muted{% endif %}"
+                              style="font-weight: 600;">
+                            {{ "%.1f"|format(market.composite_score) }}
+                        </span>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
                     </td>
                     <td>
                         <span class="text-success">{{ "%.2f"|format(market.best_bid or 0) }}</span>
