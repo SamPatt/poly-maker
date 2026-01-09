@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -206,7 +207,15 @@ async def markets_list(
 
 
 @app.post("/markets/toggle")
-async def toggle_market(question: str = Form(...), action: str = Form(...)):
+async def toggle_market(
+    question: str = Form(...),
+    action: str = Form(...),
+    return_search: str = Form(""),
+    return_sort: str = Form("score"),
+    return_limit: str = Form("100"),
+    return_max_volatility: str = Form(""),
+    return_show_selected: str = Form("")
+):
     """Enable or disable a market for trading."""
     try:
         from db.supabase_client import add_selected_market, remove_selected_market
@@ -216,7 +225,24 @@ async def toggle_market(question: str = Form(...), action: str = Form(...)):
         else:
             remove_selected_market(question)
 
-        return RedirectResponse(url="/markets?show_selected=true", status_code=303)
+        # Build redirect URL preserving current view state
+        params = []
+        if return_search:
+            params.append(f"search={quote_plus(return_search)}")
+        if return_sort and return_sort != "score":
+            params.append(f"sort={return_sort}")
+        if return_limit and return_limit != "100":
+            params.append(f"limit={return_limit}")
+        if return_max_volatility:
+            params.append(f"max_volatility={return_max_volatility}")
+        if return_show_selected == "true":
+            params.append("show_selected=true")
+
+        redirect_url = "/markets"
+        if params:
+            redirect_url += "?" + "&".join(params)
+
+        return RedirectResponse(url=redirect_url, status_code=303)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

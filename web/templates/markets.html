@@ -142,6 +142,11 @@
                     <td>
                         <form method="post" action="/markets/toggle" style="display: inline;">
                             <input type="hidden" name="question" value="{{ market.question }}">
+                            <input type="hidden" name="return_search" value="{{ search }}">
+                            <input type="hidden" name="return_sort" value="{{ sort }}">
+                            <input type="hidden" name="return_limit" value="{{ limit }}">
+                            <input type="hidden" name="return_max_volatility" value="{{ max_volatility or '' }}">
+                            <input type="hidden" name="return_show_selected" value="{{ 'true' if show_selected else '' }}">
                             {% if is_selected %}
                             <input type="hidden" name="action" value="disable">
                             <button type="submit" class="btn btn-danger btn-sm">Remove</button>
