@@ -126,7 +126,21 @@ def get_all_markets() -> pd.DataFrame:
         rows = cursor.fetchall()
 
     if rows:
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        # Rename columns back to match trading code expectations
+        column_mapping = {
+            "hour_1": "1_hour",
+            "hour_3": "3_hour",
+            "hour_6": "6_hour",
+            "hour_12": "12_hour",
+            "hour_24": "24_hour",
+            "day_7": "7_day",
+            "day_14": "14_day",
+            "day_30": "30_day",
+            "volatility_reward_ratio": "volatilty/reward",
+        }
+        df = df.rename(columns=column_mapping)
+        return df
     return pd.DataFrame()
 
 
