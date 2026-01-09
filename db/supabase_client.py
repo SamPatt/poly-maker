@@ -166,12 +166,19 @@ def get_sheet_df(read_only: Optional[bool] = None) -> Tuple[pd.DataFrame, Dict[s
     # Get hyperparameters
     hyperparams = get_hyperparameters()
 
-    # Ensure each selected market has a valid param_type
-    if "param_type" in result.columns:
-        for idx, row in result.iterrows():
-            param_type = row.get("param_type_x") or row.get("param_type")
-            if param_type not in hyperparams:
-                result.at[idx, "param_type"] = "default"
+    # Merge hyperparameters into each row based on param_type
+    # This allows trading code to access trade_size, max_size, etc. directly from the row
+    for idx, row in result.iterrows():
+        # Determine param_type (handle potential column name conflicts from merge)
+        param_type = row.get("param_type_x") or row.get("param_type") or "default"
+        if param_type not in hyperparams:
+            param_type = "default"
+        result.at[idx, "param_type"] = param_type
+
+        # Merge all parameters for this param_type into the row
+        if param_type in hyperparams:
+            for param_name, param_value in hyperparams[param_type].items():
+                result.at[idx, param_name] = param_value
 
     return result, hyperparams
 
