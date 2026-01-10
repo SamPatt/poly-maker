@@ -351,15 +351,15 @@ def send_rebates_resolution_alert(
     # Determine result
     if up_filled and down_filled:
         emoji = "✅"
-        status = "Both sides filled"
+        status = "Both Orders Filled"
         rebate_volume = trade_size * 2
     elif up_filled or down_filled:
         emoji = "⚠️"
-        status = "Partial fill (one side only)"
+        status = "One Order Filled"
         rebate_volume = trade_size
     else:
         emoji = "❌"
-        status = "No fills - orders expired"
+        status = "No Fills - Orders Expired"
         rebate_volume = 0
 
     # Truncate long questions
@@ -373,6 +373,52 @@ def send_rebates_resolution_alert(
     message += f"<b>Status:</b> {status}\n"
     if rebate_volume > 0:
         message += f"<b>Rebate Volume:</b> ${rebate_volume:.2f}"
+
+    return send_alert(message)
+
+
+def send_rebates_rescue_alert(
+    question: str,
+    side: str,
+    old_price: float,
+    new_price: float,
+    is_taker: bool = False,
+    dry_run: bool = False
+) -> bool:
+    """
+    Send alert when a rescue order is placed/filled.
+
+    Args:
+        question: Market question
+        side: "UP" or "DOWN"
+        old_price: Original order price
+        new_price: New rescue price
+        is_taker: Whether this was a taker (market) order
+        dry_run: Whether in dry-run mode
+
+    Returns:
+        True if sent successfully
+    """
+    if dry_run:
+        return False
+
+    # Truncate long questions
+    if len(question) > 60:
+        question = question[:57] + "..."
+
+    if is_taker:
+        emoji = "🚨"
+        message = f"{emoji} <b>Rescue Taker Order</b>\n\n"
+        message += f"<b>Market:</b> {question}\n"
+        message += f"<b>Side:</b> {side}\n"
+        message += f"<b>Price:</b> ${new_price:.2f} (crossed spread)\n"
+        message += f"<b>Reason:</b> <30s to resolution"
+    else:
+        emoji = "🔄"
+        message = f"{emoji} <b>Rescue Order Updated</b>\n\n"
+        message += f"<b>Market:</b> {question}\n"
+        message += f"<b>Side:</b> {side}\n"
+        message += f"<b>Price:</b> ${old_price:.2f} → ${new_price:.2f}"
 
     return send_alert(message)
 

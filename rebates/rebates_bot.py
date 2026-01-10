@@ -49,6 +49,7 @@ from alerts.telegram import (
     send_rebates_order_alert,
     send_rebates_resolution_alert,
     send_rebates_redemption_alert,
+    send_rebates_rescue_alert,
 )
 
 
@@ -231,10 +232,14 @@ class RebatesBot:
             token_id: Token ID for the unfilled side
             time_remaining: Seconds until resolution
         """
+        # Get current price for alerts
+        current_price = tracked.up_price if side == "UP" else tracked.down_price
+
         # Determine max price based on time remaining
         if time_remaining < 30:
             # Last resort - taker order
             self.log(f"  RESCUE {side}: <30s remaining, attempting taker order")
+            taker_price = self.strategy.get_taker_price(token_id)
             success, result = self.strategy.place_taker_order(
                 token_id, self.strategy.trade_size, tracked.neg_risk
             )
@@ -244,6 +249,15 @@ class RebatesBot:
                     tracked.up_filled = True
                 else:
                     tracked.down_filled = True
+                # Send rescue alert
+                send_rebates_rescue_alert(
+                    question=tracked.question,
+                    side=side,
+                    old_price=current_price,
+                    new_price=taker_price or 0.50,
+                    is_taker=True,
+                    dry_run=DRY_RUN
+                )
             else:
                 self.log(f"  RESCUE {side}: Taker order failed: {result}")
             return
@@ -269,7 +283,6 @@ class RebatesBot:
             return
 
         # Only update if price is better than current
-        current_price = tracked.up_price if side == "UP" else tracked.down_price
         if new_price <= current_price:
             # Already at or above this price, no change needed
             return
@@ -290,6 +303,16 @@ class RebatesBot:
                 tracked.down_price = new_price
                 if new_order_id and not new_order_id.startswith("Failed"):
                     tracked.down_order_id = new_order_id
+
+            # Send rescue alert
+            send_rebates_rescue_alert(
+                question=tracked.question,
+                side=side,
+                old_price=current_price,
+                new_price=new_price,
+                is_taker=False,
+                dry_run=DRY_RUN
+            )
         else:
             self.log(f"  RESCUE {side}: Update failed: {new_order_id}")
 
