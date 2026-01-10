@@ -44,6 +44,9 @@ except ImportError:
 if not os.path.exists('positions/'):
     os.makedirs('positions/')
 
+# Track markets that have been attempted for exit (to avoid repeated attempts)
+_exit_attempted_markets = set()
+
 def send_buy_order(order):
     """
     Create a BUY order for a specific token.
@@ -282,12 +285,21 @@ async def perform_trade(market):
                     time_to_event = event_date - now
 
                     if time_to_event <= pd.Timedelta(days=1):
+                        # Check if we've already attempted to exit this market
+                        if market in _exit_attempted_markets:
+                            print(f"[EXIT BEFORE EVENT] Already attempted exit for {row['question'][:50]}... skipping")
+                            return
+
                         print(f"[EXIT BEFORE EVENT] Within 1 day of event ({event_date.date()})")
 
                         # Cancel all open orders first
-                        client.cancel_all_market(market)
+                        try:
+                            client.cancel_all_market(market)
+                        except Exception as e:
+                            print(f"  Error cancelling orders: {e}")
 
                         # Check if position is one-sided
+                        exit_success = False
                         if pos_1 > 0 and pos_2 == 0:
                             # One-sided: only holding token1, need to sell
                             print(f"  One-sided position (token1={pos_1:.2f}), selling at market")
@@ -302,7 +314,11 @@ async def perform_trade(market):
                                     'max_spread': row.get('max_spread', 10),
                                     'orders': {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
                                 }
-                                send_sell_order(order)
+                                try:
+                                    send_sell_order(order)
+                                    exit_success = True
+                                except Exception as e:
+                                    print(f"  Error sending sell order: {e}")
 
                         elif pos_2 > 0 and pos_1 == 0:
                             # One-sided: only holding token2, need to sell
@@ -318,13 +334,25 @@ async def perform_trade(market):
                                     'max_spread': row.get('max_spread', 10),
                                     'orders': {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
                                 }
-                                send_sell_order(order)
+                                try:
+                                    send_sell_order(order)
+                                    exit_success = True
+                                except Exception as e:
+                                    print(f"  Error sending sell order: {e}")
 
                         elif pos_1 > 0 and pos_2 > 0:
                             # Balanced position - safe to hold through resolution
                             print(f"  Balanced position (token1={pos_1:.2f}, token2={pos_2:.2f}), safe to resolve")
+                            exit_success = True  # No action needed, but mark as handled
                         else:
                             print(f"  No position to exit")
+                            exit_success = True  # No action needed, but mark as handled
+
+                        # Mark this market as attempted (success or failure)
+                        # to prevent repeated attempts
+                        _exit_attempted_markets.add(market)
+                        if not exit_success:
+                            print(f"  Exit attempt failed - will not retry automatically")
 
                         # Skip all other trading logic for this market
                         gc.collect()
