@@ -75,6 +75,51 @@ class DeltaNeutralStrategy:
             neg_risk = market.get("neg_risk")
         return neg_risk == True or neg_risk == "TRUE" or neg_risk == "true"
 
+    def _calculate_vwap(
+        self,
+        orders: list,
+        min_order_size: float = 5.0,
+        depth_limit: int = 5
+    ) -> Optional[float]:
+        """
+        Calculate Volume-Weighted Average Price for orders.
+
+        This protects against spoofing attacks where someone places small
+        fake orders to manipulate the bot's pricing.
+
+        Args:
+            orders: List of order dicts with 'price' and 'size' keys
+            min_order_size: Minimum $ size to consider (filters small spoof orders)
+            depth_limit: Max number of price levels to consider
+
+        Returns:
+            VWAP or None if no valid orders
+        """
+        if not orders:
+            return None
+
+        # Filter out small orders that might be spoofing
+        valid_orders = []
+        for order in orders[:depth_limit]:
+            price = float(order.get("price", 0))
+            size = float(order.get("size", 0))
+            dollar_value = price * size
+            if dollar_value >= min_order_size:
+                valid_orders.append((price, size))
+
+        if not valid_orders:
+            # Fall back to best price if all orders are small
+            return float(orders[0].get("price", 0)) if orders else None
+
+        # Calculate VWAP
+        total_value = sum(price * size for price, size in valid_orders)
+        total_size = sum(size for _, size in valid_orders)
+
+        if total_size == 0:
+            return None
+
+        return total_value / total_size
+
     def get_best_maker_price(
         self,
         token_id: str,
@@ -83,16 +128,17 @@ class DeltaNeutralStrategy:
         min_price: float = 0.40
     ) -> Optional[float]:
         """
-        Get the best price for a maker BUY order using bid-competitive pricing.
+        Get the best price for a maker BUY order using VWAP-based pricing.
 
-        We need to be competitive with other buyers (bids), not just stay below
-        sellers (asks). When markets are directional, other buyers may be bidding
-        aggressively, and we need to match or beat them to get filled.
+        Uses Volume-Weighted Average Price instead of just the best bid to
+        protect against spoofing attacks where someone places small fake
+        orders to manipulate the bot's pricing.
 
         Strategy:
         - max_safe_price = best_ask - 2*tick_size (don't cross the book)
-        - competitive_price = best_bid + tick_size (beat other buyers)
-        - our_price = max(competitive_price, fallback) but capped at max_safe_price
+        - vwap_bid = volume-weighted average of top bids (ignoring small orders)
+        - competitive_price = vwap_bid + tick_size
+        - our_price = min(competitive_price, max_safe_price, max_price)
 
         Args:
             token_id: The token to get price for
@@ -124,13 +170,21 @@ class DeltaNeutralStrategy:
                 # No asks = no sellers, we can place at any price up to max
                 max_safe_price = max_price
 
-            # Calculate competitive price (beat other buyers)
+            # Calculate competitive price using VWAP (protects against spoofing)
             if bids:
                 bids_sorted = sorted(bids, key=lambda x: float(x["price"]), reverse=True)
                 best_bid = float(bids_sorted[0]["price"])
-                competitive_price = round(best_bid + tick_size, 2)
+
+                # Use VWAP instead of just best bid
+                vwap_bid = self._calculate_vwap(bids_sorted, min_order_size=5.0, depth_limit=5)
+                if vwap_bid is not None:
+                    competitive_price = round(vwap_bid + tick_size, 2)
+                else:
+                    competitive_price = round(best_bid + tick_size, 2)
             else:
                 # No bids = no competition, use a reasonable default
+                best_bid = None
+                vwap_bid = None
                 competitive_price = 0.45
 
             # Use the competitive price, but don't exceed max safe price or our ceiling
@@ -141,9 +195,10 @@ class DeltaNeutralStrategy:
                 maker_price = min_price
 
             # Log pricing details for monitoring
-            best_bid_str = f"{best_bid:.2f}" if bids else "none"
+            best_bid_str = f"{best_bid:.2f}" if best_bid else "none"
+            vwap_str = f"{vwap_bid:.2f}" if vwap_bid else "none"
             best_ask_str = f"{best_ask:.2f}" if asks else "none"
-            print(f"  Pricing: bid={best_bid_str} ask={best_ask_str} -> competitive={competitive_price:.2f} safe={max_safe_price:.2f} max={max_price:.2f} -> final={maker_price:.2f}")
+            print(f"  Pricing: bid={best_bid_str} vwap={vwap_str} ask={best_ask_str} -> competitive={competitive_price:.2f} safe={max_safe_price:.2f} max={max_price:.2f} -> final={maker_price:.2f}")
 
             return maker_price
 
