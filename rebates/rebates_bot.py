@@ -50,6 +50,7 @@ from alerts.telegram import (
     send_rebates_resolution_alert,
     send_rebates_redemption_alert,
     send_rebates_rescue_alert,
+    send_rebates_rescue_filled_alert,
 )
 
 
@@ -78,6 +79,9 @@ class TrackedMarket:
     last_update: Optional[datetime] = None
     neg_risk: bool = False
     tick_size: float = 0.01
+    # Track if rescue orders were placed (to send alerts when filled)
+    up_rescue_attempted: bool = False
+    down_rescue_attempted: bool = False
 
 
 class RebatesBot:
@@ -153,9 +157,23 @@ class RebatesBot:
             if not up_open and not tracked.up_filled:
                 tracked.up_filled = True
                 self.log(f"  UP order filled: {tracked.question}")
+                # Send alert if this was a rescue order
+                if tracked.up_rescue_attempted:
+                    send_rebates_rescue_filled_alert(
+                        question=tracked.question,
+                        side="UP",
+                        dry_run=DRY_RUN
+                    )
             if not down_open and not tracked.down_filled:
                 tracked.down_filled = True
                 self.log(f"  DOWN order filled: {tracked.question}")
+                # Send alert if this was a rescue order
+                if tracked.down_rescue_attempted:
+                    send_rebates_rescue_filled_alert(
+                        question=tracked.question,
+                        side="DOWN",
+                        dry_run=DRY_RUN
+                    )
 
             return up_open, down_open
 
@@ -298,10 +316,12 @@ class RebatesBot:
         if success:
             if side == "UP":
                 tracked.up_price = new_price
+                tracked.up_rescue_attempted = True
                 if new_order_id and not new_order_id.startswith("Failed"):
                     tracked.up_order_id = new_order_id
             else:
                 tracked.down_price = new_price
+                tracked.down_rescue_attempted = True
                 if new_order_id and not new_order_id.startswith("Failed"):
                     tracked.down_order_id = new_order_id
 

@@ -423,6 +423,37 @@ def send_rebates_rescue_alert(
     return send_alert(message)
 
 
+def send_rebates_rescue_filled_alert(
+    question: str,
+    side: str,
+    dry_run: bool = False
+) -> bool:
+    """
+    Send alert when a rescue order is filled.
+
+    Args:
+        question: Market question
+        side: "UP" or "DOWN"
+        dry_run: Whether in dry-run mode
+
+    Returns:
+        True if sent successfully
+    """
+    if dry_run:
+        return False
+
+    # Truncate long questions
+    if len(question) > 60:
+        question = question[:57] + "..."
+
+    emoji = "✅"
+    message = f"{emoji} <b>Rescue Order Filled</b>\n\n"
+    message += f"<b>Market:</b> {question}\n"
+    message += f"<b>Side:</b> {side}"
+
+    return send_alert(message)
+
+
 def send_rebates_redemption_alert(
     question: str,
     condition_id: str,
