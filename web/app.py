@@ -214,7 +214,7 @@ async def markets_list(
             with get_db_cursor(commit=False) as cursor:
                 base_cols = """question, answer1, answer2, best_bid, best_ask,
                                gm_reward_per_100, volatility_sum, min_size, neg_risk,
-                               composite_score, market_slug, event_slug"""
+                               composite_score, market_slug, event_slug, end_date"""
 
                 if search:
                     query = f"""
@@ -315,6 +315,7 @@ async def toggle_market(
 
 @app.post("/markets/event-settings")
 async def update_event_settings(
+    request: Request,
     question: str = Form(...),
     event_date: str = Form(""),
     exit_before_event: str = Form("")
@@ -330,6 +331,11 @@ async def update_event_settings(
         date_value = event_date if event_date.strip() else None
 
         update_market_event_settings(question, date_value, exit_enabled)
+
+        # Return JSON for AJAX requests, redirect for form submissions
+        if request.headers.get("accept", "").startswith("application/json") or \
+           "fetch" in request.headers.get("sec-fetch-mode", ""):
+            return {"success": True, "question": question}
 
         return RedirectResponse(url="/markets?show_selected=true", status_code=303)
     except Exception as e:

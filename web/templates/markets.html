@@ -55,11 +55,16 @@
 
 <!-- Markets Table -->
 <div class="card">
-    <div class="card-header">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
         <span class="card-title">
             {% if show_selected %}Selected Markets{% elif search %}Search Results{% else %}All Markets{% endif %}
             <span class="text-muted" style="font-weight: normal;">({{ markets|length }})</span>
         </span>
+        {% if show_selected %}
+        <button type="button" id="saveChangesBtn" class="btn btn-success" style="display: none;" onclick="saveEventSettings()">
+            Save Changes
+        </button>
+        {% endif %}
     </div>
 
     {% if markets %}
@@ -74,8 +79,8 @@
                     <th>Volatility</th>
                     <th>Min Size</th>
                     <th>Neg Risk</th>
-                    {% if show_selected %}
                     <th>Event Date</th>
+                    {% if show_selected %}
                     <th>Exit Before</th>
                     {% endif %}
                     <th>Action</th>
@@ -147,25 +152,34 @@
                         <span class="text-muted">No</span>
                         {% endif %}
                     </td>
-                    {% if show_selected %}
                     <td>
-                        <form method="post" action="/markets/event-settings" style="display: inline;">
-                            <input type="hidden" name="question" value="{{ market.question }}">
-                            <input type="date" name="event_date"
-                                   value="{{ market.event_date or '' }}"
-                                   style="width: 130px; padding: 4px;"
-                                   onchange="this.form.submit()">
-                        </form>
+                        {% if show_selected and is_selected %}
+                        <input type="date"
+                               class="event-date-input"
+                               data-question="{{ market.question }}"
+                               data-original="{{ market.event_date or '' }}"
+                               value="{{ market.event_date or '' }}"
+                               style="width: 130px; padding: 4px;"
+                               onchange="markChanged(this)">
+                        {% else %}
+                        <span class="text-muted" style="font-size: 0.85rem;">
+                            {{ market.end_date or market.event_date or '-' }}
+                        </span>
+                        {% endif %}
                     </td>
+                    {% if show_selected %}
                     <td style="text-align: center;">
-                        <form method="post" action="/markets/event-settings" style="display: inline;">
-                            <input type="hidden" name="question" value="{{ market.question }}">
-                            <input type="hidden" name="event_date" value="{{ market.event_date or '' }}">
-                            <input type="checkbox" name="exit_before_event"
-                                   {% if market.exit_before_event %}checked{% endif %}
-                                   style="width: 18px; height: 18px; cursor: pointer;"
-                                   onchange="this.form.submit()">
-                        </form>
+                        {% if is_selected %}
+                        <input type="checkbox"
+                               class="exit-before-input"
+                               data-question="{{ market.question }}"
+                               data-original="{{ 'true' if market.exit_before_event else 'false' }}"
+                               {% if market.exit_before_event %}checked{% endif %}
+                               style="width: 18px; height: 18px; cursor: pointer;"
+                               onchange="markChanged(this)">
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
                     </td>
                     {% endif %}
                     <td>
@@ -235,4 +249,97 @@
         </div>
     </div>
 </div>
+
+{% if show_selected %}
+<script>
+let hasUnsavedChanges = false;
+let changedSettings = {};
+
+function markChanged(element) {
+    const question = element.dataset.question;
+    const original = element.dataset.original;
+    const current = element.type === 'checkbox' ? (element.checked ? 'true' : 'false') : element.value;
+
+    if (!changedSettings[question]) {
+        changedSettings[question] = {};
+    }
+
+    if (element.classList.contains('event-date-input')) {
+        changedSettings[question].event_date = current;
+        changedSettings[question].event_date_changed = (current !== original);
+    } else if (element.classList.contains('exit-before-input')) {
+        changedSettings[question].exit_before_event = current;
+        changedSettings[question].exit_before_changed = (current !== original);
+    }
+
+    // Check if any actual changes exist
+    hasUnsavedChanges = Object.values(changedSettings).some(settings =>
+        settings.event_date_changed || settings.exit_before_changed
+    );
+
+    document.getElementById('saveChangesBtn').style.display = hasUnsavedChanges ? 'block' : 'none';
+}
+
+async function saveEventSettings() {
+    const saveBtn = document.getElementById('saveChangesBtn');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+
+    try {
+        for (const [question, settings] of Object.entries(changedSettings)) {
+            if (settings.event_date_changed || settings.exit_before_changed) {
+                // Get current values from inputs
+                const dateInput = document.querySelector(`.event-date-input[data-question="${CSS.escape(question)}"]`);
+                const checkboxInput = document.querySelector(`.exit-before-input[data-question="${CSS.escape(question)}"]`);
+
+                const formData = new FormData();
+                formData.append('question', question);
+                formData.append('event_date', dateInput ? dateInput.value : '');
+                if (checkboxInput && checkboxInput.checked) {
+                    formData.append('exit_before_event', 'on');
+                }
+
+                const response = await fetch('/markets/event-settings', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to save settings for: ${question}`);
+                }
+
+                // Update the original values
+                if (dateInput) {
+                    dateInput.dataset.original = dateInput.value;
+                }
+                if (checkboxInput) {
+                    checkboxInput.dataset.original = checkboxInput.checked ? 'true' : 'false';
+                }
+            }
+        }
+
+        // Reset state
+        changedSettings = {};
+        hasUnsavedChanges = false;
+        saveBtn.style.display = 'none';
+        saveBtn.textContent = 'Save Changes';
+        saveBtn.disabled = false;
+
+    } catch (error) {
+        alert('Error saving changes: ' + error.message);
+        saveBtn.textContent = 'Save Changes';
+        saveBtn.disabled = false;
+    }
+}
+
+// Warn before leaving with unsaved changes
+window.addEventListener('beforeunload', function(e) {
+    if (hasUnsavedChanges) {
+        e.preventDefault();
+        e.returnValue = 'You have unsaved changes. Are you sure you want to leave?';
+        return e.returnValue;
+    }
+});
+</script>
+{% endif %}
 {% endblock %}
