@@ -152,6 +152,7 @@ def send_buy_order(order):
                         outcome = row.get('answer1', 'Yes')
                     elif row.get('token2') and str(order['token']) == str(row['token2']):
                         outcome = row.get('answer2', 'No')
+                    print(f"[ALERT DEBUG] market_question={market_question}, outcome={outcome}, token1={row.get('token1')}, token2={row.get('token2')}, order_token={order['token']}")
                     send_trade_alert('BUY', order['token'], order['price'], order['size'], market_question, outcome)
                 if DB_ENABLED:
                     market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
@@ -237,6 +238,7 @@ def send_sell_order(order):
                 outcome = row.get('answer1', 'Yes')
             elif row.get('token2') and str(order['token']) == str(row['token2']):
                 outcome = row.get('answer2', 'No')
+            print(f"[ALERT DEBUG] SELL market_question={market_question}, outcome={outcome}")
             send_trade_alert('SELL', order['token'], order['price'], order['size'], market_question, outcome)
         if DB_ENABLED:
             market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
