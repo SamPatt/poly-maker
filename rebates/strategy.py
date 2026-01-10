@@ -7,9 +7,21 @@ maker rebates without directional exposure.
 import json
 import requests
 from typing import Dict, Any, Tuple, Optional
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .config import TRADE_SIZE, TARGET_PRICE, DRY_RUN
+
+
+@dataclass
+class OrderResult:
+    """Result of placing mirror orders."""
+    success: bool
+    message: str
+    up_order_id: str = ""
+    down_order_id: str = ""
+    up_price: float = 0.0
+    down_price: float = 0.0
 
 CLOB_API_BASE = "https://clob.polymarket.com"
 
@@ -102,7 +114,7 @@ class DeltaNeutralStrategy:
             print(f"Error fetching order book for {token_id[:20]}...: {e}")
             return None
 
-    def place_mirror_orders(self, market: Dict[str, Any]) -> Tuple[bool, str]:
+    def place_mirror_orders(self, market: Dict[str, Any]) -> OrderResult:
         """
         Place mirror Up and Down orders at optimal maker prices.
 
@@ -117,7 +129,7 @@ class DeltaNeutralStrategy:
             market: Market data from the Gamma API
 
         Returns:
-            Tuple of (success, message)
+            OrderResult with success status, message, and order details
         """
         slug = market.get("slug", "unknown")
         question = market.get("question", "Unknown market")
@@ -151,7 +163,12 @@ class DeltaNeutralStrategy:
                 print(f"  Size: ${self.trade_size} per side")
                 print(f"  Neg risk: {neg_risk}")
                 print(f"  Post-only: True (maker-only, rejected if would immediately match)")
-                return True, "Dry run - orders not placed"
+                return OrderResult(
+                    success=True,
+                    message="Dry run - orders not placed",
+                    up_price=up_price,
+                    down_price=down_price
+                )
 
             # Place Up order (BUY on the Up outcome)
             # post_only=True ensures we're a maker (order rejected if it would immediately match)
@@ -169,9 +186,10 @@ class DeltaNeutralStrategy:
             up_success = up_resp and up_resp.get("success") == True
             if not up_success:
                 error_msg = up_resp.get("errorMsg", "") if up_resp else "Empty response"
-                return False, f"Failed to place Up order: {error_msg}"
+                return OrderResult(success=False, message=f"Failed to place Up order: {error_msg}")
 
-            print(f"[{timestamp}] Up order placed: {up_resp.get('orderID', 'unknown')[:20]}...")
+            up_order_id = up_resp.get("orderID", "")
+            print(f"[{timestamp}] Up order placed: {up_order_id[:20]}...")
 
             # Place Down order (BUY on the Down outcome)
             print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {down_price} (post-only)")
@@ -194,14 +212,22 @@ class DeltaNeutralStrategy:
                 except Exception:
                     pass
                 error_msg = down_resp.get("errorMsg", "") if down_resp else "Empty response"
-                return False, f"Failed to place Down order: {error_msg}"
+                return OrderResult(success=False, message=f"Failed to place Down order: {error_msg}")
 
-            print(f"[{timestamp}] Down order placed: {down_resp.get('orderID', 'unknown')[:20]}...")
+            down_order_id = down_resp.get("orderID", "")
+            print(f"[{timestamp}] Down order placed: {down_order_id[:20]}...")
 
-            return True, f"Placed mirror orders @ Up:{up_price}/Down:{down_price} on {slug}"
+            return OrderResult(
+                success=True,
+                message=f"Placed mirror orders @ Up:{up_price}/Down:{down_price} on {slug}",
+                up_order_id=up_order_id,
+                down_order_id=down_order_id,
+                up_price=up_price,
+                down_price=down_price
+            )
 
         except Exception as e:
-            return False, f"Error placing orders: {e}"
+            return OrderResult(success=False, message=f"Error placing orders: {e}")
 
     def get_existing_orders(self, market: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -246,3 +272,69 @@ class DeltaNeutralStrategy:
         except Exception as e:
             print(f"Error cancelling orders: {e}")
             return False
+
+    def check_order_competitiveness(
+        self,
+        token_id: str,
+        current_price: float,
+        tick_size: float = 0.01
+    ) -> Tuple[bool, Optional[float]]:
+        """
+        Check if our order is still at a competitive price.
+
+        Returns:
+            Tuple of (is_competitive, new_best_price)
+            - is_competitive: True if our price is within 1 tick of optimal
+            - new_best_price: The current optimal maker price
+        """
+        best_price = self.get_best_maker_price(token_id, tick_size)
+        if best_price is None:
+            return True, None  # Can't check, assume OK
+
+        # We're competitive if we're within 1 tick of the best maker price
+        price_diff = abs(best_price - current_price)
+        is_competitive = price_diff <= tick_size
+
+        return is_competitive, best_price
+
+    def update_single_order(
+        self,
+        token_id: str,
+        new_price: float,
+        neg_risk: bool
+    ) -> Tuple[bool, str]:
+        """
+        Cancel existing order and place a new one at the new price.
+
+        Returns:
+            Tuple of (success, new_order_id)
+        """
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        if DRY_RUN:
+            print(f"[{timestamp}] [DRY RUN] Would update order to {new_price}")
+            return True, ""
+
+        try:
+            # Cancel existing order for this token
+            self.client.cancel_all_asset(token_id)
+
+            # Place new order at better price
+            resp = self.client.create_order(
+                marketId=token_id,
+                action="BUY",
+                price=new_price,
+                size=self.trade_size,
+                neg_risk=neg_risk,
+                post_only=True
+            )
+
+            if resp and resp.get("success") == True:
+                order_id = resp.get("orderID", "")
+                return True, order_id
+            else:
+                error_msg = resp.get("errorMsg", "") if resp else "Empty response"
+                return False, f"Failed: {error_msg}"
+
+        except Exception as e:
+            return False, f"Error: {e}"

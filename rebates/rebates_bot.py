@@ -35,7 +35,7 @@ load_dotenv()
 from poly_data.polymarket_client import PolymarketClient
 
 from .market_finder import CryptoMarketFinder
-from .strategy import DeltaNeutralStrategy
+from .strategy import DeltaNeutralStrategy, OrderResult
 from .config import (
     TRADE_SIZE,
     TARGET_PRICE,
@@ -69,6 +69,14 @@ class TrackedMarket:
     logged_resolved: bool = False
     redeemed: bool = False
     redeem_attempted: bool = False
+    # Order tracking for dynamic updates
+    up_order_id: str = ""
+    down_order_id: str = ""
+    up_price: float = 0.0
+    down_price: float = 0.0
+    last_update: Optional[datetime] = None
+    neg_risk: bool = False
+    tick_size: float = 0.01
 
 
 class RebatesBot:
@@ -252,11 +260,71 @@ class RebatesBot:
             tracked.redeem_attempted = True
             return False
 
+    def update_upcoming_orders(self, tracked: TrackedMarket) -> None:
+        """
+        Check and update orders for an UPCOMING market to stay competitive.
+
+        Only updates if:
+        - Market is still UPCOMING
+        - At least 10 seconds since last update (avoid hammering API)
+        - Our price is no longer competitive
+        """
+        now = datetime.now(timezone.utc)
+
+        # Don't update too frequently (minimum 10 seconds between updates)
+        if tracked.last_update:
+            seconds_since_update = (now - tracked.last_update).total_seconds()
+            if seconds_since_update < 10:
+                return
+
+        # Don't update if market starts very soon (within 5 seconds) - too risky
+        time_until_start = (tracked.event_start - now).total_seconds()
+        if time_until_start < 5:
+            return
+
+        # Check UP order competitiveness
+        up_competitive, up_best_price = self.strategy.check_order_competitiveness(
+            tracked.up_token, tracked.up_price, tracked.tick_size
+        )
+
+        # Check DOWN order competitiveness
+        down_competitive, down_best_price = self.strategy.check_order_competitiveness(
+            tracked.down_token, tracked.down_price, tracked.tick_size
+        )
+
+        # Update UP order if not competitive
+        if not up_competitive and up_best_price is not None:
+            self.log(f"  Updating UP order: {tracked.up_price} -> {up_best_price} ({tracked.question[:40]}...)")
+            success, new_order_id = self.strategy.update_single_order(
+                tracked.up_token, up_best_price, tracked.neg_risk
+            )
+            if success:
+                tracked.up_price = up_best_price
+                if new_order_id and not new_order_id.startswith("Failed"):
+                    tracked.up_order_id = new_order_id
+
+        # Update DOWN order if not competitive
+        if not down_competitive and down_best_price is not None:
+            self.log(f"  Updating DOWN order: {tracked.down_price} -> {down_best_price} ({tracked.question[:40]}...)")
+            success, new_order_id = self.strategy.update_single_order(
+                tracked.down_token, down_best_price, tracked.neg_risk
+            )
+            if success:
+                tracked.down_price = down_best_price
+                if new_order_id and not new_order_id.startswith("Failed"):
+                    tracked.down_order_id = new_order_id
+
+        tracked.last_update = now
+
     def monitor_tracked_markets(self) -> None:
-        """Monitor all tracked markets for status changes and fills."""
+        """Monitor all tracked markets for status changes, fills, and order updates."""
         for slug, tracked in list(self.tracked_markets.items()):
             # Update status
             self.check_market_status(tracked)
+
+            # Update orders for UPCOMING markets to stay competitive
+            if tracked.status == "UPCOMING":
+                self.update_upcoming_orders(tracked)
 
             # Check fills for LIVE markets
             if tracked.status == "LIVE":
@@ -303,9 +371,9 @@ class RebatesBot:
             self.log(f"Processing: {question}")
 
         # Place mirror orders
-        success, message = self.strategy.place_mirror_orders(market)
+        result = self.strategy.place_mirror_orders(market)
 
-        if success:
+        if result.success:
             # Track this market
             try:
                 up_token, down_token = self.strategy.get_tokens(market)
@@ -314,6 +382,8 @@ class RebatesBot:
 
             # Get condition ID for redemption
             condition_id = market.get("conditionId", "")
+            neg_risk = self.strategy.is_neg_risk_market(market)
+            tick_size = float(market.get("orderPriceMinTickSize", 0.01))
 
             self.tracked_markets[slug] = TrackedMarket(
                 slug=slug,
@@ -323,20 +393,27 @@ class RebatesBot:
                 down_token=down_token,
                 order_time=datetime.now(timezone.utc),
                 condition_id=condition_id,
+                up_order_id=result.up_order_id,
+                down_order_id=result.down_order_id,
+                up_price=result.up_price,
+                down_price=result.down_price,
+                last_update=datetime.now(timezone.utc),
+                neg_risk=neg_risk,
+                tick_size=tick_size,
             )
-            self.log(f"SUCCESS: {message}")
+            self.log(f"SUCCESS: {result.message}")
 
             # Send Telegram alert for orders placed
             send_rebates_order_alert(
                 question=question,
                 trade_size=TRADE_SIZE,
-                price=TARGET_PRICE,
+                price=(result.up_price + result.down_price) / 2,  # Average price
                 dry_run=DRY_RUN
             )
         else:
-            self.log(f"FAILED: {message}")
+            self.log(f"FAILED: {result.message}")
 
-        return success
+        return result.success
 
     def run_once(self) -> int:
         """
@@ -386,26 +463,41 @@ class RebatesBot:
         Main loop - continuously find markets and place orders.
 
         Runs indefinitely until interrupted.
+
+        Uses two update frequencies:
+        - Full market scan: Every CHECK_INTERVAL_SECONDS (60s)
+        - Order updates for UPCOMING markets: Every 15s
         """
         self.log("Starting main loop...")
-        self.log(f"Checking for markets every {CHECK_INTERVAL_SECONDS}s")
+        self.log(f"Full market scan every {CHECK_INTERVAL_SECONDS}s")
+        self.log(f"Order updates every 15s for UPCOMING markets")
 
+        ORDER_UPDATE_INTERVAL = 15  # Seconds between order updates
         cycle_count = 0
+        last_full_scan = 0  # Force immediate scan on start
+
         while True:
             try:
-                traded = self.run_once()
+                now = time.time()
 
-                if traded > 0:
-                    self.log(f"Traded {traded} markets this cycle")
+                # Full market scan at longer interval
+                if now - last_full_scan >= CHECK_INTERVAL_SECONDS:
+                    traded = self.run_once()
+                    if traded > 0:
+                        self.log(f"Traded {traded} markets this cycle")
 
-                # Log status summary every 5 cycles
-                cycle_count += 1
-                if cycle_count % 5 == 0:
-                    self.log_status_summary()
+                    cycle_count += 1
+                    if cycle_count % 5 == 0:
+                        self.log_status_summary()
 
-                # Wait before next check
-                self.log(f"Sleeping for {CHECK_INTERVAL_SECONDS}s...")
-                time.sleep(CHECK_INTERVAL_SECONDS)
+                    last_full_scan = now
+                else:
+                    # Quick update cycle - just monitor existing markets
+                    # This updates orders for UPCOMING markets to stay competitive
+                    self.monitor_tracked_markets()
+
+                # Sleep for the shorter interval
+                time.sleep(ORDER_UPDATE_INTERVAL)
 
             except KeyboardInterrupt:
                 self.log("Interrupted by user, shutting down...")
