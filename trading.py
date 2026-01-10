@@ -144,8 +144,15 @@ def send_buy_order(order):
 
                 # Send Telegram alert and record trade
                 if TELEGRAM_ENABLED:
-                    market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
-                    send_trade_alert('BUY', order['token'], order['price'], order['size'], market_question)
+                    row = order.get('row', {}) if isinstance(order.get('row'), dict) else {}
+                    market_question = row.get('question')
+                    # Determine outcome name based on which token is being traded
+                    outcome = None
+                    if row.get('token1') and str(order['token']) == str(row['token1']):
+                        outcome = row.get('answer1', 'Yes')
+                    elif row.get('token2') and str(order['token']) == str(row['token2']):
+                        outcome = row.get('answer2', 'No')
+                    send_trade_alert('BUY', order['token'], order['price'], order['size'], market_question, outcome)
                 if DB_ENABLED:
                     market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
                     record_trade(order['token'], 'BUY', order['price'], order['size'], market_question)
@@ -222,8 +229,15 @@ def send_sell_order(order):
 
         # Send Telegram alert and record trade
         if TELEGRAM_ENABLED:
-            market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
-            send_trade_alert('SELL', order['token'], order['price'], order['size'], market_question)
+            row = order.get('row', {}) if isinstance(order.get('row'), dict) else {}
+            market_question = row.get('question')
+            # Determine outcome name based on which token is being traded
+            outcome = None
+            if row.get('token1') and str(order['token']) == str(row['token1']):
+                outcome = row.get('answer1', 'Yes')
+            elif row.get('token2') and str(order['token']) == str(row['token2']):
+                outcome = row.get('answer2', 'No')
+            send_trade_alert('SELL', order['token'], order['price'], order['size'], market_question, outcome)
         if DB_ENABLED:
             market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
             record_trade(order['token'], 'SELL', order['price'], order['size'], market_question)
@@ -312,7 +326,8 @@ async def perform_trade(market):
                                     'neg_risk': row['neg_risk'],
                                     'mid_price': (deets['best_bid'] + deets['best_ask']) / 2,
                                     'max_spread': row.get('max_spread', 10),
-                                    'orders': {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
+                                    'orders': {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}},
+                                    'row': row
                                 }
                                 try:
                                     send_sell_order(order)
@@ -332,7 +347,8 @@ async def perform_trade(market):
                                     'neg_risk': row['neg_risk'],
                                     'mid_price': (deets['best_bid'] + deets['best_ask']) / 2,
                                     'max_spread': row.get('max_spread', 10),
-                                    'orders': {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
+                                    'orders': {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}},
+                                    'row': row
                                 }
                                 try:
                                     send_sell_order(order)

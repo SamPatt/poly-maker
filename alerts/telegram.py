@@ -80,7 +80,8 @@ def send_trade_alert(
     token: str,
     price: float,
     size: float,
-    market_question: Optional[str] = None
+    market_question: Optional[str] = None,
+    outcome: Optional[str] = None
 ) -> bool:
     """
     Send an alert when a trade is executed.
@@ -91,6 +92,7 @@ def send_trade_alert(
         price: Execution price
         size: Trade size
         market_question: Optional market question for context
+        outcome: Optional outcome name (e.g., 'Yes', 'No', 'Up', 'Down')
 
     Returns:
         True if sent successfully
@@ -99,15 +101,20 @@ def send_trade_alert(
     side_text = side.upper()
 
     message = f"{emoji} <b>Trade Executed</b>\n\n"
-    message += f"<b>Side:</b> {side_text}\n"
-    message += f"<b>Price:</b> ${price:.4f}\n"
-    message += f"<b>Size:</b> ${size:.2f}\n"
 
+    # Show market first for context
     if market_question:
         # Truncate long questions
-        if len(market_question) > 100:
-            market_question = market_question[:97] + "..."
-        message += f"\n<b>Market:</b> {market_question}"
+        if len(market_question) > 80:
+            market_question = market_question[:77] + "..."
+        message += f"<b>Market:</b> {market_question}\n\n"
+
+    message += f"<b>Side:</b> {side_text}"
+    if outcome:
+        message += f" <b>{outcome.upper()}</b>"
+    message += f"\n"
+    message += f"<b>Price:</b> ${price:.4f}\n"
+    message += f"<b>Size:</b> ${size:.2f}"
 
     return send_alert(message)
 
