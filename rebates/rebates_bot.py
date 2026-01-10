@@ -10,13 +10,21 @@ Strategy:
 - Earn maker rebates when takers fill orders
 - Repeat for each 15-minute cycle
 
-CRITICAL: Only trades on UPCOMING markets, never LIVE.
+Economics:
+- Buy UP at $0.50 + Buy DOWN at $0.50 = $1 total per share pair
+- At resolution: one side worth $1, other worth $0 = get $1 back
+- Net P&L on position: $0 (wash)
+- Profit: maker rebates (~1.56% at 50% probability)
+
+CRITICAL: Only places orders on UPCOMING markets, never LIVE.
+Orders stay open when market goes LIVE - that's when takers fill them.
 """
 import os
 import sys
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Set
+from typing import Dict, Set, Optional, Any
+from dataclasses import dataclass, field
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,6 +44,22 @@ from .config import (
     SAFETY_BUFFER_SECONDS,
     ASSETS,
 )
+
+
+@dataclass
+class TrackedMarket:
+    """Track a market we've placed orders on."""
+    slug: str
+    question: str
+    event_start: datetime
+    up_token: str
+    down_token: str
+    order_time: datetime
+    status: str = "UPCOMING"  # UPCOMING -> LIVE -> RESOLVED
+    up_filled: bool = False
+    down_filled: bool = False
+    logged_live: bool = False
+    logged_resolved: bool = False
 
 
 class RebatesBot:
@@ -60,8 +84,8 @@ class RebatesBot:
         if not DRY_RUN:
             print("\n*** LIVE TRADING MODE - REAL ORDERS WILL BE PLACED ***\n")
 
-        # Track markets we've already placed orders on
-        self.traded_markets: Set[str] = set()
+        # Track markets with full details
+        self.tracked_markets: Dict[str, TrackedMarket] = {}
 
         # Initialize components
         print("Initializing Polymarket client...")
@@ -80,6 +104,84 @@ class RebatesBot:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         print(f"[{timestamp}] {message}")
 
+    def check_order_fills(self, tracked: TrackedMarket) -> None:
+        """Check if orders for a tracked market have been filled."""
+        if DRY_RUN:
+            return
+
+        try:
+            all_orders = self.client.get_all_orders()
+            if all_orders.empty:
+                # No open orders - assume filled or cancelled
+                if not tracked.up_filled:
+                    tracked.up_filled = True
+                if not tracked.down_filled:
+                    tracked.down_filled = True
+                return
+
+            # Check for open orders on our tokens
+            up_open = not all_orders[all_orders["asset_id"] == tracked.up_token].empty
+            down_open = not all_orders[all_orders["asset_id"] == tracked.down_token].empty
+
+            # If order is no longer open, it was filled (or cancelled)
+            if not up_open and not tracked.up_filled:
+                tracked.up_filled = True
+                self.log(f"  UP order filled: {tracked.question}")
+            if not down_open and not tracked.down_filled:
+                tracked.down_filled = True
+                self.log(f"  DOWN order filled: {tracked.question}")
+
+        except Exception as e:
+            pass  # Don't spam logs on API errors
+
+    def check_market_status(self, tracked: TrackedMarket) -> None:
+        """Check and update market status (UPCOMING -> LIVE -> RESOLVED)."""
+        now = datetime.now(timezone.utc)
+
+        # Check if market has gone LIVE
+        if tracked.status == "UPCOMING" and now >= tracked.event_start:
+            tracked.status = "LIVE"
+            if not tracked.logged_live:
+                self.log(f"MARKET LIVE: {tracked.question}")
+                tracked.logged_live = True
+
+        # Check if market has RESOLVED (15 min after start)
+        resolution_time = tracked.event_start + timedelta(minutes=15)
+        if tracked.status == "LIVE" and now >= resolution_time:
+            tracked.status = "RESOLVED"
+            if not tracked.logged_resolved:
+                self.log(f"MARKET RESOLVED: {tracked.question}")
+                # Log final fill status
+                if DRY_RUN:
+                    self.log(f"  [DRY RUN] Would have held UP + DOWN until resolution")
+                else:
+                    up_status = "FILLED" if tracked.up_filled else "UNFILLED"
+                    down_status = "FILLED" if tracked.down_filled else "UNFILLED"
+                    self.log(f"  UP: {up_status}, DOWN: {down_status}")
+                    if tracked.up_filled and tracked.down_filled:
+                        self.log(f"  Both sides filled - earned rebates on ${TRADE_SIZE * 2:.2f} volume")
+                    elif tracked.up_filled or tracked.down_filled:
+                        self.log(f"  Partial fill - one side only")
+                    else:
+                        self.log(f"  No fills - orders expired")
+                tracked.logged_resolved = True
+
+    def monitor_tracked_markets(self) -> None:
+        """Monitor all tracked markets for status changes and fills."""
+        for slug, tracked in list(self.tracked_markets.items()):
+            # Update status
+            self.check_market_status(tracked)
+
+            # Check fills for LIVE markets
+            if tracked.status == "LIVE":
+                self.check_order_fills(tracked)
+
+        # Cleanup old resolved markets (keep last 50)
+        resolved = [s for s, t in self.tracked_markets.items() if t.status == "RESOLVED"]
+        if len(resolved) > 50:
+            for slug in resolved[:len(resolved) - 50]:
+                del self.tracked_markets[slug]
+
     def process_market(self, market: dict) -> bool:
         """
         Process a single market: verify safety and place orders.
@@ -91,7 +193,7 @@ class RebatesBot:
         question = market.get("question", "Unknown")
 
         # Skip if we've already traded this market
-        if slug in self.traded_markets:
+        if slug in self.tracked_markets:
             self.log(f"Already traded: {slug}")
             return False
 
@@ -114,21 +216,25 @@ class RebatesBot:
         success, message = self.strategy.place_mirror_orders(market)
 
         if success:
-            self.traded_markets.add(slug)
+            # Track this market
+            try:
+                up_token, down_token = self.strategy.get_tokens(market)
+            except Exception:
+                up_token, down_token = "", ""
+
+            self.tracked_markets[slug] = TrackedMarket(
+                slug=slug,
+                question=question,
+                event_start=event_start or datetime.now(timezone.utc),
+                up_token=up_token,
+                down_token=down_token,
+                order_time=datetime.now(timezone.utc),
+            )
             self.log(f"SUCCESS: {message}")
         else:
             self.log(f"FAILED: {message}")
 
         return success
-
-    def cleanup_old_markets(self):
-        """Remove markets from tracking that are now resolved."""
-        # Keep last 100 markets to prevent memory growth
-        if len(self.traded_markets) > 100:
-            # Convert to list, sort, keep last 100
-            sorted_markets = sorted(self.traded_markets)
-            self.traded_markets = set(sorted_markets[-100:])
-            self.log(f"Cleaned up traded markets cache")
 
     def run_once(self) -> int:
         """
@@ -139,6 +245,10 @@ class RebatesBot:
         """
         self.log("Scanning for upcoming markets...")
 
+        # First, monitor existing tracked markets
+        self.monitor_tracked_markets()
+
+        # Find new upcoming markets
         markets = self.finder.get_upcoming_markets()
         self.log(f"Found {len(markets)} upcoming markets")
 
@@ -157,8 +267,16 @@ class RebatesBot:
             # Small delay between orders
             time.sleep(0.5)
 
-        self.cleanup_old_markets()
         return traded_count
+
+    def log_status_summary(self) -> None:
+        """Log a summary of tracked markets by status."""
+        upcoming = sum(1 for t in self.tracked_markets.values() if t.status == "UPCOMING")
+        live = sum(1 for t in self.tracked_markets.values() if t.status == "LIVE")
+        resolved = sum(1 for t in self.tracked_markets.values() if t.status == "RESOLVED")
+
+        if upcoming or live:
+            self.log(f"Tracking: {upcoming} UPCOMING, {live} LIVE, {resolved} RESOLVED")
 
     def run(self):
         """
@@ -169,12 +287,18 @@ class RebatesBot:
         self.log("Starting main loop...")
         self.log(f"Checking for markets every {CHECK_INTERVAL_SECONDS}s")
 
+        cycle_count = 0
         while True:
             try:
                 traded = self.run_once()
 
                 if traded > 0:
                     self.log(f"Traded {traded} markets this cycle")
+
+                # Log status summary every 5 cycles
+                cycle_count += 1
+                if cycle_count % 5 == 0:
+                    self.log_status_summary()
 
                 # Wait before next check
                 self.log(f"Sleeping for {CHECK_INTERVAL_SECONDS}s...")
