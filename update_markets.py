@@ -151,13 +151,13 @@ def fetch_and_process_data():
     new_df = new_df.sort_values('volatility_sum', ascending=True)
     new_df['volatilty/reward'] = ((new_df['gm_reward_per_100'] / new_df['volatility_sum']).round(2)).astype(str)
 
-    # Select and order columns
+    # Select and order columns (event_slug is added later by add_event_slugs)
     new_df = new_df[['question', 'answer1', 'answer2', 'spread', 'rewards_daily_rate',
                      'gm_reward_per_100', 'sm_reward_per_100', 'bid_reward_per_100', 'ask_reward_per_100',
                      'volatility_sum', 'volatilty/reward', 'min_size',
                      '1_hour', '3_hour', '6_hour', '12_hour', '24_hour', '7_day', '30_day',
                      'best_bid', 'best_ask', 'volatility_price', 'max_spread', 'tick_size',
-                     'neg_risk', 'market_slug', 'event_slug', 'end_date_iso', 'token1', 'token2', 'condition_id']]
+                     'neg_risk', 'market_slug', 'end_date_iso', 'token1', 'token2', 'condition_id']]
 
     # Calculate composite score for smart ranking
     def calculate_composite_score(df):
