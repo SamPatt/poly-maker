@@ -109,12 +109,35 @@ CREATE TABLE IF NOT EXISTS trade_history (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Rebates bot tracked markets (persisted across restarts)
+CREATE TABLE IF NOT EXISTS rebates_markets (
+    id SERIAL PRIMARY KEY,
+    slug TEXT UNIQUE NOT NULL,
+    question TEXT NOT NULL,
+    condition_id TEXT,
+    up_token TEXT,
+    down_token TEXT,
+    event_start TIMESTAMP WITH TIME ZONE NOT NULL,
+    order_time TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    status TEXT DEFAULT 'UPCOMING',  -- UPCOMING, LIVE, RESOLVED, REDEEMED
+    up_filled BOOLEAN DEFAULT false,
+    down_filled BOOLEAN DEFAULT false,
+    up_price FLOAT,
+    down_price FLOAT,
+    neg_risk BOOLEAN DEFAULT false,
+    tick_size FLOAT DEFAULT 0.01,
+    redeemed BOOLEAN DEFAULT false,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 -- Create indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_all_markets_question ON all_markets(question);
 CREATE INDEX IF NOT EXISTS idx_all_markets_condition_id ON all_markets(condition_id);
 CREATE INDEX IF NOT EXISTS idx_selected_markets_enabled ON selected_markets(enabled);
 CREATE INDEX IF NOT EXISTS idx_trade_history_created ON trade_history(created_at);
 CREATE INDEX IF NOT EXISTS idx_hyperparameters_type ON hyperparameters(param_type);
+CREATE INDEX IF NOT EXISTS idx_rebates_markets_status ON rebates_markets(status);
+CREATE INDEX IF NOT EXISTS idx_rebates_markets_slug ON rebates_markets(slug);
 
 -- Insert default hyperparameters (adjust values as needed)
 INSERT INTO hyperparameters (param_type, param_name, param_value) VALUES

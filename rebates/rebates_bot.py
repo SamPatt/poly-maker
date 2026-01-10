@@ -52,6 +52,14 @@ from alerts.telegram import (
     send_rebates_rescue_alert,
     send_rebates_rescue_filled_alert,
 )
+from db.supabase_client import (
+    save_rebates_market,
+    update_rebates_market_status,
+    update_rebates_market_fills,
+    get_pending_rebates_markets,
+    mark_rebates_market_redeemed,
+    cleanup_old_rebates_markets,
+)
 
 
 @dataclass
@@ -121,8 +129,75 @@ class RebatesBot:
 
         print("Bot initialized successfully.\n")
 
+        # Load pending markets from database (for restart recovery)
+        self._load_pending_markets()
+
+        # Cleanup old redeemed markets
+        deleted = cleanup_old_rebates_markets(days=7)
+        if deleted > 0:
+            print(f"Cleaned up {deleted} old redeemed markets from database")
+
         # Send startup alert
         send_rebates_startup_alert(DRY_RUN, TRADE_SIZE)
+
+    def _load_pending_markets(self) -> None:
+        """Load markets from database that need continued tracking."""
+        try:
+            pending_df = get_pending_rebates_markets()
+            if pending_df.empty:
+                print("No pending markets to resume from database")
+                return
+
+            loaded = 0
+            for _, row in pending_df.iterrows():
+                slug = row.get("slug")
+                if not slug or slug in self.tracked_markets:
+                    continue
+
+                # Parse event_start from database
+                event_start = row.get("event_start")
+                if isinstance(event_start, str):
+                    event_start = datetime.fromisoformat(event_start.replace("Z", "+00:00"))
+                elif hasattr(event_start, 'tzinfo') and event_start.tzinfo is None:
+                    event_start = event_start.replace(tzinfo=timezone.utc)
+
+                # Create TrackedMarket from database row
+                tracked = TrackedMarket(
+                    slug=slug,
+                    question=row.get("question", "Unknown"),
+                    event_start=event_start,
+                    up_token=row.get("up_token", ""),
+                    down_token=row.get("down_token", ""),
+                    order_time=row.get("order_time", datetime.now(timezone.utc)),
+                    condition_id=row.get("condition_id", ""),
+                    status=row.get("status", "UPCOMING"),
+                    up_filled=bool(row.get("up_filled", False)),
+                    down_filled=bool(row.get("down_filled", False)),
+                    up_price=float(row.get("up_price", 0.50)),
+                    down_price=float(row.get("down_price", 0.50)),
+                    neg_risk=bool(row.get("neg_risk", False)),
+                    tick_size=float(row.get("tick_size", 0.01)),
+                    logged_live=row.get("status") in ("LIVE", "RESOLVED"),
+                    logged_resolved=row.get("status") == "RESOLVED",
+                    redeemed=bool(row.get("redeemed", False)),
+                )
+
+                self.tracked_markets[slug] = tracked
+                loaded += 1
+
+            if loaded > 0:
+                print(f"Resumed tracking {loaded} markets from database")
+                # Log status breakdown
+                by_status = {}
+                for t in self.tracked_markets.values():
+                    by_status[t.status] = by_status.get(t.status, 0) + 1
+                for status, count in sorted(by_status.items()):
+                    print(f"  {status}: {count}")
+
+        except Exception as e:
+            print(f"Error loading pending markets: {e}")
+            import traceback
+            traceback.print_exc()
 
     def log(self, message: str):
         """Log with timestamp."""
@@ -156,6 +231,7 @@ class RebatesBot:
             # If order is no longer open, it was filled (or cancelled)
             if not up_open and not tracked.up_filled:
                 tracked.up_filled = True
+                update_rebates_market_fills(tracked.slug, up_filled=True)
                 self.log(f"  UP order filled: {tracked.question}")
                 # Send alert if this was a rescue order
                 if tracked.up_rescue_attempted:
@@ -166,6 +242,7 @@ class RebatesBot:
                     )
             if not down_open and not tracked.down_filled:
                 tracked.down_filled = True
+                update_rebates_market_fills(tracked.slug, down_filled=True)
                 self.log(f"  DOWN order filled: {tracked.question}")
                 # Send alert if this was a rescue order
                 if tracked.down_rescue_attempted:
@@ -353,6 +430,7 @@ class RebatesBot:
         # Check if market has gone LIVE
         if tracked.status == "UPCOMING" and now >= tracked.event_start:
             tracked.status = "LIVE"
+            update_rebates_market_status(tracked.slug, "LIVE")
             if not tracked.logged_live:
                 self.log(f"MARKET LIVE: {tracked.question}")
                 tracked.logged_live = True
@@ -361,6 +439,7 @@ class RebatesBot:
         resolution_time = tracked.event_start + timedelta(minutes=15)
         if tracked.status == "LIVE" and now >= resolution_time:
             tracked.status = "RESOLVED"
+            update_rebates_market_status(tracked.slug, "RESOLVED")
             if not tracked.logged_resolved:
                 self.log(f"MARKET RESOLVED: {tracked.question}")
                 # Log final fill status
@@ -439,6 +518,9 @@ class RebatesBot:
             tracked.redeemed = True
             tracked.redeem_attempted = True
             tracked.status = "REDEEMED"
+
+            # Update database
+            mark_rebates_market_redeemed(tracked.slug)
 
             # Send Telegram alert
             send_rebates_redemption_alert(
@@ -596,6 +678,21 @@ class RebatesBot:
                 tick_size=tick_size,
             )
             self.log(f"SUCCESS: {result.message}")
+
+            # Persist to database for restart recovery
+            event_start_iso = (event_start or datetime.now(timezone.utc)).isoformat()
+            save_rebates_market(
+                slug=slug,
+                question=question,
+                condition_id=condition_id,
+                up_token=up_token,
+                down_token=down_token,
+                event_start=event_start_iso,
+                up_price=result.up_price,
+                down_price=result.down_price,
+                neg_risk=neg_risk,
+                tick_size=tick_size
+            )
 
             # Send Telegram alert for orders placed
             send_rebates_order_alert(

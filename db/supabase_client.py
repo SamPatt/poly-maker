@@ -570,3 +570,204 @@ def init_database() -> None:
         cursor.execute(schema_sql)
 
     print("Database initialized successfully")
+
+
+# ============================================
+# Rebates Bot Database Functions
+# ============================================
+
+def save_rebates_market(
+    slug: str,
+    question: str,
+    condition_id: str,
+    up_token: str,
+    down_token: str,
+    event_start: str,
+    up_price: float,
+    down_price: float,
+    neg_risk: bool = False,
+    tick_size: float = 0.01
+) -> bool:
+    """
+    Save a rebates market to the database when orders are placed.
+
+    Args:
+        slug: Market slug (unique identifier)
+        question: Market question text
+        condition_id: Market condition ID for redemption
+        up_token: UP token ID
+        down_token: DOWN token ID
+        event_start: Event start time (ISO format)
+        up_price: UP order price
+        down_price: DOWN order price
+        neg_risk: Whether market uses negative risk
+        tick_size: Minimum price increment
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO rebates_markets (
+                    slug, question, condition_id, up_token, down_token,
+                    event_start, up_price, down_price, neg_risk, tick_size, status
+                )
+                VALUES (
+                    %(slug)s, %(question)s, %(condition_id)s, %(up_token)s, %(down_token)s,
+                    %(event_start)s, %(up_price)s, %(down_price)s, %(neg_risk)s, %(tick_size)s, 'UPCOMING'
+                )
+                ON CONFLICT (slug) DO UPDATE SET
+                    up_price = EXCLUDED.up_price,
+                    down_price = EXCLUDED.down_price
+            """, {
+                "slug": slug,
+                "question": question,
+                "condition_id": condition_id,
+                "up_token": up_token,
+                "down_token": down_token,
+                "event_start": event_start,
+                "up_price": up_price,
+                "down_price": down_price,
+                "neg_risk": neg_risk,
+                "tick_size": tick_size
+            })
+        return True
+    except Exception as e:
+        print(f"Error saving rebates market: {e}")
+        return False
+
+
+def update_rebates_market_status(slug: str, status: str) -> bool:
+    """
+    Update the status of a rebates market.
+
+    Args:
+        slug: Market slug
+        status: New status (UPCOMING, LIVE, RESOLVED, REDEEMED)
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                UPDATE rebates_markets
+                SET status = %(status)s
+                WHERE slug = %(slug)s
+            """, {"slug": slug, "status": status})
+        return True
+    except Exception as e:
+        print(f"Error updating rebates market status: {e}")
+        return False
+
+
+def update_rebates_market_fills(
+    slug: str,
+    up_filled: Optional[bool] = None,
+    down_filled: Optional[bool] = None
+) -> bool:
+    """
+    Update fill status for a rebates market.
+
+    Args:
+        slug: Market slug
+        up_filled: Whether UP order was filled (or None to leave unchanged)
+        down_filled: Whether DOWN order was filled (or None to leave unchanged)
+
+    Returns:
+        True if successful
+    """
+    try:
+        updates = []
+        params = {"slug": slug}
+
+        if up_filled is not None:
+            updates.append("up_filled = %(up_filled)s")
+            params["up_filled"] = up_filled
+        if down_filled is not None:
+            updates.append("down_filled = %(down_filled)s")
+            params["down_filled"] = down_filled
+
+        if not updates:
+            return True
+
+        with get_db_cursor() as cursor:
+            cursor.execute(f"""
+                UPDATE rebates_markets
+                SET {", ".join(updates)}
+                WHERE slug = %(slug)s
+            """, params)
+        return True
+    except Exception as e:
+        print(f"Error updating rebates market fills: {e}")
+        return False
+
+
+def get_pending_rebates_markets() -> pd.DataFrame:
+    """
+    Get rebates markets that are not yet redeemed.
+
+    Returns markets in UPCOMING, LIVE, or RESOLVED status that
+    need to be tracked for redemption.
+
+    Returns:
+        DataFrame with pending rebates markets
+    """
+    with get_db_cursor(commit=False) as cursor:
+        cursor.execute("""
+            SELECT * FROM rebates_markets
+            WHERE status != 'REDEEMED'
+            ORDER BY event_start ASC
+        """)
+        rows = cursor.fetchall()
+
+    if rows:
+        return pd.DataFrame(rows)
+    return pd.DataFrame()
+
+
+def mark_rebates_market_redeemed(slug: str) -> bool:
+    """
+    Mark a rebates market as redeemed.
+
+    Args:
+        slug: Market slug
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                UPDATE rebates_markets
+                SET status = 'REDEEMED', redeemed = true
+                WHERE slug = %(slug)s
+            """, {"slug": slug})
+        return True
+    except Exception as e:
+        print(f"Error marking rebates market redeemed: {e}")
+        return False
+
+
+def cleanup_old_rebates_markets(days: int = 7) -> int:
+    """
+    Delete old redeemed rebates markets.
+
+    Args:
+        days: Delete markets older than this many days
+
+    Returns:
+        Number of deleted records
+    """
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM rebates_markets
+                WHERE status = 'REDEEMED'
+                AND created_at < NOW() - INTERVAL '%s days'
+            """, (days,))
+            return cursor.rowcount
+    except Exception as e:
+        print(f"Error cleaning up old rebates markets: {e}")
+        return 0
