@@ -125,7 +125,8 @@ class DeltaNeutralStrategy:
         token_id: str,
         tick_size: float = 0.01,
         max_price: Optional[float] = None,
-        min_price: float = 0.40
+        min_price: float = 0.40,
+        aggression: float = 0.0
     ) -> Optional[float]:
         """
         Get the best price for a maker BUY order using VWAP-based pricing.
@@ -135,9 +136,10 @@ class DeltaNeutralStrategy:
         orders to manipulate the bot's pricing.
 
         Strategy:
-        - max_safe_price = best_ask - 2*tick_size (don't cross the book)
+        - max_safe_price = best_ask - 1*tick_size (don't cross the book)
         - vwap_bid = volume-weighted average of top bids (ignoring small orders)
-        - competitive_price = vwap_bid + tick_size
+        - spread = best_ask - vwap_bid
+        - competitive_price = vwap_bid + tick_size + (spread * aggression)
         - our_price = min(competitive_price, max_safe_price, max_price)
 
         Args:
@@ -145,6 +147,10 @@ class DeltaNeutralStrategy:
             tick_size: Minimum price increment
             max_price: Optional ceiling for our price (for rescue scenarios)
             min_price: Floor for our price (default 0.40)
+            aggression: How much of the spread to cross (0.0 = at bid, 1.0 = at ask)
+                       - 0.0: Conservative, place at top of bid queue
+                       - 0.5: Place halfway between bid and ask
+                       - 0.8: Aggressive, place very close to ask
 
         Returns None if order book fetch fails.
         """
@@ -162,12 +168,14 @@ class DeltaNeutralStrategy:
             bids = data.get("bids", [])
 
             # Calculate maximum safe price (don't cross the book)
+            # Only need 1 tick buffer to avoid crossing
             if asks:
                 asks_sorted = sorted(asks, key=lambda x: float(x["price"]))
                 best_ask = float(asks_sorted[0]["price"])
-                max_safe_price = round(best_ask - (2 * tick_size), 2)
+                max_safe_price = round(best_ask - tick_size, 2)
             else:
                 # No asks = no sellers, we can place at any price up to max
+                best_ask = None
                 max_safe_price = max_price
 
             # Calculate competitive price using VWAP (protects against spoofing)
@@ -177,10 +185,17 @@ class DeltaNeutralStrategy:
 
                 # Use VWAP instead of just best bid
                 vwap_bid = self._calculate_vwap(bids_sorted, min_order_size=5.0, depth_limit=5)
-                if vwap_bid is not None:
-                    competitive_price = round(vwap_bid + tick_size, 2)
+                if vwap_bid is None:
+                    vwap_bid = best_bid
+
+                # Calculate spread and apply aggression
+                if best_ask is not None:
+                    spread = best_ask - vwap_bid
+                    # Base price is 1 tick above VWAP, then add aggression portion of spread
+                    competitive_price = round(vwap_bid + tick_size + (spread * aggression), 2)
                 else:
-                    competitive_price = round(best_bid + tick_size, 2)
+                    # No asks, just go 1 tick above bid
+                    competitive_price = round(vwap_bid + tick_size, 2)
             else:
                 # No bids = no competition, use a reasonable default
                 best_bid = None
@@ -196,9 +211,10 @@ class DeltaNeutralStrategy:
 
             # Log pricing details for monitoring
             best_bid_str = f"{best_bid:.2f}" if best_bid else "none"
-            vwap_str = f"{vwap_bid:.2f}" if vwap_bid else "none"
-            best_ask_str = f"{best_ask:.2f}" if asks else "none"
-            print(f"  Pricing: bid={best_bid_str} vwap={vwap_str} ask={best_ask_str} -> competitive={competitive_price:.2f} safe={max_safe_price:.2f} max={max_price:.2f} -> final={maker_price:.2f}")
+            vwap_str = f"{vwap_bid:.2f}" if vwap_bid is not None else "none"
+            best_ask_str = f"{best_ask:.2f}" if best_ask else "none"
+            agg_str = f" agg={aggression:.0%}" if aggression > 0 else ""
+            print(f"  Pricing: bid={best_bid_str} vwap={vwap_str} ask={best_ask_str}{agg_str} -> competitive={competitive_price:.2f} safe={max_safe_price:.2f} max={max_price:.2f} -> final={maker_price:.2f}")
 
             return maker_price
 
@@ -260,7 +276,8 @@ class DeltaNeutralStrategy:
             return False, "Could not get taker price"
 
         # Cap at reasonable price to avoid disasters
-        if taker_price > 0.65:
+        # Using 0.70 as cap - better to lose 20% than 100% at resolution
+        if taker_price > 0.70:
             print(f"[{timestamp}] Taker price too high ({taker_price:.2f}), skipping rescue")
             return False, f"Taker price too high: {taker_price}"
 

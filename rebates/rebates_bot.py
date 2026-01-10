@@ -264,15 +264,20 @@ class RebatesBot:
         If one side is filled but the other isn't, we have directional exposure.
         This method tries to fill the missing side by:
         1. Re-placing at a more aggressive price (based on orderbook)
-        2. As time runs out, allowing higher price ceilings
+        2. As time runs out, increasing both price ceiling AND aggression
         3. Last resort: crossing the spread (taker order)
 
-        Price ceiling escalation based on time remaining:
-        - > 10 min: max 0.52
-        - 5-10 min: max 0.55
-        - 2-5 min: max 0.58
-        - < 2 min: max 0.60
-        - < 30 sec: taker order (cross spread, cap at 0.65)
+        AGGRESSIVE price ceiling + spread aggression escalation:
+        | Time Left | Max Price | Aggression | Strategy                   |
+        |-----------|-----------|------------|----------------------------|
+        | > 12 min  | 0.55      | 20%        | Start aggressive           |
+        | 8-12 min  | 0.58      | 30%        | Push toward ask            |
+        | 5-8 min   | 0.60      | 40%        | More urgent                |
+        | 2-5 min   | 0.62      | 60%        | Getting desperate          |
+        | 1-2 min   | 0.65      | 80%        | Almost at ask              |
+        | < 60 sec  | TAKER     | 100%       | Cross spread (cap 0.70)    |
+
+        Rationale: Better to pay 55-65% than lose 100% at resolution.
         """
         if DRY_RUN:
             return
@@ -321,27 +326,43 @@ class RebatesBot:
         """
         Rescue a single unfilled side by re-placing at better price.
 
+        AGGRESSIVE rescue strategy - prioritize getting filled over saving money.
+        Better to pay 55-60% than lose 100% at resolution.
+
+        Price ceiling AND aggression escalation:
+        | Time Left | Max Price | Aggression | Meaning                    |
+        |-----------|-----------|------------|----------------------------|
+        | > 12 min  | 0.55      | 20%        | 20% of spread toward ask   |
+        | 8-12 min  | 0.58      | 30%        | 30% of spread toward ask   |
+        | 5-8 min   | 0.60      | 40%        | 40% of spread toward ask   |
+        | 2-5 min   | 0.62      | 60%        | 60% of spread toward ask   |
+        | 1-2 min   | 0.65      | 80%        | 80% of spread toward ask   |
+        | < 60 sec  | TAKER     | 100%       | Cross spread (cap at 0.70) |
+
+        Example: If bid=0.48, ask=0.52 (spread=0.04):
+        - 20% aggression: 0.48 + 0.01 + (0.04 * 0.2) = 0.498 -> 0.50
+        - 60% aggression: 0.48 + 0.01 + (0.04 * 0.6) = 0.514 -> 0.51
+        - 80% aggression: 0.48 + 0.01 + (0.04 * 0.8) = 0.522 -> 0.52
+
         Args:
             tracked: The tracked market
             side: "UP" or "DOWN"
             token_id: Token ID for the unfilled side
             time_remaining: Seconds until resolution
         """
-        # SAFETY: Check if rescue was already attempted for this side
-        # This prevents the race condition where an order fills between
-        # check_order_fills() and rescue, causing us to place duplicate orders
-        if side == "UP" and tracked.up_rescue_attempted:
-            return
-        if side == "DOWN" and tracked.down_rescue_attempted:
-            return
-
         # Get current price for alerts
         current_price = tracked.up_price if side == "UP" else tracked.down_price
 
-        # Determine max price based on time remaining
-        if time_remaining < 30:
-            # Last resort - taker order
-            self.log(f"  RESCUE {side}: <30s remaining, attempting taker order")
+        # Determine max price based on time remaining - AGGRESSIVE thresholds
+        if time_remaining < 60:
+            # Last resort - taker order at 60 seconds (was 30)
+            # Only attempt taker once
+            if side == "UP" and tracked.up_rescue_attempted:
+                return
+            if side == "DOWN" and tracked.down_rescue_attempted:
+                return
+
+            self.log(f"  RESCUE {side}: <60s remaining, attempting taker order")
             taker_price = self.strategy.get_taker_price(token_id)
             success, result = self.strategy.place_taker_order(
                 token_id, self.strategy.trade_size, tracked.neg_risk
@@ -350,8 +371,10 @@ class RebatesBot:
                 self.log(f"  RESCUE {side}: Taker order placed")
                 if side == "UP":
                     tracked.up_filled = True
+                    tracked.up_rescue_attempted = True
                 else:
                     tracked.down_filled = True
+                    tracked.down_rescue_attempted = True
                 # Send rescue alert
                 alert_result = send_rebates_rescue_alert(
                     question=tracked.question,
@@ -364,22 +387,36 @@ class RebatesBot:
                 self.log(f"  RESCUE {side}: Taker alert sent={alert_result}")
             else:
                 self.log(f"  RESCUE {side}: Taker order failed: {result}")
+                # Mark as attempted so we don't spam taker orders
+                if side == "UP":
+                    tracked.up_rescue_attempted = True
+                else:
+                    tracked.down_rescue_attempted = True
             return
 
-        elif time_remaining < 120:  # < 2 min
+        elif time_remaining < 120:  # 1-2 min
+            max_price = 0.65
+            aggression = 0.8  # Very aggressive - 80% toward ask
+        elif time_remaining < 300:  # 2-5 min
+            max_price = 0.62
+            aggression = 0.6  # Aggressive - 60% toward ask
+        elif time_remaining < 480:  # 5-8 min
             max_price = 0.60
-        elif time_remaining < 300:  # < 5 min
+            aggression = 0.4  # Moderate - 40% toward ask
+        elif time_remaining < 720:  # 8-12 min
             max_price = 0.58
-        elif time_remaining < 600:  # < 10 min
+            aggression = 0.3  # Slightly aggressive - 30% toward ask
+        else:  # > 12 min
             max_price = 0.55
-        else:
-            max_price = 0.52
+            aggression = 0.2  # Start with some aggression - 20% toward ask
 
         # Get competitive price from orderbook (up to our ceiling)
+        # Aggression determines how close to the ask we place
         new_price = self.strategy.get_best_maker_price(
             token_id,
             tracked.tick_size,
-            max_price=max_price
+            max_price=max_price,
+            aggression=aggression
         )
 
         if new_price is None:
@@ -387,6 +424,7 @@ class RebatesBot:
             return
 
         # Only update if price is better than current
+        # This allows multiple rescues as price ceiling increases
         if new_price <= current_price:
             # Already at or above this price, no change needed
             return
@@ -401,12 +439,12 @@ class RebatesBot:
         if success:
             if side == "UP":
                 tracked.up_price = new_price
-                tracked.up_rescue_attempted = True
+                # Don't set rescue_attempted - allow further rescues at higher prices
                 if new_order_id and not new_order_id.startswith("Failed"):
                     tracked.up_order_id = new_order_id
             else:
                 tracked.down_price = new_price
-                tracked.down_rescue_attempted = True
+                # Don't set rescue_attempted - allow further rescues at higher prices
                 if new_order_id and not new_order_id.startswith("Failed"):
                     tracked.down_order_id = new_order_id
 
