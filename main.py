@@ -26,7 +26,7 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 # Try to import Telegram alerts (optional)
 try:
-    from alerts.telegram import send_startup_alert, send_shutdown_alert, send_error_alert
+    from alerts.telegram import send_startup_alert, send_shutdown_alert, send_error_alert, send_rebates_redemption_alert
     TELEGRAM_ENABLED = True
 except ImportError:
     TELEGRAM_ENABLED = False
@@ -184,6 +184,13 @@ def check_and_redeem_resolved_positions():
             def on_success(cid, tx_hash):
                 print(f"[REDEMPTION] Success! Condition: {cid[:20]}... TX: {tx_hash[:20] if tx_hash else 'unknown'}...")
                 _redeemed_markets.add(cid)
+                # Send Telegram alert
+                if TELEGRAM_ENABLED:
+                    send_rebates_redemption_alert(
+                        question=f"Trading Bot Position (condition: {cid[:16]}...)",
+                        condition_id=cid,
+                        dry_run=DRY_RUN
+                    )
 
             def on_error(cid, error_msg):
                 print(f"[REDEMPTION] Failed for {cid[:20]}...: {error_msg[:100]}")
