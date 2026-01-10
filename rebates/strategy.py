@@ -106,11 +106,13 @@ class DeltaNeutralStrategy:
                 post_only=True
             )
 
-            if not up_resp or "error" in str(up_resp).lower():
-                # Post-only rejection means our order would have been a taker
-                if "post" in str(up_resp).lower() or "reject" in str(up_resp).lower():
-                    return False, f"Up order rejected (would be taker): {up_resp}"
-                return False, f"Failed to place Up order: {up_resp}"
+            # Check for success - API returns {'success': True, 'status': 'live'} on success
+            up_success = up_resp and up_resp.get("success") == True
+            if not up_success:
+                error_msg = up_resp.get("errorMsg", "") if up_resp else "Empty response"
+                return False, f"Failed to place Up order: {error_msg}"
+
+            print(f"[{timestamp}] Up order placed: {up_resp.get('orderID', 'unknown')[:20]}...")
 
             # Place Down order (BUY on the Down outcome)
             print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {self.target_price} (post-only)")
@@ -123,16 +125,19 @@ class DeltaNeutralStrategy:
                 post_only=True
             )
 
-            if not down_resp or "error" in str(down_resp).lower():
+            # Check for success
+            down_success = down_resp and down_resp.get("success") == True
+            if not down_success:
                 # Try to cancel the Up order if Down failed
                 print(f"[{timestamp}] Down order failed, cancelling Up order")
                 try:
                     self.client.cancel_all_asset(up_token)
                 except Exception:
                     pass
-                if "post" in str(down_resp).lower() or "reject" in str(down_resp).lower():
-                    return False, f"Down order rejected (would be taker): {down_resp}"
-                return False, f"Failed to place Down order: {down_resp}"
+                error_msg = down_resp.get("errorMsg", "") if down_resp else "Empty response"
+                return False, f"Failed to place Down order: {error_msg}"
+
+            print(f"[{timestamp}] Down order placed: {down_resp.get('orderID', 'unknown')[:20]}...")
 
             return True, f"Placed POST-ONLY mirror orders on {slug}"
 
