@@ -157,7 +157,7 @@ def fetch_and_process_data():
                      'volatility_sum', 'volatilty/reward', 'min_size',
                      '1_hour', '3_hour', '6_hour', '12_hour', '24_hour', '7_day', '30_day',
                      'best_bid', 'best_ask', 'volatility_price', 'max_spread', 'tick_size',
-                     'neg_risk', 'market_slug', 'event_slug', 'token1', 'token2', 'condition_id']]
+                     'neg_risk', 'market_slug', 'event_slug', 'end_date_iso', 'token1', 'token2', 'condition_id']]
 
     # Calculate composite score for smart ranking
     def calculate_composite_score(df):

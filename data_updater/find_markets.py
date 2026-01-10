@@ -360,7 +360,7 @@ def get_markets(all_results, sel_df, maker_reward=1):
     new_df = new_df.sort_values('rewards_daily_rate', ascending=False)
     new_df[' '] = ''
 
-    new_df = new_df[['question', 'answer1', 'answer2', 'neg_risk', 'spread', 'best_bid', 'best_ask', 'rewards_daily_rate', 'bid_reward_per_100', 'ask_reward_per_100', 'gm_reward_per_100', 'sm_reward_per_100', 'min_size', 'max_spread', 'tick_size', 'market_slug', 'token1', 'token2', 'condition_id']]
+    new_df = new_df[['question', 'answer1', 'answer2', 'neg_risk', 'spread', 'best_bid', 'best_ask', 'rewards_daily_rate', 'bid_reward_per_100', 'ask_reward_per_100', 'gm_reward_per_100', 'sm_reward_per_100', 'min_size', 'max_spread', 'tick_size', 'market_slug', 'end_date_iso', 'token1', 'token2', 'condition_id']]
     new_df = new_df.replace([np.inf, -np.inf], 0)
     all_data = new_df.copy()
     s_df = new_df.copy()

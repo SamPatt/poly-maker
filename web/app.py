@@ -231,7 +231,9 @@ async def markets_list(
                         SELECT m.question, m.answer1, m.answer2, m.best_bid, m.best_ask,
                                m.gm_reward_per_100, m.volatility_sum, m.min_size, m.neg_risk,
                                m.composite_score, m.market_slug, m.event_slug,
-                               s.event_date, s.exit_before_event
+                               COALESCE(s.event_date, m.end_date) as event_date,
+                               s.exit_before_event,
+                               m.end_date as api_end_date
                         FROM all_markets m
                         INNER JOIN selected_markets s ON m.question = s.question
                         WHERE s.enabled = true

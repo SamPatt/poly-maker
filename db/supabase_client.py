@@ -219,6 +219,7 @@ def upsert_all_markets(df: pd.DataFrame) -> None:
         "14_day": "day_14",
         "30_day": "day_30",
         "volatilty/reward": "volatility_reward_ratio",
+        "end_date_iso": "end_date",
     }
 
     df = df.rename(columns=column_mapping)
@@ -235,7 +236,7 @@ def upsert_all_markets(df: pd.DataFrame) -> None:
         "bid_reward_per_100", "ask_reward_per_100", "volatility_sum",
         "volatility_reward_ratio", "min_size", "hour_1", "hour_3", "hour_6",
         "hour_12", "hour_24", "day_7", "day_14", "day_30", "volatility_price",
-        "max_spread", "tick_size", "composite_score"
+        "max_spread", "tick_size", "composite_score", "end_date"
     ]
 
     available_cols = [c for c in columns if c in df.columns]

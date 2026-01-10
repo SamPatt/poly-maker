@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS all_markets (
     volatility_price FLOAT,
     max_spread FLOAT,
     tick_size FLOAT,
+    end_date DATE,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
