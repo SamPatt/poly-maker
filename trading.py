@@ -144,18 +144,23 @@ def send_buy_order(order):
 
                 # Send Telegram alert and record trade
                 if TELEGRAM_ENABLED:
-                    row = order.get('row', {}) if isinstance(order.get('row'), dict) else {}
-                    market_question = row.get('question')
+                    # row can be a dict or pandas Series - both have .get() method
+                    row = order.get('row', {})
+                    if row is None:
+                        row = {}
+                    market_question = row.get('question') if hasattr(row, 'get') else None
                     # Determine outcome name based on which token is being traded
                     outcome = None
-                    if row.get('token1') and str(order['token']) == str(row['token1']):
+                    token1 = row.get('token1') if hasattr(row, 'get') else None
+                    token2 = row.get('token2') if hasattr(row, 'get') else None
+                    if token1 and str(order['token']) == str(token1):
                         outcome = row.get('answer1', 'Yes')
-                    elif row.get('token2') and str(order['token']) == str(row['token2']):
+                    elif token2 and str(order['token']) == str(token2):
                         outcome = row.get('answer2', 'No')
-                    print(f"[ALERT DEBUG] market_question={market_question}, outcome={outcome}, token1={row.get('token1')}, token2={row.get('token2')}, order_token={order['token']}")
                     send_trade_alert('BUY', order['token'], order['price'], order['size'], market_question, outcome)
                 if DB_ENABLED:
-                    market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
+                    row_for_db = order.get('row', {})
+                    market_question = row_for_db.get('question') if hasattr(row_for_db, 'get') else None
                     record_trade(order['token'], 'BUY', order['price'], order['size'], market_question)
         else:
             print("Not creating buy order because its outside acceptable price range (0.1-0.9)")
@@ -230,18 +235,23 @@ def send_sell_order(order):
 
         # Send Telegram alert and record trade
         if TELEGRAM_ENABLED:
-            row = order.get('row', {}) if isinstance(order.get('row'), dict) else {}
-            market_question = row.get('question')
+            # row can be a dict or pandas Series - both have .get() method
+            row = order.get('row', {})
+            if row is None:
+                row = {}
+            market_question = row.get('question') if hasattr(row, 'get') else None
             # Determine outcome name based on which token is being traded
             outcome = None
-            if row.get('token1') and str(order['token']) == str(row['token1']):
+            token1 = row.get('token1') if hasattr(row, 'get') else None
+            token2 = row.get('token2') if hasattr(row, 'get') else None
+            if token1 and str(order['token']) == str(token1):
                 outcome = row.get('answer1', 'Yes')
-            elif row.get('token2') and str(order['token']) == str(row['token2']):
+            elif token2 and str(order['token']) == str(token2):
                 outcome = row.get('answer2', 'No')
-            print(f"[ALERT DEBUG] SELL market_question={market_question}, outcome={outcome}")
             send_trade_alert('SELL', order['token'], order['price'], order['size'], market_question, outcome)
         if DB_ENABLED:
-            market_question = order.get('row', {}).get('question') if isinstance(order.get('row'), dict) else None
+            row_for_db = order.get('row', {})
+            market_question = row_for_db.get('question') if hasattr(row_for_db, 'get') else None
             record_trade(order['token'], 'SELL', order['price'], order['size'], market_question)
 
 # Dictionary to store locks for each market to prevent concurrent trading on the same market
