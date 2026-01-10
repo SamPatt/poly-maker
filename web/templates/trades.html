@@ -56,9 +56,9 @@
                 {% for trade in trades %}
                 <tr>
                     <td class="text-muted">
-                        {% if trade.timestamp %}
-                        <div>{{ trade.timestamp.strftime('%Y-%m-%d') }}</div>
-                        <div style="font-size: 0.8rem;">{{ trade.timestamp.strftime('%H:%M:%S') }}</div>
+                        {% if trade.created_at %}
+                        <div>{{ trade.created_at.strftime('%Y-%m-%d') }}</div>
+                        <div style="font-size: 0.8rem;">{{ trade.created_at.strftime('%H:%M:%S') }}</div>
                         {% else %}
                         N/A
                         {% endif %}

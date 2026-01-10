@@ -103,7 +103,7 @@
                 {% for trade in recent_trades %}
                 <tr>
                     <td class="text-muted">
-                        {{ trade.timestamp.strftime('%H:%M:%S') if trade.timestamp else 'N/A' }}
+                        {{ trade.created_at.strftime('%H:%M:%S') if trade.created_at else 'N/A' }}
                     </td>
                     <td>
                         <span class="badge {% if trade.side == 'BUY' %}badge-success{% else %}badge-danger{% endif %}">
