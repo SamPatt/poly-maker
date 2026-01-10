@@ -250,7 +250,7 @@ class RebatesBot:
                 else:
                     tracked.down_filled = True
                 # Send rescue alert
-                send_rebates_rescue_alert(
+                alert_result = send_rebates_rescue_alert(
                     question=tracked.question,
                     side=side,
                     old_price=current_price,
@@ -258,6 +258,7 @@ class RebatesBot:
                     is_taker=True,
                     dry_run=DRY_RUN
                 )
+                self.log(f"  RESCUE {side}: Taker alert sent={alert_result}")
             else:
                 self.log(f"  RESCUE {side}: Taker order failed: {result}")
             return
@@ -305,7 +306,7 @@ class RebatesBot:
                     tracked.down_order_id = new_order_id
 
             # Send rescue alert
-            send_rebates_rescue_alert(
+            alert_result = send_rebates_rescue_alert(
                 question=tracked.question,
                 side=side,
                 old_price=current_price,
@@ -313,6 +314,7 @@ class RebatesBot:
                 is_taker=False,
                 dry_run=DRY_RUN
             )
+            self.log(f"  RESCUE {side}: Alert sent={alert_result}")
         else:
             self.log(f"  RESCUE {side}: Update failed: {new_order_id}")
 
@@ -349,13 +351,14 @@ class RebatesBot:
                 tracked.logged_resolved = True
 
                 # Send Telegram alert for resolution
-                send_rebates_resolution_alert(
+                resolution_result = send_rebates_resolution_alert(
                     question=tracked.question,
                     up_filled=tracked.up_filled,
                     down_filled=tracked.down_filled,
                     trade_size=TRADE_SIZE,
                     dry_run=DRY_RUN
                 )
+                self.log(f"  Resolution alert sent={resolution_result}")
 
     def attempt_redemption(self, tracked: TrackedMarket) -> bool:
         """
