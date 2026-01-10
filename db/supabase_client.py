@@ -78,11 +78,11 @@ def get_selected_markets() -> pd.DataFrame:
     Get markets selected for trading.
 
     Returns:
-        DataFrame with columns: question, param_type, enabled
+        DataFrame with columns: question, param_type, enabled, event_date, exit_before_event
     """
     with get_db_cursor(commit=False) as cursor:
         cursor.execute("""
-            SELECT question, param_type, enabled
+            SELECT question, param_type, enabled, event_date, exit_before_event
             FROM selected_markets
             WHERE enabled = true
         """)
@@ -90,7 +90,7 @@ def get_selected_markets() -> pd.DataFrame:
 
     if rows:
         return pd.DataFrame(rows)
-    return pd.DataFrame(columns=["question", "param_type", "enabled"])
+    return pd.DataFrame(columns=["question", "param_type", "enabled", "event_date", "exit_before_event"])
 
 
 def get_hyperparameters() -> Dict[str, Dict[str, float]]:
@@ -446,6 +446,40 @@ def remove_selected_market(question: str) -> bool:
         return True
     except Exception as e:
         print(f"Error removing selected market: {e}")
+        return False
+
+
+def update_market_event_settings(
+    question: str,
+    event_date: Optional[str] = None,
+    exit_before_event: bool = False
+) -> bool:
+    """
+    Update event date and exit settings for a market.
+
+    Args:
+        question: Market question text
+        event_date: Event date in YYYY-MM-DD format (or None to clear)
+        exit_before_event: Whether to exit before event date
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                UPDATE selected_markets
+                SET event_date = %(event_date)s,
+                    exit_before_event = %(exit_before_event)s
+                WHERE question = %(question)s
+            """, {
+                "question": question,
+                "event_date": event_date if event_date else None,
+                "exit_before_event": exit_before_event
+            })
+        return True
+    except Exception as e:
+        print(f"Error updating market event settings: {e}")
         return False
 
 

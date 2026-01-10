@@ -188,15 +188,27 @@ async def markets_list(
     }
     order_by = sort_options.get(sort, sort_options["score"])
 
+    # Store event settings for selected markets
+    selected_event_settings = {}
+
     if db_status["connected"]:
         try:
             from db.supabase_client import get_db_cursor
 
-            # Get selected markets
+            # Get selected markets with event settings
             with get_db_cursor(commit=False) as cursor:
-                cursor.execute("SELECT question FROM selected_markets WHERE enabled = true")
+                cursor.execute("""
+                    SELECT question, event_date, exit_before_event
+                    FROM selected_markets WHERE enabled = true
+                """)
                 rows = cursor.fetchall()
                 selected_questions = {row["question"] for row in rows}
+                # Store event settings keyed by question
+                for row in rows:
+                    selected_event_settings[row["question"]] = {
+                        "event_date": row["event_date"],
+                        "exit_before_event": row["exit_before_event"]
+                    }
 
             # Build query with filters
             with get_db_cursor(commit=False) as cursor:
@@ -218,7 +230,8 @@ async def markets_list(
                     query = f"""
                         SELECT m.question, m.answer1, m.answer2, m.best_bid, m.best_ask,
                                m.gm_reward_per_100, m.volatility_sum, m.min_size, m.neg_risk,
-                               m.composite_score, m.market_slug, m.event_slug
+                               m.composite_score, m.market_slug, m.event_slug,
+                               s.event_date, s.exit_before_event
                         FROM all_markets m
                         INNER JOIN selected_markets s ON m.question = s.question
                         WHERE s.enabled = true
@@ -247,6 +260,7 @@ async def markets_list(
         "trading_bot_status": trading_bot_status,
         "markets": all_markets,
         "selected_questions": selected_questions,
+        "selected_event_settings": selected_event_settings,
         "search": search,
         "show_selected": show_selected,
         "selected_count": len(selected_questions),
@@ -293,6 +307,29 @@ async def toggle_market(
             redirect_url += "?" + "&".join(params)
 
         return RedirectResponse(url=redirect_url, status_code=303)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/markets/event-settings")
+async def update_event_settings(
+    question: str = Form(...),
+    event_date: str = Form(""),
+    exit_before_event: str = Form("")
+):
+    """Update event date and exit settings for a market."""
+    try:
+        from db.supabase_client import update_market_event_settings
+
+        # Convert checkbox value to boolean
+        exit_enabled = exit_before_event == "on" or exit_before_event == "true"
+
+        # Handle empty date
+        date_value = event_date if event_date.strip() else None
+
+        update_market_event_settings(question, date_value, exit_enabled)
+
+        return RedirectResponse(url="/markets?show_selected=true", status_code=303)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

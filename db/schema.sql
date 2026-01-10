@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS selected_markets (
     question TEXT UNIQUE NOT NULL,
     param_type TEXT DEFAULT 'default',
     enabled BOOLEAN DEFAULT true,
+    event_date DATE,
+    exit_before_event BOOLEAN DEFAULT false,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 

@@ -268,6 +268,69 @@ async def perform_trade(market):
             pos_1 = get_position(row['token1'])['size']
             pos_2 = get_position(row['token2'])['size']
 
+            # ------- EXIT BEFORE EVENT LOGIC -------
+            # If exit_before_event is enabled and we're within 1 day of event date,
+            # cancel orders and sell any one-sided positions
+            exit_before = row.get('exit_before_event')
+            if exit_before == True or exit_before == 'TRUE' or exit_before == 'true':
+                event_date = pd.to_datetime(row.get('event_date'), errors='coerce')
+                if pd.notna(event_date):
+                    now = pd.Timestamp.now(tz='UTC').tz_localize(None)
+                    # Ensure event_date is also tz-naive for comparison
+                    if event_date.tzinfo is not None:
+                        event_date = event_date.tz_localize(None)
+                    time_to_event = event_date - now
+
+                    if time_to_event <= pd.Timedelta(days=1):
+                        print(f"[EXIT BEFORE EVENT] Within 1 day of event ({event_date.date()})")
+
+                        # Cancel all open orders first
+                        client.cancel_all_market(market)
+
+                        # Check if position is one-sided
+                        if pos_1 > 0 and pos_2 == 0:
+                            # One-sided: only holding token1, need to sell
+                            print(f"  One-sided position (token1={pos_1:.2f}), selling at market")
+                            deets = get_best_bid_ask_deets(market, 'token1', 100, 0.1)
+                            if deets and deets.get('best_bid'):
+                                order = {
+                                    'token': int(row['token1']),
+                                    'price': deets['best_bid'],
+                                    'size': pos_1,
+                                    'neg_risk': row['neg_risk'],
+                                    'mid_price': (deets['best_bid'] + deets['best_ask']) / 2,
+                                    'max_spread': row.get('max_spread', 10),
+                                    'orders': {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
+                                }
+                                send_sell_order(order)
+
+                        elif pos_2 > 0 and pos_1 == 0:
+                            # One-sided: only holding token2, need to sell
+                            print(f"  One-sided position (token2={pos_2:.2f}), selling at market")
+                            deets = get_best_bid_ask_deets(market, 'token2', 100, 0.1)
+                            if deets and deets.get('best_bid'):
+                                order = {
+                                    'token': int(row['token2']),
+                                    'price': deets['best_bid'],
+                                    'size': pos_2,
+                                    'neg_risk': row['neg_risk'],
+                                    'mid_price': (deets['best_bid'] + deets['best_ask']) / 2,
+                                    'max_spread': row.get('max_spread', 10),
+                                    'orders': {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
+                                }
+                                send_sell_order(order)
+
+                        elif pos_1 > 0 and pos_2 > 0:
+                            # Balanced position - safe to hold through resolution
+                            print(f"  Balanced position (token1={pos_1:.2f}, token2={pos_2:.2f}), safe to resolve")
+                        else:
+                            print(f"  No position to exit")
+
+                        # Skip all other trading logic for this market
+                        gc.collect()
+                        await asyncio.sleep(2)
+                        return
+
             # ------- POSITION MERGING LOGIC -------
             # Calculate if we have opposing positions that can be merged
             amount_to_merge = min(pos_1, pos_2)
