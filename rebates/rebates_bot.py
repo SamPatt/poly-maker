@@ -48,6 +48,7 @@ from alerts.telegram import (
     send_rebates_startup_alert,
     send_rebates_order_alert,
     send_rebates_resolution_alert,
+    send_rebates_redemption_alert,
 )
 
 
@@ -212,6 +213,11 @@ class RebatesBot:
         if DRY_RUN:
             self.log(f"  [DRY RUN] Would redeem: {tracked.slug}")
             tracked.redeem_attempted = True
+            send_rebates_redemption_alert(
+                question=tracked.question,
+                condition_id=tracked.condition_id,
+                dry_run=True
+            )
             return True
 
         # Wait a bit after resolution for blockchain confirmation
@@ -232,6 +238,13 @@ class RebatesBot:
             tracked.redeemed = True
             tracked.redeem_attempted = True
             tracked.status = "REDEEMED"
+
+            # Send Telegram alert
+            send_rebates_redemption_alert(
+                question=tracked.question,
+                condition_id=tracked.condition_id,
+                dry_run=False
+            )
             return True
 
         except Exception as e:

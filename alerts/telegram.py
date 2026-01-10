@@ -368,3 +368,37 @@ def send_rebates_resolution_alert(
         message += f"<b>Rebate Volume:</b> ${rebate_volume:.2f}"
 
     return send_alert(message)
+
+
+def send_rebates_redemption_alert(
+    question: str,
+    condition_id: str,
+    dry_run: bool = False
+) -> bool:
+    """
+    Send alert when positions are successfully redeemed.
+
+    Args:
+        question: Market question
+        condition_id: Market condition ID
+        dry_run: Whether in dry-run mode
+
+    Returns:
+        True if sent successfully
+    """
+    if dry_run:
+        message = f"🧪 <b>[DRY RUN] Would Redeem</b>\n\n"
+        message += f"<b>Market:</b> {question[:80]}\n"
+        message += f"<b>Condition:</b> {condition_id[:20]}..."
+        return send_alert(message)
+
+    # Truncate long questions
+    if len(question) > 80:
+        question = question[:77] + "..."
+
+    message = f"💵 <b>Positions Redeemed</b>\n\n"
+    message += f"<b>Market:</b> {question}\n"
+    message += f"<b>Condition:</b> <code>{condition_id[:20]}...</code>\n"
+    message += f"<b>Status:</b> USDC recovered"
+
+    return send_alert(message)
