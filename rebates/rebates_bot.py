@@ -250,6 +250,14 @@ class RebatesBot:
             token_id: Token ID for the unfilled side
             time_remaining: Seconds until resolution
         """
+        # SAFETY: Check if rescue was already attempted for this side
+        # This prevents the race condition where an order fills between
+        # check_order_fills() and rescue, causing us to place duplicate orders
+        if side == "UP" and tracked.up_rescue_attempted:
+            return
+        if side == "DOWN" and tracked.down_rescue_attempted:
+            return
+
         # Get current price for alerts
         current_price = tracked.up_price if side == "UP" else tracked.down_price
 
