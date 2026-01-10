@@ -4,6 +4,7 @@ Delta-neutral strategy for 15-minute crypto markets.
 Places mirror YES/NO (Up/Down) orders at the same price to capture
 maker rebates without directional exposure.
 """
+import json
 from typing import Dict, Any, Tuple, Optional
 from datetime import datetime, timezone
 
@@ -38,6 +39,14 @@ class DeltaNeutralStrategy:
             Tuple of (up_token_id, down_token_id)
         """
         clob_tokens = market.get("clobTokenIds", [])
+
+        # API returns clobTokenIds as a JSON string, need to parse it
+        if isinstance(clob_tokens, str):
+            try:
+                clob_tokens = json.loads(clob_tokens)
+            except json.JSONDecodeError:
+                raise ValueError(f"Failed to parse clobTokenIds: {clob_tokens}")
+
         if len(clob_tokens) < 2:
             raise ValueError(f"Market missing token IDs: {market.get('slug', 'unknown')}")
 
