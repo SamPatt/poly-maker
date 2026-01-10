@@ -287,19 +287,19 @@ class PolymarketClient:
     def merge_positions(self, amount_to_merge, condition_id, is_neg_risk_market):
         """
         Merge positions in a market to recover collateral.
-        
+
         This function calls the external poly_merger Node.js script to execute
         the merge operation on-chain. When you hold both YES and NO positions
         in the same market, merging them recovers your USDC.
-        
+
         Args:
             amount_to_merge (int): Raw token amount to merge (before decimal conversion)
             condition_id (str): Market condition ID
             is_neg_risk_market (bool): Whether this is a negative risk market
-            
+
         Returns:
             str: Transaction hash or output from the merge script
-            
+
         Raises:
             Exception: If the merge operation fails
         """
@@ -311,13 +311,47 @@ class PolymarketClient:
 
         # Run the command and capture the output
         result = subprocess.run(node_command, shell=True, capture_output=True, text=True)
-        
+
         # Check if there was an error
         if result.returncode != 0:
             print("Error:", result.stderr)
             raise Exception(f"Error in merging positions: {result.stderr}")
-        
+
         print("Done merging")
+
+        # Return the transaction hash or output
+        return result.stdout
+
+    def redeem_positions(self, condition_id):
+        """
+        Redeem winning positions after a market resolves.
+
+        This function calls the external poly_merger/redeem.js Node.js script to
+        execute the redemption on-chain. After a market resolves, winning outcome
+        tokens can be redeemed for USDC collateral.
+
+        Args:
+            condition_id (str): Market condition ID
+
+        Returns:
+            str: Transaction hash or output from the redeem script
+
+        Raises:
+            Exception: If the redemption fails
+        """
+        # Prepare the command to run the JavaScript script
+        node_command = f'node poly_merger/redeem.js {condition_id}'
+        print(f"Redeeming positions: {node_command}")
+
+        # Run the command and capture the output
+        result = subprocess.run(node_command, shell=True, capture_output=True, text=True)
+
+        # Check if there was an error
+        if result.returncode != 0:
+            print("Error:", result.stderr)
+            raise Exception(f"Error redeeming positions: {result.stderr}")
+
+        print("Done redeeming")
 
         # Return the transaction hash or output
         return result.stdout

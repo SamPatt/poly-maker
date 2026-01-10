@@ -60,11 +60,14 @@ class TrackedMarket:
     up_token: str
     down_token: str
     order_time: datetime
-    status: str = "UPCOMING"  # UPCOMING -> LIVE -> RESOLVED
+    condition_id: str = ""  # For redemption
+    status: str = "UPCOMING"  # UPCOMING -> LIVE -> RESOLVED -> REDEEMED
     up_filled: bool = False
     down_filled: bool = False
     logged_live: bool = False
     logged_resolved: bool = False
+    redeemed: bool = False
+    redeem_attempted: bool = False
 
 
 class RebatesBot:
@@ -183,6 +186,59 @@ class RebatesBot:
                     dry_run=DRY_RUN
                 )
 
+    def attempt_redemption(self, tracked: TrackedMarket) -> bool:
+        """
+        Attempt to redeem winning positions for a resolved market.
+
+        Returns True if redemption succeeded or was skipped.
+        """
+        # Skip if already redeemed or attempted
+        if tracked.redeemed or tracked.redeem_attempted:
+            return True
+
+        # Skip if no condition ID
+        if not tracked.condition_id:
+            self.log(f"  No condition ID for redemption: {tracked.slug}")
+            tracked.redeem_attempted = True
+            return False
+
+        # Skip if no fills (nothing to redeem)
+        if not tracked.up_filled and not tracked.down_filled:
+            self.log(f"  No fills to redeem: {tracked.slug}")
+            tracked.redeem_attempted = True
+            return True
+
+        # Skip in dry run mode
+        if DRY_RUN:
+            self.log(f"  [DRY RUN] Would redeem: {tracked.slug}")
+            tracked.redeem_attempted = True
+            return True
+
+        # Wait a bit after resolution for blockchain confirmation
+        resolution_time = tracked.event_start + timedelta(minutes=15)
+        time_since_resolution = (datetime.now(timezone.utc) - resolution_time).total_seconds()
+
+        # Wait at least 60 seconds after resolution before redeeming
+        if time_since_resolution < 60:
+            return False
+
+        try:
+            self.log(f"  Redeeming positions: {tracked.slug}")
+            self.log(f"    Condition ID: {tracked.condition_id}")
+
+            result = self.client.redeem_positions(tracked.condition_id)
+
+            self.log(f"  Redemption successful!")
+            tracked.redeemed = True
+            tracked.redeem_attempted = True
+            tracked.status = "REDEEMED"
+            return True
+
+        except Exception as e:
+            self.log(f"  Redemption failed: {e}")
+            tracked.redeem_attempted = True
+            return False
+
     def monitor_tracked_markets(self) -> None:
         """Monitor all tracked markets for status changes and fills."""
         for slug, tracked in list(self.tracked_markets.items()):
@@ -193,10 +249,14 @@ class RebatesBot:
             if tracked.status == "LIVE":
                 self.check_order_fills(tracked)
 
-        # Cleanup old resolved markets (keep last 50)
-        resolved = [s for s, t in self.tracked_markets.items() if t.status == "RESOLVED"]
-        if len(resolved) > 50:
-            for slug in resolved[:len(resolved) - 50]:
+            # Attempt redemption for RESOLVED markets
+            if tracked.status == "RESOLVED":
+                self.attempt_redemption(tracked)
+
+        # Cleanup old redeemed markets (keep last 50)
+        redeemed = [s for s, t in self.tracked_markets.items() if t.status == "REDEEMED"]
+        if len(redeemed) > 50:
+            for slug in redeemed[:len(redeemed) - 50]:
                 del self.tracked_markets[slug]
 
     def process_market(self, market: dict) -> bool:
@@ -239,6 +299,9 @@ class RebatesBot:
             except Exception:
                 up_token, down_token = "", ""
 
+            # Get condition ID for redemption
+            condition_id = market.get("conditionId", "")
+
             self.tracked_markets[slug] = TrackedMarket(
                 slug=slug,
                 question=question,
@@ -246,6 +309,7 @@ class RebatesBot:
                 up_token=up_token,
                 down_token=down_token,
                 order_time=datetime.now(timezone.utc),
+                condition_id=condition_id,
             )
             self.log(f"SUCCESS: {message}")
 
@@ -299,9 +363,10 @@ class RebatesBot:
         upcoming = sum(1 for t in self.tracked_markets.values() if t.status == "UPCOMING")
         live = sum(1 for t in self.tracked_markets.values() if t.status == "LIVE")
         resolved = sum(1 for t in self.tracked_markets.values() if t.status == "RESOLVED")
+        redeemed = sum(1 for t in self.tracked_markets.values() if t.status == "REDEEMED")
 
-        if upcoming or live:
-            self.log(f"Tracking: {upcoming} UPCOMING, {live} LIVE, {resolved} RESOLVED")
+        if upcoming or live or resolved:
+            self.log(f"Tracking: {upcoming} UPCOMING, {live} LIVE, {resolved} RESOLVED, {redeemed} REDEEMED")
 
     def run(self):
         """
