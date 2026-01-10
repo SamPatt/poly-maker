@@ -100,17 +100,19 @@ class PolymarketClient:
         self.web3 = web3
 
     
-    def create_order(self, marketId, action, price, size, neg_risk=False):
+    def create_order(self, marketId, action, price, size, neg_risk=False, post_only=False):
         """
         Create and submit a new order to the Polymarket order book.
-        
+
         Args:
             marketId (str): ID of the market token to trade
             action (str): "BUY" or "SELL"
             price (float): Order price (0-1 range for prediction markets)
             size (float): Order size in USDC
             neg_risk (bool, optional): Whether this is a negative risk market. Defaults to False.
-            
+            post_only (bool, optional): If True, order is rejected if it would immediately match.
+                                        Use this to ensure maker-only orders. Defaults to False.
+
         Returns:
             dict: Response from the API containing order details, or empty dict on error
         """
@@ -129,10 +131,11 @@ class PolymarketClient:
             signed_order = self.client.create_order(order_args)
         else:
             signed_order = self.client.create_order(order_args, options=PartialCreateOrderOptions(neg_risk=True))
-            
+
         try:
             # Submit the signed order to the API
-            resp = self.client.post_order(signed_order)
+            # post_only=True ensures we're a maker (order rejected if it would immediately match)
+            resp = self.client.post_order(signed_order, post_only=post_only)
             return resp
         except Exception as ex:
             print(ex)

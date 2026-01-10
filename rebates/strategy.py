@@ -75,36 +75,43 @@ class DeltaNeutralStrategy:
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
             if DRY_RUN:
-                print(f"[{timestamp}] [DRY RUN] Would place orders:")
+                print(f"[{timestamp}] [DRY RUN] Would place POST-ONLY orders:")
                 print(f"  Market: {question}")
                 print(f"  Up token: {up_token[:20]}...")
                 print(f"  Down token: {down_token[:20]}...")
                 print(f"  Price: {self.target_price}")
                 print(f"  Size: ${self.trade_size} per side")
                 print(f"  Neg risk: {neg_risk}")
+                print(f"  Post-only: True (maker-only, rejected if would immediately match)")
                 return True, "Dry run - orders not placed"
 
             # Place Up order (BUY on the Up outcome)
-            print(f"[{timestamp}] Placing Up order: {self.trade_size} @ {self.target_price}")
+            # post_only=True ensures we're a maker (order rejected if it would immediately match)
+            print(f"[{timestamp}] Placing Up order: {self.trade_size} @ {self.target_price} (post-only)")
             up_resp = self.client.create_order(
                 marketId=up_token,
                 action="BUY",
                 price=self.target_price,
                 size=self.trade_size,
-                neg_risk=neg_risk
+                neg_risk=neg_risk,
+                post_only=True
             )
 
             if not up_resp or "error" in str(up_resp).lower():
+                # Post-only rejection means our order would have been a taker
+                if "post" in str(up_resp).lower() or "reject" in str(up_resp).lower():
+                    return False, f"Up order rejected (would be taker): {up_resp}"
                 return False, f"Failed to place Up order: {up_resp}"
 
             # Place Down order (BUY on the Down outcome)
-            print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {self.target_price}")
+            print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {self.target_price} (post-only)")
             down_resp = self.client.create_order(
                 marketId=down_token,
                 action="BUY",
                 price=self.target_price,
                 size=self.trade_size,
-                neg_risk=neg_risk
+                neg_risk=neg_risk,
+                post_only=True
             )
 
             if not down_resp or "error" in str(down_resp).lower():
@@ -114,9 +121,11 @@ class DeltaNeutralStrategy:
                     self.client.cancel_all_asset(up_token)
                 except Exception:
                     pass
+                if "post" in str(down_resp).lower() or "reject" in str(down_resp).lower():
+                    return False, f"Down order rejected (would be taker): {down_resp}"
                 return False, f"Failed to place Down order: {down_resp}"
 
-            return True, f"Placed mirror orders on {slug}"
+            return True, f"Placed POST-ONLY mirror orders on {slug}"
 
         except Exception as e:
             return False, f"Error placing orders: {e}"
