@@ -77,10 +77,17 @@ class DeltaNeutralStrategy:
 
     def get_best_maker_price(self, token_id: str, tick_size: float = 0.01) -> Optional[float]:
         """
-        Get the best price for a maker BUY order by checking the order book.
+        Get the best price for a maker BUY order using bid-competitive pricing.
 
-        Returns best_ask - 2*tick_size to ensure we don't cross the book
-        even if the book changes slightly between fetch and order placement.
+        We need to be competitive with other buyers (bids), not just stay below
+        sellers (asks). When markets are directional, other buyers may be bidding
+        aggressively, and we need to match or beat them to get filled.
+
+        Strategy:
+        - max_safe_price = best_ask - 2*tick_size (don't cross the book)
+        - competitive_price = best_bid + tick_size (beat other buyers)
+        - our_price = max(competitive_price, fallback) but capped at max_safe_price
+
         Returns None if order book fetch fails.
         """
         try:
@@ -91,22 +98,37 @@ class DeltaNeutralStrategy:
 
             data = resp.json()
             asks = data.get("asks", [])
+            bids = data.get("bids", [])
 
-            if not asks:
-                # No asks = no sells, we can place at any price
-                return self.target_price
+            # Calculate maximum safe price (don't cross the book)
+            if asks:
+                asks_sorted = sorted(asks, key=lambda x: float(x["price"]))
+                best_ask = float(asks_sorted[0]["price"])
+                max_safe_price = round(best_ask - (2 * tick_size), 2)
+            else:
+                # No asks = no sellers, we can place at any price up to target
+                max_safe_price = self.target_price
 
-            # Find lowest ask (best sell price)
-            asks_sorted = sorted(asks, key=lambda x: float(x["price"]))
-            best_ask = float(asks_sorted[0]["price"])
+            # Calculate competitive price (beat other buyers)
+            if bids:
+                bids_sorted = sorted(bids, key=lambda x: float(x["price"]), reverse=True)
+                best_bid = float(bids_sorted[0]["price"])
+                competitive_price = round(best_bid + tick_size, 2)
+            else:
+                # No bids = no competition, use a reasonable default
+                competitive_price = 0.45
 
-            # Place our BUY two ticks below best ask for safety margin
-            # This accounts for order book changes between fetch and placement
-            maker_price = round(best_ask - (2 * tick_size), 2)
+            # Use the competitive price, but don't exceed max safe price
+            maker_price = min(competitive_price, max_safe_price)
 
             # Don't go below reasonable bounds (stay above 0.40 for ~50% markets)
             if maker_price < 0.40:
                 maker_price = 0.40
+
+            # Log pricing details for monitoring
+            best_bid_str = f"{best_bid:.2f}" if bids else "none"
+            best_ask_str = f"{best_ask:.2f}" if asks else "none"
+            print(f"  Pricing: bid={best_bid_str} ask={best_ask_str} -> competitive={competitive_price:.2f} safe={max_safe_price:.2f} -> final={maker_price:.2f}")
 
             return maker_price
 
