@@ -44,6 +44,11 @@ from .config import (
     SAFETY_BUFFER_SECONDS,
     ASSETS,
 )
+from alerts.telegram import (
+    send_rebates_startup_alert,
+    send_rebates_order_alert,
+    send_rebates_resolution_alert,
+)
 
 
 @dataclass
@@ -98,6 +103,9 @@ class RebatesBot:
         self.strategy = DeltaNeutralStrategy(self.client, TRADE_SIZE)
 
         print("Bot initialized successfully.\n")
+
+        # Send startup alert
+        send_rebates_startup_alert(DRY_RUN, TRADE_SIZE)
 
     def log(self, message: str):
         """Log with timestamp."""
@@ -166,6 +174,15 @@ class RebatesBot:
                         self.log(f"  No fills - orders expired")
                 tracked.logged_resolved = True
 
+                # Send Telegram alert for resolution
+                send_rebates_resolution_alert(
+                    question=tracked.question,
+                    up_filled=tracked.up_filled,
+                    down_filled=tracked.down_filled,
+                    trade_size=TRADE_SIZE,
+                    dry_run=DRY_RUN
+                )
+
     def monitor_tracked_markets(self) -> None:
         """Monitor all tracked markets for status changes and fills."""
         for slug, tracked in list(self.tracked_markets.items()):
@@ -231,6 +248,14 @@ class RebatesBot:
                 order_time=datetime.now(timezone.utc),
             )
             self.log(f"SUCCESS: {message}")
+
+            # Send Telegram alert for orders placed
+            send_rebates_order_alert(
+                question=question,
+                trade_size=TRADE_SIZE,
+                price=TARGET_PRICE,
+                dry_run=DRY_RUN
+            )
         else:
             self.log(f"FAILED: {message}")
 

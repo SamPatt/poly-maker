@@ -253,3 +253,118 @@ def send_shutdown_alert(reason: str = "Normal shutdown") -> bool:
     message += f"<b>Time:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
 
     return send_alert(message)
+
+
+# ============================================
+# Rebates Bot Alerts
+# ============================================
+
+def send_rebates_startup_alert(dry_run: bool, trade_size: float) -> bool:
+    """
+    Send alert when rebates bot starts.
+
+    Args:
+        dry_run: Whether bot is in dry-run mode
+        trade_size: Trade size per side
+
+    Returns:
+        True if sent successfully
+    """
+    mode = "DRY RUN" if dry_run else "LIVE"
+    emoji = "🧪" if dry_run else "🚀"
+
+    message = f"{emoji} <b>Rebates Bot Started</b>\n\n"
+    message += f"<b>Mode:</b> {mode}\n"
+    message += f"<b>Trade Size:</b> ${trade_size:.2f} per side\n"
+    message += f"<b>Time:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+
+    return send_alert(message)
+
+
+def send_rebates_order_alert(
+    question: str,
+    trade_size: float,
+    price: float,
+    dry_run: bool = False
+) -> bool:
+    """
+    Send alert when rebates orders are placed.
+
+    Args:
+        question: Market question
+        trade_size: Size per side
+        price: Order price
+        dry_run: Whether in dry-run mode
+
+    Returns:
+        True if sent successfully
+    """
+    emoji = "🧪" if dry_run else "💰"
+    mode_text = "[DRY RUN] " if dry_run else ""
+
+    # Truncate long questions
+    if len(question) > 80:
+        question = question[:77] + "..."
+
+    message = f"{emoji} <b>{mode_text}Rebates Orders Placed</b>\n\n"
+    message += f"<b>Market:</b> {question}\n"
+    message += f"<b>Price:</b> {price:.2f}\n"
+    message += f"<b>Size:</b> ${trade_size:.2f} x 2 (UP + DOWN)\n"
+    message += f"<b>Total:</b> ${trade_size * 2:.2f}"
+
+    return send_alert(message)
+
+
+def send_rebates_resolution_alert(
+    question: str,
+    up_filled: bool,
+    down_filled: bool,
+    trade_size: float,
+    dry_run: bool = False
+) -> bool:
+    """
+    Send alert when a rebates market resolves.
+
+    Args:
+        question: Market question
+        up_filled: Whether UP order was filled
+        down_filled: Whether DOWN order was filled
+        trade_size: Trade size per side
+        dry_run: Whether in dry-run mode
+
+    Returns:
+        True if sent successfully
+    """
+    if dry_run:
+        message = f"🧪 <b>[DRY RUN] Market Resolved</b>\n\n"
+        message += f"<b>Market:</b> {question[:80]}\n"
+        message += f"<b>Status:</b> Simulated"
+        return send_alert(message)
+
+    # Determine result
+    if up_filled and down_filled:
+        emoji = "✅"
+        status = "Both sides filled"
+        rebate_volume = trade_size * 2
+    elif up_filled or down_filled:
+        emoji = "⚠️"
+        status = "Partial fill (one side only)"
+        rebate_volume = trade_size
+    else:
+        emoji = "❌"
+        status = "No fills - orders expired"
+        rebate_volume = 0
+
+    # Truncate long questions
+    if len(question) > 80:
+        question = question[:77] + "..."
+
+    message = f"{emoji} <b>Market Resolved</b>\n\n"
+    message += f"<b>Market:</b> {question}\n"
+    message += f"<b>UP:</b> {'FILLED' if up_filled else 'UNFILLED'}\n"
+    message += f"<b>DOWN:</b> {'FILLED' if down_filled else 'UNFILLED'}\n"
+    message += f"<b>Status:</b> {status}\n"
+    if rebate_volume > 0:
+        message += f"<b>Rebate Volume:</b> ${rebate_volume:.2f}"
+
+    return send_alert(message)
