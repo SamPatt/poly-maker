@@ -60,6 +60,7 @@ from db.supabase_client import (
     mark_rebates_market_redeemed,
     cleanup_old_rebates_markets,
 )
+from redemption import redeem_position
 
 
 @dataclass
@@ -546,32 +547,37 @@ class RebatesBot:
         if time_since_resolution < 60:
             return False
 
-        try:
-            self.log(f"  Redeeming positions: {tracked.slug}")
-            self.log(f"    Condition ID: {tracked.condition_id}")
+        self.log(f"  Redeeming positions: {tracked.slug}")
+        self.log(f"    Condition ID: {tracked.condition_id}")
 
-            result = self.client.redeem_positions(tracked.condition_id)
-
-            self.log(f"  Redemption successful!")
+        # Use standalone redemption module (non-blocking)
+        def on_redeem_success(condition_id: str, tx_hash: str):
+            self.log(f"  Redemption successful! TX: {tx_hash[:20] if tx_hash else 'unknown'}...")
             tracked.redeemed = True
             tracked.redeem_attempted = True
             tracked.status = "REDEEMED"
-
-            # Update database
             mark_rebates_market_redeemed(tracked.slug)
-
-            # Send Telegram alert
             send_rebates_redemption_alert(
                 question=tracked.question,
                 condition_id=tracked.condition_id,
                 dry_run=False
             )
-            return True
 
-        except Exception as e:
-            self.log(f"  Redemption failed: {e}")
+        def on_redeem_error(condition_id: str, error_msg: str):
+            self.log(f"  Redemption failed: {error_msg[:100]}")
             tracked.redeem_attempted = True
-            return False
+
+        # Run redemption in background thread so we don't block the main loop
+        redeem_position(
+            tracked.condition_id,
+            on_success=on_redeem_success,
+            on_error=on_redeem_error,
+            blocking=False
+        )
+
+        # Mark as attempted immediately (callbacks will update status)
+        tracked.redeem_attempted = True
+        return True
 
     def update_upcoming_orders(self, tracked: TrackedMarket) -> None:
         """

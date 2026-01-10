@@ -183,6 +183,49 @@ class PolymarketClient:
         """
         return self.get_usdc_balance() + self.get_pos_balance()
 
+    def get_market_info_by_token(self, token_id: str) -> dict:
+        """
+        Get market information for a token from the CLOB API.
+
+        Args:
+            token_id: The token ID to look up
+
+        Returns:
+            dict with market info including 'closed', 'active', 'condition_id', etc.
+            Empty dict if not found.
+        """
+        try:
+            url = f"https://clob.polymarket.com/markets/{token_id}"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+            return {}
+        except Exception as e:
+            print(f"Error fetching market info for {token_id[:20]}...: {e}")
+            return {}
+
+    def is_market_resolved(self, token_id: str) -> tuple:
+        """
+        Check if a market has resolved.
+
+        Args:
+            token_id: The token ID to check
+
+        Returns:
+            Tuple of (is_resolved: bool, condition_id: str or None)
+        """
+        market_info = self.get_market_info_by_token(token_id)
+        if not market_info:
+            return False, None
+
+        # Market is resolved if it's closed and not accepting orders
+        is_closed = market_info.get('closed', False)
+        accepting_orders = market_info.get('accepting_orders', True)
+        condition_id = market_info.get('condition_id')
+
+        is_resolved = is_closed or not accepting_orders
+        return is_resolved, condition_id
+
     def get_all_positions(self):
         """
         Get all positions for the connected wallet across all markets.

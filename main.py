@@ -12,6 +12,7 @@ from poly_data.data_utils import update_markets, update_positions, update_orders
 from poly_data.websocket_handlers import connect_market_websocket, connect_user_websocket
 import poly_data.global_state as global_state
 from poly_data.data_processing import remove_from_performing
+from redemption import redeem_position
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -137,11 +138,74 @@ def remove_from_pending():
         print("Error in remove_from_pending")
         print(traceback.format_exc())
 
+# Track which markets we've already attempted to redeem
+# to avoid repeatedly trying failed redemptions
+_redeemed_markets = set()
+_redemption_attempts = {}  # condition_id -> timestamp of last attempt
+
+
+def check_and_redeem_resolved_positions():
+    """
+    Check all positions for resolved markets and attempt redemption.
+
+    This runs periodically (every 60 seconds) to find positions in
+    markets that have resolved and redeem them.
+    """
+    if not global_state.positions or not global_state.client:
+        return
+
+    for token_id, position in list(global_state.positions.items()):
+        # Skip if no position
+        if position.get('size', 0) <= 0:
+            continue
+
+        # Check if market has resolved
+        try:
+            is_resolved, condition_id = global_state.client.is_market_resolved(token_id)
+
+            if not is_resolved or not condition_id:
+                continue
+
+            # Skip if already redeemed
+            if condition_id in _redeemed_markets:
+                continue
+
+            # Skip if we attempted redemption recently (within 5 minutes)
+            last_attempt = _redemption_attempts.get(condition_id, 0)
+            if time.time() - last_attempt < 300:
+                continue
+
+            print(f"[REDEMPTION] Found resolved market with position: {token_id[:20]}...")
+            print(f"[REDEMPTION] Condition ID: {condition_id}")
+
+            _redemption_attempts[condition_id] = time.time()
+
+            # Define callbacks for async redemption
+            def on_success(cid, tx_hash):
+                print(f"[REDEMPTION] Success! Condition: {cid[:20]}... TX: {tx_hash[:20] if tx_hash else 'unknown'}...")
+                _redeemed_markets.add(cid)
+
+            def on_error(cid, error_msg):
+                print(f"[REDEMPTION] Failed for {cid[:20]}...: {error_msg[:100]}")
+
+            # Run redemption in background (non-blocking)
+            redeem_position(
+                condition_id,
+                on_success=on_success,
+                on_error=on_error,
+                blocking=False
+            )
+
+        except Exception as e:
+            print(f"[REDEMPTION] Error checking {token_id[:20]}...: {e}")
+
+
 def update_periodically():
     """
     Background thread function that periodically updates market data, positions and orders.
     - Positions and orders are updated every 5 seconds
     - Market data is updated every 30 seconds (every 6 cycles)
+    - Resolved market redemptions checked every 60 seconds (every 12 cycles)
     - Stale pending trades are removed each cycle
     """
     i = 1
@@ -165,10 +229,18 @@ def update_periodically():
             # Update market data every 6th cycle (30 seconds)
             if i % 6 == 0:
                 update_markets()
+
+            # Check for resolved markets and redeem positions every 12th cycle (60 seconds)
+            if i % 12 == 0:
+                check_and_redeem_resolved_positions()
+
+            # Reset counter every 12 cycles
+            if i >= 12:
                 i = 1
-                    
+            else:
+                i += 1
+
             gc.collect()  # Force garbage collection to free memory
-            i += 1
         except:
             print("Error in update_periodically")
             print(traceback.format_exc())
