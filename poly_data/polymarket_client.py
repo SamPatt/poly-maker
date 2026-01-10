@@ -309,8 +309,12 @@ class PolymarketClient:
         node_command = f'node poly_merger/merge.js {amount_to_merge_str} {condition_id} {"true" if is_neg_risk_market else "false"}'
         print(node_command)
 
-        # Run the command and capture the output
-        result = subprocess.run(node_command, shell=True, capture_output=True, text=True)
+        # Run the command with timeout to prevent hanging on slow transactions
+        try:
+            result = subprocess.run(node_command, shell=True, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            print("Merge operation timed out after 120 seconds")
+            raise Exception("Merge operation timed out - transaction may still be pending on chain")
 
         # Check if there was an error
         if result.returncode != 0:
@@ -343,8 +347,12 @@ class PolymarketClient:
         node_command = f'node poly_merger/redeem.js {condition_id}'
         print(f"Redeeming positions: {node_command}")
 
-        # Run the command and capture the output
-        result = subprocess.run(node_command, shell=True, capture_output=True, text=True)
+        # Run the command with timeout to prevent hanging on slow transactions
+        try:
+            result = subprocess.run(node_command, shell=True, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            print("Redeem operation timed out after 120 seconds")
+            raise Exception("Redeem operation timed out - transaction may still be pending on chain")
 
         # Check if there was an error
         if result.returncode != 0:

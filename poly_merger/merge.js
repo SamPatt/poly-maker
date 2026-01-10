@@ -113,9 +113,18 @@ async function mergePositions(amountToMerge, conditionId, isNegRiskMarket) {
       }
     );
     
-    console.log("Sent transaction. Waiting for response")
-    const txReceipt = await txResponse.wait();
-    
+    console.log("Sent transaction. Waiting for confirmation (60s timeout)...")
+
+    // Wait for confirmation with timeout to prevent hanging indefinitely
+    const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Transaction confirmation timed out after 60 seconds')), 60000)
+    );
+
+    const txReceipt = await Promise.race([
+        txResponse.wait(),
+        timeoutPromise
+    ]);
+
     console.log("merge positions " + txReceipt.transactionHash);
     return txReceipt.transactionHash;
 }

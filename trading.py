@@ -117,32 +117,40 @@ def send_buy_order(order):
             print(f'Creating new order for {order["size"]} at {order["price"]}')
             print(order['token'], 'BUY', order['price'], order['size'])
 
+            # CRITICAL: Reserve funds BEFORE placing order to prevent race condition
+            # where multiple orders pass the balance check before any increment committed_buy_orders
+            order_cost = order['price'] * order['size']
+            global_state.committed_buy_orders += order_cost
+
             if DRY_RUN:
                 print(f"[DRY RUN] Would create BUY order: {order['token']} @ {order['price']} x {order['size']}")
-                # Track committed funds even in dry-run mode for testing
-                global_state.committed_buy_orders += order['price'] * order['size']
             else:
-                client.create_order(
-                    order['token'],
-                    'BUY',
-                    order['price'],
-                    order['size'],
-                    True if order['neg_risk'] == 'TRUE' else False
-                )
-                # Track committed funds immediately to prevent over-ordering
-                global_state.committed_buy_orders += order['price'] * order['size']
+                try:
+                    client.create_order(
+                        order['token'],
+                        'BUY',
+                        order['price'],
+                        order['size'],
+                        True if order['neg_risk'] == 'TRUE' else False
+                    )
+                except Exception as e:
+                    # Order failed - release the reserved funds
+                    global_state.committed_buy_orders -= order_cost
+                    print(f"[ORDER FAILED] Released ${order_cost:.2f} from committed funds. Error: {e}")
+                    raise
 
-                # CRITICAL: Update local order state immediately to prevent duplicate orders
-                # This prevents the race condition where the next loop runs before websocket updates
-                token_str = str(order['token'])
-                if token_str not in global_state.orders:
-                    global_state.orders[token_str] = {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
-                global_state.orders[token_str]['buy'] = {
-                    'price': order['price'],
-                    'size': order['size']
-                }
+            # CRITICAL: Update local order state immediately to prevent duplicate orders
+            # This prevents the race condition where the next loop runs before websocket updates
+            token_str = str(order['token'])
+            if token_str not in global_state.orders:
+                global_state.orders[token_str] = {'buy': {'price': 0, 'size': 0}, 'sell': {'price': 0, 'size': 0}}
+            global_state.orders[token_str]['buy'] = {
+                'price': order['price'],
+                'size': order['size']
+            }
 
-                # Send Telegram alert and record trade
+            # Send Telegram alert and record trade (only for real orders, not dry-run)
+            if not DRY_RUN:
                 if TELEGRAM_ENABLED:
                     # row can be a dict or pandas Series - both have .get() method
                     row = order.get('row', {})
