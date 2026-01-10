@@ -75,7 +75,13 @@ class DeltaNeutralStrategy:
             neg_risk = market.get("neg_risk")
         return neg_risk == True or neg_risk == "TRUE" or neg_risk == "true"
 
-    def get_best_maker_price(self, token_id: str, tick_size: float = 0.01) -> Optional[float]:
+    def get_best_maker_price(
+        self,
+        token_id: str,
+        tick_size: float = 0.01,
+        max_price: Optional[float] = None,
+        min_price: float = 0.40
+    ) -> Optional[float]:
         """
         Get the best price for a maker BUY order using bid-competitive pricing.
 
@@ -88,8 +94,17 @@ class DeltaNeutralStrategy:
         - competitive_price = best_bid + tick_size (beat other buyers)
         - our_price = max(competitive_price, fallback) but capped at max_safe_price
 
+        Args:
+            token_id: The token to get price for
+            tick_size: Minimum price increment
+            max_price: Optional ceiling for our price (for rescue scenarios)
+            min_price: Floor for our price (default 0.40)
+
         Returns None if order book fetch fails.
         """
+        if max_price is None:
+            max_price = self.target_price
+
         try:
             url = f"{CLOB_API_BASE}/book?token_id={token_id}"
             resp = requests.get(url, timeout=5)
@@ -106,8 +121,8 @@ class DeltaNeutralStrategy:
                 best_ask = float(asks_sorted[0]["price"])
                 max_safe_price = round(best_ask - (2 * tick_size), 2)
             else:
-                # No asks = no sellers, we can place at any price up to target
-                max_safe_price = self.target_price
+                # No asks = no sellers, we can place at any price up to max
+                max_safe_price = max_price
 
             # Calculate competitive price (beat other buyers)
             if bids:
@@ -118,23 +133,105 @@ class DeltaNeutralStrategy:
                 # No bids = no competition, use a reasonable default
                 competitive_price = 0.45
 
-            # Use the competitive price, but don't exceed max safe price
-            maker_price = min(competitive_price, max_safe_price)
+            # Use the competitive price, but don't exceed max safe price or our ceiling
+            maker_price = min(competitive_price, max_safe_price, max_price)
 
-            # Don't go below reasonable bounds (stay above 0.40 for ~50% markets)
-            if maker_price < 0.40:
-                maker_price = 0.40
+            # Don't go below minimum
+            if maker_price < min_price:
+                maker_price = min_price
 
             # Log pricing details for monitoring
             best_bid_str = f"{best_bid:.2f}" if bids else "none"
             best_ask_str = f"{best_ask:.2f}" if asks else "none"
-            print(f"  Pricing: bid={best_bid_str} ask={best_ask_str} -> competitive={competitive_price:.2f} safe={max_safe_price:.2f} -> final={maker_price:.2f}")
+            print(f"  Pricing: bid={best_bid_str} ask={best_ask_str} -> competitive={competitive_price:.2f} safe={max_safe_price:.2f} max={max_price:.2f} -> final={maker_price:.2f}")
 
             return maker_price
 
         except Exception as e:
             print(f"Error fetching order book for {token_id[:20]}...: {e}")
             return None
+
+    def get_taker_price(self, token_id: str) -> Optional[float]:
+        """
+        Get the price to immediately fill (cross the spread).
+
+        This is used as a last resort to ensure delta-neutrality.
+        Returns the best ask price (what we'd pay to buy immediately).
+        """
+        try:
+            url = f"{CLOB_API_BASE}/book?token_id={token_id}"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code != 200:
+                return None
+
+            data = resp.json()
+            asks = data.get("asks", [])
+
+            if asks:
+                asks_sorted = sorted(asks, key=lambda x: float(x["price"]))
+                best_ask = float(asks_sorted[0]["price"])
+                print(f"  Taker price (best ask): {best_ask:.2f}")
+                return best_ask
+            else:
+                # No asks - can't market buy
+                return None
+
+        except Exception as e:
+            print(f"Error fetching taker price for {token_id[:20]}...: {e}")
+            return None
+
+    def place_taker_order(
+        self,
+        token_id: str,
+        size: float,
+        neg_risk: bool
+    ) -> Tuple[bool, str]:
+        """
+        Place a taker order (market buy) to immediately fill.
+
+        Used as last resort rescue when maker orders aren't getting filled.
+
+        Returns:
+            Tuple of (success, order_id or error message)
+        """
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        if DRY_RUN:
+            print(f"[{timestamp}] [DRY RUN] Would place taker (market) order")
+            return True, ""
+
+        taker_price = self.get_taker_price(token_id)
+        if taker_price is None:
+            return False, "Could not get taker price"
+
+        # Cap at reasonable price to avoid disasters
+        if taker_price > 0.65:
+            print(f"[{timestamp}] Taker price too high ({taker_price:.2f}), skipping rescue")
+            return False, f"Taker price too high: {taker_price}"
+
+        try:
+            print(f"[{timestamp}] Placing TAKER order: {size} @ {taker_price} (crossing spread)")
+
+            # Regular order (not post_only) will cross the spread
+            resp = self.client.create_order(
+                marketId=token_id,
+                action="BUY",
+                price=taker_price,
+                size=size,
+                neg_risk=neg_risk,
+                post_only=False  # Allow taker fills
+            )
+
+            if resp and resp.get("success") == True:
+                order_id = resp.get("orderID", "")
+                print(f"[{timestamp}] Taker order placed: {order_id[:20]}...")
+                return True, order_id
+            else:
+                error_msg = resp.get("errorMsg", "") if resp else "Empty response"
+                return False, f"Failed: {error_msg}"
+
+        except Exception as e:
+            return False, f"Error: {e}"
 
     def place_mirror_orders(self, market: Dict[str, Any]) -> OrderResult:
         """
