@@ -67,7 +67,8 @@ class DeltaNeutralStrategy:
         """
         Get the best price for a maker BUY order by checking the order book.
 
-        Returns best_ask - tick_size to ensure we don't cross the book.
+        Returns best_ask - 2*tick_size to ensure we don't cross the book
+        even if the book changes slightly between fetch and order placement.
         Returns None if order book fetch fails.
         """
         try:
@@ -87,12 +88,13 @@ class DeltaNeutralStrategy:
             asks_sorted = sorted(asks, key=lambda x: float(x["price"]))
             best_ask = float(asks_sorted[0]["price"])
 
-            # Place our BUY one tick below best ask to avoid crossing
-            maker_price = round(best_ask - tick_size, 2)
+            # Place our BUY two ticks below best ask for safety margin
+            # This accounts for order book changes between fetch and placement
+            maker_price = round(best_ask - (2 * tick_size), 2)
 
-            # Don't go below reasonable bounds
-            if maker_price < 0.01:
-                maker_price = 0.01
+            # Don't go below reasonable bounds (stay above 0.40 for ~50% markets)
+            if maker_price < 0.40:
+                maker_price = 0.40
 
             return maker_price
 
