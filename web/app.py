@@ -280,14 +280,21 @@ async def toggle_market(
     return_sort: str = Form("score"),
     return_limit: str = Form("100"),
     return_max_volatility: str = Form(""),
-    return_show_selected: str = Form("")
+    return_show_selected: str = Form(""),
+    event_date: str = Form(""),
+    exit_before_event: str = Form("")
 ):
     """Enable or disable a market for trading."""
     try:
-        from db.supabase_client import add_selected_market, remove_selected_market
+        from db.supabase_client import add_selected_market, remove_selected_market, update_market_event_settings
 
         if action == "enable":
             add_selected_market(question)
+            # Also save event settings if provided
+            if event_date or exit_before_event:
+                exit_enabled = exit_before_event == "on" or exit_before_event == "true"
+                date_value = event_date if event_date.strip() else None
+                update_market_event_settings(question, date_value, exit_enabled)
         else:
             remove_selected_market(question)
 
