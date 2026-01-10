@@ -5,10 +5,13 @@ Places mirror YES/NO (Up/Down) orders at the same price to capture
 maker rebates without directional exposure.
 """
 import json
+import requests
 from typing import Dict, Any, Tuple, Optional
 from datetime import datetime, timezone
 
 from .config import TRADE_SIZE, TARGET_PRICE, DRY_RUN
+
+CLOB_API_BASE = "https://clob.polymarket.com"
 
 
 class DeltaNeutralStrategy:
@@ -60,9 +63,49 @@ class DeltaNeutralStrategy:
             neg_risk = market.get("neg_risk")
         return neg_risk == True or neg_risk == "TRUE" or neg_risk == "true"
 
+    def get_best_maker_price(self, token_id: str, tick_size: float = 0.01) -> Optional[float]:
+        """
+        Get the best price for a maker BUY order by checking the order book.
+
+        Returns best_ask - tick_size to ensure we don't cross the book.
+        Returns None if order book fetch fails.
+        """
+        try:
+            url = f"{CLOB_API_BASE}/book?token_id={token_id}"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code != 200:
+                return None
+
+            data = resp.json()
+            asks = data.get("asks", [])
+
+            if not asks:
+                # No asks = no sells, we can place at any price
+                return self.target_price
+
+            # Find lowest ask (best sell price)
+            asks_sorted = sorted(asks, key=lambda x: float(x["price"]))
+            best_ask = float(asks_sorted[0]["price"])
+
+            # Place our BUY one tick below best ask to avoid crossing
+            maker_price = round(best_ask - tick_size, 2)
+
+            # Don't go below reasonable bounds
+            if maker_price < 0.01:
+                maker_price = 0.01
+
+            return maker_price
+
+        except Exception as e:
+            print(f"Error fetching order book for {token_id[:20]}...: {e}")
+            return None
+
     def place_mirror_orders(self, market: Dict[str, Any]) -> Tuple[bool, str]:
         """
-        Place mirror Up and Down orders at the same price.
+        Place mirror Up and Down orders at optimal maker prices.
+
+        Checks the order book for each side and places BUY orders just below
+        the best ask to ensure maker status.
 
         This creates a delta-neutral position: regardless of the outcome,
         one side will win and the other will lose, netting to approximately
@@ -76,6 +119,7 @@ class DeltaNeutralStrategy:
         """
         slug = market.get("slug", "unknown")
         question = market.get("question", "Unknown market")
+        tick_size = float(market.get("orderPriceMinTickSize", 0.01))
 
         try:
             up_token, down_token = self.get_tokens(market)
@@ -83,12 +127,25 @@ class DeltaNeutralStrategy:
 
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
+            # Get optimal maker prices from order book
+            up_price = self.get_best_maker_price(up_token, tick_size)
+            down_price = self.get_best_maker_price(down_token, tick_size)
+
+            # Fall back to target price if order book fetch fails
+            if up_price is None:
+                up_price = self.target_price
+                print(f"[{timestamp}] Using fallback price for Up: {up_price}")
+            if down_price is None:
+                down_price = self.target_price
+                print(f"[{timestamp}] Using fallback price for Down: {down_price}")
+
             if DRY_RUN:
                 print(f"[{timestamp}] [DRY RUN] Would place POST-ONLY orders:")
                 print(f"  Market: {question}")
                 print(f"  Up token: {up_token[:20]}...")
                 print(f"  Down token: {down_token[:20]}...")
-                print(f"  Price: {self.target_price}")
+                print(f"  Up price: {up_price} (from order book)")
+                print(f"  Down price: {down_price} (from order book)")
                 print(f"  Size: ${self.trade_size} per side")
                 print(f"  Neg risk: {neg_risk}")
                 print(f"  Post-only: True (maker-only, rejected if would immediately match)")
@@ -96,11 +153,11 @@ class DeltaNeutralStrategy:
 
             # Place Up order (BUY on the Up outcome)
             # post_only=True ensures we're a maker (order rejected if it would immediately match)
-            print(f"[{timestamp}] Placing Up order: {self.trade_size} @ {self.target_price} (post-only)")
+            print(f"[{timestamp}] Placing Up order: {self.trade_size} @ {up_price} (post-only)")
             up_resp = self.client.create_order(
                 marketId=up_token,
                 action="BUY",
-                price=self.target_price,
+                price=up_price,
                 size=self.trade_size,
                 neg_risk=neg_risk,
                 post_only=True
@@ -115,11 +172,11 @@ class DeltaNeutralStrategy:
             print(f"[{timestamp}] Up order placed: {up_resp.get('orderID', 'unknown')[:20]}...")
 
             # Place Down order (BUY on the Down outcome)
-            print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {self.target_price} (post-only)")
+            print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {down_price} (post-only)")
             down_resp = self.client.create_order(
                 marketId=down_token,
                 action="BUY",
-                price=self.target_price,
+                price=down_price,
                 size=self.trade_size,
                 neg_risk=neg_risk,
                 post_only=True
@@ -139,7 +196,7 @@ class DeltaNeutralStrategy:
 
             print(f"[{timestamp}] Down order placed: {down_resp.get('orderID', 'unknown')[:20]}...")
 
-            return True, f"Placed POST-ONLY mirror orders on {slug}"
+            return True, f"Placed mirror orders @ Up:{up_price}/Down:{down_price} on {slug}"
 
         except Exception as e:
             return False, f"Error placing orders: {e}"
