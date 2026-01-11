@@ -4,7 +4,7 @@ Configuration for the 15-minute crypto rebates bot.
 import os
 
 # Trading parameters
-TRADE_SIZE = float(os.getenv("REBATES_TRADE_SIZE", "2"))  # $ per side (2 for testing)
+TRADE_SIZE = float(os.getenv("REBATES_TRADE_SIZE", "5"))  # $ per side (5 = Polymarket minimum)
 # Use 0.49 instead of 0.50 to avoid crossing the book when one side is imbalanced
 # Rebates are still earned at any price, 50% just gives slightly higher rate
 TARGET_PRICE = float(os.getenv("REBATES_TARGET_PRICE", "0.49"))
