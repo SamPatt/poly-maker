@@ -145,7 +145,8 @@ class PolymarketClient:
             return resp
         except Exception as ex:
             print(ex)
-            return {}
+            # Return error message so caller can handle retries (e.g., "crosses book" errors)
+            return {"success": False, "errorMsg": str(ex)}
 
     def get_order_book(self, market):
         """
