@@ -8,12 +8,18 @@ resolution is detected.
 
 import subprocess
 import threading
+import os
+from pathlib import Path
 from typing import Optional, Callable
 from datetime import datetime, timezone
 
 
 # Default timeout for redemption operations (seconds)
 REDEEM_TIMEOUT = 120
+
+# Get the project root directory (where this module lives)
+PROJECT_ROOT = Path(__file__).parent.resolve()
+REDEEM_SCRIPT = PROJECT_ROOT / "poly_merger" / "redeem.js"
 
 
 def redeem_position(
@@ -61,7 +67,8 @@ def _do_redeem(
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     try:
-        node_command = f'node poly_merger/redeem.js {condition_id}'
+        # Use absolute path to redeem script and run from project root
+        node_command = f'node {REDEEM_SCRIPT} {condition_id}'
         print(f"[{timestamp}] [REDEMPTION] Starting: {condition_id[:20]}...")
 
         result = subprocess.run(
@@ -69,7 +76,8 @@ def _do_redeem(
             shell=True,
             capture_output=True,
             text=True,
-            timeout=REDEEM_TIMEOUT
+            timeout=REDEEM_TIMEOUT,
+            cwd=str(PROJECT_ROOT)  # Run from project root for .env loading
         )
 
         if result.returncode != 0:

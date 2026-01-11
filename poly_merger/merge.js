@@ -65,9 +65,12 @@ async function mergePositions(amountToMerge, conditionId, isNegRiskMarket) {
     console.log(amountToMerge, conditionId, isNegRiskMarket);
     
     // Prepare transaction parameters
-    const nonce = await provider.getTransactionCount(wallet.address);
-    const gasPrice = await provider.getGasPrice();
+    const nonce = await provider.getTransactionCount(wallet.address, 'pending');
+    const baseGasPrice = await provider.getGasPrice();
+    // Use 1.5x gas price to ensure faster confirmation on congested network
+    const gasPrice = baseGasPrice.mul(150).div(100);
     const gasLimit = 10000000;  // Set high gas limit to ensure transaction completes
+    console.log(`Gas price: ${ethers.utils.formatUnits(gasPrice, 'gwei')} gwei (1.5x base)`)
 
     let tx;
     // Different contract calls for different market types

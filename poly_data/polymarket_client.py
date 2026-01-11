@@ -1,5 +1,6 @@
 from dotenv import load_dotenv          # Environment variable management
 import os                           # Operating system interface
+from pathlib import Path            # Path handling
 
 # Polymarket API client libraries
 from py_clob_client.client import ClobClient
@@ -23,6 +24,11 @@ from poly_data.abis import NegRiskAdapterABI, ConditionalTokenABI, erc20_abi
 
 # Load environment variables
 load_dotenv()
+
+# Project root directory (parent of poly_data/)
+PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+MERGE_SCRIPT = PROJECT_ROOT / "poly_merger" / "merge.js"
+REDEEM_SCRIPT = PROJECT_ROOT / "poly_merger" / "redeem.js"
 
 
 class PolymarketClient:
@@ -348,13 +354,13 @@ class PolymarketClient:
         """
         amount_to_merge_str = str(amount_to_merge)
 
-        # Prepare the command to run the JavaScript script
-        node_command = f'node poly_merger/merge.js {amount_to_merge_str} {condition_id} {"true" if is_neg_risk_market else "false"}'
+        # Prepare the command to run the JavaScript script using absolute path
+        node_command = f'node {MERGE_SCRIPT} {amount_to_merge_str} {condition_id} {"true" if is_neg_risk_market else "false"}'
         print(node_command)
 
         # Run the command with timeout to prevent hanging on slow transactions
         try:
-            result = subprocess.run(node_command, shell=True, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(node_command, shell=True, capture_output=True, text=True, timeout=120, cwd=str(PROJECT_ROOT))
         except subprocess.TimeoutExpired:
             print("Merge operation timed out after 120 seconds")
             raise Exception("Merge operation timed out - transaction may still be pending on chain")
@@ -386,13 +392,13 @@ class PolymarketClient:
         Raises:
             Exception: If the redemption fails
         """
-        # Prepare the command to run the JavaScript script
-        node_command = f'node poly_merger/redeem.js {condition_id}'
+        # Prepare the command to run the JavaScript script using absolute path
+        node_command = f'node {REDEEM_SCRIPT} {condition_id}'
         print(f"Redeeming positions: {node_command}")
 
         # Run the command with timeout to prevent hanging on slow transactions
         try:
-            result = subprocess.run(node_command, shell=True, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(node_command, shell=True, capture_output=True, text=True, timeout=120, cwd=str(PROJECT_ROOT))
         except subprocess.TimeoutExpired:
             print("Redeem operation timed out after 120 seconds")
             raise Exception("Redeem operation timed out - transaction may still be pending on chain")
