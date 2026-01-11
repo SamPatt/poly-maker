@@ -57,9 +57,12 @@ async function redeemPositions(conditionId) {
     console.log("Redeeming positions for condition:", conditionId);
 
     // Prepare transaction parameters
-    const nonce = await provider.getTransactionCount(wallet.address);
-    const gasPrice = await provider.getGasPrice();
+    const nonce = await provider.getTransactionCount(wallet.address, 'pending');
+    const baseGasPrice = await provider.getGasPrice();
+    // Use 1.5x gas price to ensure faster confirmation on congested network
+    const gasPrice = baseGasPrice.mul(150).div(100);
     const gasLimit = 500000;  // Redemption typically uses less gas than merging
+    console.log(`Gas price: ${ethers.utils.formatUnits(gasPrice, 'gwei')} gwei (1.5x base)`)
 
     // Create the redemption transaction
     const conditionalTokens = new ethers.Contract(
