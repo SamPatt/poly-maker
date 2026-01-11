@@ -51,6 +51,7 @@ from alerts.telegram import (
     send_rebates_redemption_alert,
     send_rebates_rescue_alert,
     send_rebates_rescue_filled_alert,
+    send_rebates_fill_alert,
 )
 from db.supabase_client import (
     save_rebates_market,
@@ -234,24 +235,26 @@ class RebatesBot:
                 tracked.up_filled = True
                 update_rebates_market_fills(tracked.slug, up_filled=True)
                 self.log(f"  UP order filled: {tracked.question}")
-                # Send alert if this was a rescue order
-                if tracked.up_rescue_attempted:
-                    send_rebates_rescue_filled_alert(
-                        question=tracked.question,
-                        side="UP",
-                        dry_run=DRY_RUN
-                    )
+                # Send fill alert
+                send_rebates_fill_alert(
+                    question=tracked.question,
+                    side="UP",
+                    price=tracked.up_price,
+                    size=TRADE_SIZE,
+                    dry_run=DRY_RUN
+                )
             if not down_open and not tracked.down_filled:
                 tracked.down_filled = True
                 update_rebates_market_fills(tracked.slug, down_filled=True)
                 self.log(f"  DOWN order filled: {tracked.question}")
-                # Send alert if this was a rescue order
-                if tracked.down_rescue_attempted:
-                    send_rebates_rescue_filled_alert(
-                        question=tracked.question,
-                        side="DOWN",
-                        dry_run=DRY_RUN
-                    )
+                # Send fill alert
+                send_rebates_fill_alert(
+                    question=tracked.question,
+                    side="DOWN",
+                    price=tracked.down_price,
+                    size=TRADE_SIZE,
+                    dry_run=DRY_RUN
+                )
 
             return up_open, down_open
 
