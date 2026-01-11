@@ -106,10 +106,12 @@ node poly_merger/merge.js [amount] [condition_id] [is_neg_risk]
 **`main.py`** - Entry point. Initializes client, starts background update thread, maintains WebSocket connections.
 
 **`trading.py`** - Core trading logic in `perform_trade()`:
+- **Two-sided market making** - Places both BUY and ASK orders for liquidity rewards
 - Position merging when holding both YES/NO
 - Order placement with spread/incentive calculations
-- Stop-loss triggers based on PnL and volatility
-- Take-profit sell order management
+- Stop-loss triggers based on PnL and volatility (requires position)
+- Take-profit sell order management (when holding inventory)
+- Market-making ASK orders (even without inventory, for two-sided rewards)
 - Risk-off periods after stop-loss
 
 **`poly_data/`**
@@ -118,7 +120,7 @@ node poly_merger/merge.js [amount] [condition_id] [is_neg_risk]
 - `websocket_handlers.py` - Market and user WebSocket connections
 - `data_processing.py` - Processes WebSocket events, triggers trades
 - `data_utils.py` - Position/order state management, Google Sheets sync
-- `trading_utils.py` - Price calculations, order sizing logic
+- `trading_utils.py` - Price calculations, order sizing logic, two-sided quoting
 
 **`poly_merger/`** - Node.js utility for on-chain position merging via Gnosis Safe
 
@@ -371,7 +373,7 @@ ssh trading "tail -30 /tmp/rebates.log"
 
 **Configuration (via environment variables):**
 - `REBATES_DRY_RUN=true` - Simulate trades without executing (default: true)
-- `REBATES_TRADE_SIZE=10` - USDC per side (default: 10)
+- `REBATES_TRADE_SIZE=5` - USDC per side (default: 5, Polymarket minimum)
 - `REBATES_SAFETY_BUFFER=30` - Seconds before market start to stop trading (default: 30)
 - `REBATES_CHECK_INTERVAL=60` - Seconds between market scans (default: 60)
 
@@ -380,7 +382,7 @@ ssh trading "tail -30 /tmp/rebates.log"
 # Dry run (default) - watch logs for market discovery
 REBATES_DRY_RUN=true python -m rebates.rebates_bot
 
-# Small capital test
+# Minimum capital test (Polymarket minimum is 5)
 REBATES_DRY_RUN=false REBATES_TRADE_SIZE=5 python -m rebates.rebates_bot
 
 # Full operation
@@ -413,6 +415,50 @@ Per-market settings:
 - `tick_size` - Price precision (0.01, 0.001, etc.)
 - `neg_risk` - Whether market uses negative risk adapter
 
+### Polymarket Liquidity Rewards
+
+The bot is designed to earn Polymarket's liquidity rewards by quoting two-sided liquidity.
+
+**Key Requirements for Rewards:**
+- **Two-sided quoting**: Must have both BID and ASK orders to maximize rewards
+- **Minimum order size**: Polymarket minimum is 5 shares; each market has its own `min_incentive_size`
+- **Spread from midpoint**: Tighter spreads score higher (quadratic scoring)
+- **Extreme midpoints**: Markets with mid < 0.10 or > 0.90 REQUIRE two-sided liquidity (single-sided scores zero)
+
+**How the Bot Achieves Two-Sided Quoting:**
+
+1. `get_buy_sell_amount()` in `trading_utils.py` always returns both buy and sell amounts
+2. Order size = `max(trade_size, min_incentive_size)` to meet reward thresholds
+3. ASK orders are placed even without inventory (market-making mode)
+4. With inventory, ASK orders use take-profit pricing; without inventory, competitive ask pricing
+
+**Reward Scoring Formula:**
+```
+S(v,s) = ((v-s)/v)² × b
+
+Where:
+- v = max_spread from midpoint (e.g., 3.5 cents)
+- s = your spread from midpoint
+- b = in-game multiplier
+
+Qmin = min(Qone, Qtwo)  # For extreme midpoints
+Qmin = max(min(Qone, Qtwo), max(Qone/3, Qtwo/3))  # For normal range [0.10, 0.90]
+```
+
+**Configuration for Rewards:**
+```python
+# In hyperparameters (database):
+max_size: 250      # Maximum position per outcome (must be >= min_incentive_size)
+trade_size: 50     # Order size (will be increased to min_incentive_size if needed)
+min_size: 5        # Polymarket minimum is 5
+
+# Per-market (from all_markets table):
+min_size: 50-200   # Market's min_incentive_size requirement
+max_spread: 3.5    # Maximum spread from midpoint for incentives (cents)
+```
+
+**Warning:** If `min_incentive_size > max_size`, the bot will log a warning and orders may not qualify for rewards.
+
 ### Important Patterns
 
 **Negative Risk Markets**: Some Polymarket markets use a "negative risk" structure requiring different contract calls. Check `row['neg_risk'] == 'TRUE'` before order creation and position merging.
@@ -435,7 +481,7 @@ Key settings in `.env`:
 
 15-Minute Rebates Bot settings:
 - `REBATES_DRY_RUN` - Set to `true` to simulate rebates trades (default: true)
-- `REBATES_TRADE_SIZE` - USDC per side for rebates bot (default: 10)
+- `REBATES_TRADE_SIZE` - USDC per side for rebates bot (default: 5, Polymarket minimum)
 - `REBATES_SAFETY_BUFFER` - Seconds before market start to stop trading (default: 30)
 - `REBATES_CHECK_INTERVAL` - Seconds between market scans (default: 60)
 
