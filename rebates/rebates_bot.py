@@ -263,25 +263,16 @@ class RebatesBot:
 
     def rescue_unfilled_orders(self, tracked: TrackedMarket) -> None:
         """
-        Attempt to rescue unfilled orders during LIVE phase.
+        Attempt to rescue unfilled orders IMMEDIATELY when one side fills.
 
         If one side is filled but the other isn't, we have directional exposure.
-        This method tries to fill the missing side by:
-        1. Re-placing at a more aggressive price (based on orderbook)
-        2. As time runs out, increasing both price ceiling AND aggression
-        3. Last resort: crossing the spread (taker order)
 
-        AGGRESSIVE price ceiling + spread aggression escalation:
-        | Time Left | Max Price | Aggression | Strategy                   |
-        |-----------|-----------|------------|----------------------------|
-        | > 12 min  | 0.55      | 20%        | Start aggressive           |
-        | 8-12 min  | 0.58      | 30%        | Push toward ask            |
-        | 5-8 min   | 0.60      | 40%        | More urgent                |
-        | 2-5 min   | 0.62      | 60%        | Getting desperate          |
-        | 1-2 min   | 0.65      | 80%        | Almost at ask              |
-        | < 60 sec  | TAKER     | 100%       | Cross spread (cap 0.70)    |
+        NEW AGGRESSIVE STRATEGY:
+        - When one side fills, IMMEDIATELY place a taker order on the other side
+        - Don't wait, don't escalate slowly - just cross the spread and get filled
+        - Better to pay 52-55% and guarantee both sides fill than risk one-sided exposure
 
-        Rationale: Better to pay 55-65% than lose 100% at resolution.
+        This ensures we always earn rebates on both sides.
         """
         if DRY_RUN:
             return
@@ -289,36 +280,87 @@ class RebatesBot:
         # Check current fill status
         up_open, down_open = self.check_order_fills(tracked)
 
-        # If both filled or both open, nothing to rescue
+        # If both filled, we're done
         if tracked.up_filled and tracked.down_filled:
-            return  # Both filled, we're good
+            return
+
+        # If both still open, wait for fills
         if up_open and down_open:
-            return  # Both still open, wait for fills
+            return
 
-        # Calculate time remaining until resolution
-        resolution_time = tracked.event_start + timedelta(minutes=15)
-        now = datetime.now(timezone.utc)
-        time_remaining = (resolution_time - now).total_seconds()
-
-        if time_remaining <= 0:
-            return  # Already resolved, too late
-
-        # Determine which side needs rescue
-        need_rescue_up = not tracked.up_filled and not up_open
-        need_rescue_down = not tracked.down_filled and not down_open
-
-        # Actually, let's reconsider the logic:
-        # - up_filled = True means UP order was filled (we hold UP position)
-        # - up_open = True means UP order is still open (waiting for fill)
-        # - Need rescue if: one side is filled, other side is still OPEN (not filled)
-
-        # One side filled, other still open = directional risk
+        # One side filled, other still open = directional risk - RESCUE IMMEDIATELY
         if tracked.up_filled and down_open:
-            # UP filled, DOWN still open - need to get DOWN filled
-            self._rescue_single_side(tracked, "DOWN", tracked.down_token, time_remaining)
+            # UP filled, DOWN still open - need to get DOWN filled NOW
+            self._rescue_immediate(tracked, "DOWN", tracked.down_token)
         elif tracked.down_filled and up_open:
-            # DOWN filled, UP still open - need to get UP filled
-            self._rescue_single_side(tracked, "UP", tracked.up_token, time_remaining)
+            # DOWN filled, UP still open - need to get UP filled NOW
+            self._rescue_immediate(tracked, "UP", tracked.up_token)
+
+    def _rescue_immediate(
+        self,
+        tracked: TrackedMarket,
+        side: str,
+        token_id: str
+    ) -> None:
+        """
+        Immediately rescue unfilled side by placing aggressive taker order.
+
+        Strategy: Cross the spread immediately to guarantee fill.
+        We'd rather pay 52-55% and get filled than sit at 50% and miss.
+
+        Args:
+            tracked: The tracked market
+            side: "UP" or "DOWN"
+            token_id: Token ID for the unfilled side
+        """
+        # Only attempt rescue once per side
+        if side == "UP" and tracked.up_rescue_attempted:
+            return
+        if side == "DOWN" and tracked.down_rescue_attempted:
+            return
+
+        current_price = tracked.up_price if side == "UP" else tracked.down_price
+        self.log(f"  RESCUE {side}: One side filled, crossing spread immediately")
+
+        # Cancel existing order and place taker order
+        try:
+            self.strategy.client.cancel_all_asset(token_id)
+        except Exception as e:
+            self.log(f"  RESCUE {side}: Cancel failed: {e}")
+
+        # Place taker order (cross the spread)
+        success, result = self.strategy.place_taker_order(
+            token_id, self.strategy.trade_size, tracked.neg_risk
+        )
+
+        if success:
+            self.log(f"  RESCUE {side}: Taker order placed successfully")
+            if side == "UP":
+                tracked.up_filled = True
+                tracked.up_rescue_attempted = True
+            else:
+                tracked.down_filled = True
+                tracked.down_rescue_attempted = True
+
+            # Get the taker price for alert
+            taker_price = self.strategy.get_taker_price(token_id) or 0.55
+
+            # Send rescue alert
+            send_rebates_rescue_alert(
+                question=tracked.question,
+                side=side,
+                old_price=current_price,
+                new_price=taker_price,
+                is_taker=True,
+                dry_run=DRY_RUN
+            )
+        else:
+            self.log(f"  RESCUE {side}: Taker order failed: {result}")
+            # Mark as attempted to avoid spam
+            if side == "UP":
+                tracked.up_rescue_attempted = True
+            else:
+                tracked.down_rescue_attempted = True
 
     def _rescue_single_side(
         self,
@@ -647,6 +689,8 @@ class RebatesBot:
             # Update orders for UPCOMING markets to stay competitive
             if tracked.status == "UPCOMING":
                 self.update_upcoming_orders(tracked)
+                # Also check fills and rescue during UPCOMING - fills can happen anytime!
+                self.rescue_unfilled_orders(tracked)
 
             # For LIVE markets: check fills and rescue unfilled orders
             if tracked.status == "LIVE":
