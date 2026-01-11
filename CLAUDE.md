@@ -30,6 +30,61 @@ uv run black .                    # Format code (line-length=100)
 uv run pytest                     # Run tests
 ```
 
+### Testing
+```bash
+# Run all unit tests
+uv run pytest tests/unit/ -v
+
+# Run specific test file
+uv run pytest tests/unit/test_trading_utils.py -v
+
+# Run with coverage report
+uv run pytest tests/unit/ --cov=poly_data --cov=trading --cov-report=term-missing
+
+# Run integration tests (requires credentials and POLY_TEST_INTEGRATION=true)
+POLY_TEST_INTEGRATION=true uv run pytest tests/integration/ -v
+
+# Run all tests with short traceback
+uv run pytest tests/ -v --tb=short
+```
+
+## Testing Infrastructure
+
+### Test Directory Structure
+```
+tests/
+├── conftest.py                    # Shared fixtures (mock_global_state, mock_client)
+├── unit/
+│   ├── test_trading_utils.py      # Orderbook analysis, price calculations
+│   ├── test_data_utils.py         # Position/order state management
+│   ├── test_trading.py            # Order creation, cancellation logic
+│   └── test_telegram.py           # Alert formatting
+├── integration/
+│   ├── test_polymarket_client.py  # Real API tests (read-only)
+│   └── test_database.py           # Database connectivity tests
+└── fixtures/
+    └── market_data.py             # Sample orderbooks, market rows, positions
+```
+
+### Key Test Fixtures
+- `sample_orderbook` - Realistic bid/ask data with SortedDicts
+- `sample_market_row` - Market configuration with all required fields
+- `mock_global_state` - Patched global_state with controlled data
+- `mock_client` - Mocked PolymarketClient with predictable responses
+
+### Observability Modules
+- `poly_data/exceptions.py` - Custom exception hierarchy with alert classification
+- `poly_data/logging_config.py` - Structured JSON logging with context support
+- `poly_data/retry.py` - Retry decorators with exponential backoff
+
+### Enhanced Telegram Alerts
+New alert functions in `alerts/telegram.py`:
+- `send_critical_error_alert()` - For exceptions with should_alert=True
+- `send_websocket_reconnect_alert()` - After 3+ reconnection attempts
+- `send_balance_warning_alert()` - Low balance warnings
+- `send_market_exit_alert()` - Exit before event notifications
+- `send_high_volatility_alert()` - Volatility threshold alerts
+
 ### Position Merging (standalone)
 ```bash
 node poly_merger/merge.js [amount] [condition_id] [is_neg_risk]

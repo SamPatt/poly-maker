@@ -486,3 +486,222 @@ def send_rebates_redemption_alert(
     message += f"<b>Status:</b> USDC recovered"
 
     return send_alert(message)
+
+
+# ============================================
+# Enhanced Error and Monitoring Alerts
+# ============================================
+
+
+def send_critical_error_alert(
+    error_type: str,
+    message: str,
+    context: Optional[dict] = None
+) -> bool:
+    """
+    Send alert for critical errors that require immediate attention.
+
+    Use this for errors that have should_alert=True in the exception hierarchy.
+    Includes error type classification and context.
+
+    Args:
+        error_type: Type classification (e.g., 'insufficient_balance', 'order_creation')
+        message: Error message
+        context: Optional dict with additional context
+
+    Returns:
+        True if sent successfully
+    """
+    emoji_map = {
+        'insufficient_balance': '💸',
+        'order_creation': '❌',
+        'stop_loss': '🛑',
+        'position_merge': '🔄',
+        'websocket': '🔌',
+        'blockchain': '⛓️',
+        'polymarket_api': '🌐',
+        'redemption': '💵',
+        'database': '🗄️',
+        'state_inconsistency': '⚠️',
+        'configuration': '⚙️',
+    }
+
+    emoji = emoji_map.get(error_type, '⚠️')
+
+    alert_msg = f"{emoji} <b>Error: {error_type.replace('_', ' ').title()}</b>\n\n"
+    alert_msg += f"<code>{message[:400]}</code>"
+
+    if context:
+        alert_msg += "\n\n<b>Context:</b>\n"
+        for key, value in list(context.items())[:5]:
+            # Truncate long values
+            str_value = str(value)
+            if len(str_value) > 50:
+                str_value = str_value[:47] + "..."
+            alert_msg += f"• {key}: {str_value}\n"
+
+    return send_alert(alert_msg)
+
+
+def send_websocket_reconnect_alert(
+    connection_type: str,
+    attempt: int,
+    error: str
+) -> bool:
+    """
+    Alert when WebSocket requires reconnection.
+
+    Only sends alert after multiple failures to avoid noise.
+
+    Args:
+        connection_type: 'market' or 'user'
+        attempt: Current reconnection attempt number
+        error: Error message that caused reconnection
+
+    Returns:
+        True if sent successfully (or False if attempt < 3)
+    """
+    # Only alert after 3+ failures to reduce noise
+    if attempt < 3:
+        return False
+
+    message = f"🔌 <b>WebSocket Reconnecting</b>\n\n"
+    message += f"<b>Type:</b> {connection_type}\n"
+    message += f"<b>Attempts:</b> {attempt}\n"
+    message += f"<b>Error:</b> {error[:100]}"
+
+    return send_alert(message)
+
+
+def send_balance_warning_alert(
+    current_balance: float,
+    committed: float,
+    threshold: float
+) -> bool:
+    """
+    Alert when available balance is running low.
+
+    Args:
+        current_balance: Current USDC wallet balance
+        committed: Funds committed to open orders
+        threshold: Minimum balance threshold
+
+    Returns:
+        True if sent successfully
+    """
+    available = current_balance - committed
+
+    message = f"💰 <b>Low Balance Warning</b>\n\n"
+    message += f"<b>Wallet:</b> ${current_balance:.2f}\n"
+    message += f"<b>Committed:</b> ${committed:.2f}\n"
+    message += f"<b>Available:</b> ${available:.2f}\n"
+    message += f"<b>Threshold:</b> ${threshold:.2f}\n"
+    message += f"\n<i>New buy orders may be blocked</i>"
+
+    return send_alert(message)
+
+
+def send_market_exit_alert(
+    market_question: str,
+    reason: str,
+    position_value: float,
+    exit_price: Optional[float] = None
+) -> bool:
+    """
+    Alert when exiting a market (exit_before_event or manual exit).
+
+    Args:
+        market_question: Market question text
+        reason: Reason for exit (e.g., 'Exit before event', 'Manual exit')
+        position_value: Value of position being exited
+        exit_price: Price at which position was sold (optional)
+
+    Returns:
+        True if sent successfully
+    """
+    # Truncate long questions
+    if len(market_question) > 80:
+        market_question = market_question[:77] + "..."
+
+    message = f"🚪 <b>Market Exit</b>\n\n"
+    message += f"<b>Market:</b> {market_question}\n"
+    message += f"<b>Reason:</b> {reason}\n"
+    message += f"<b>Position Value:</b> ${position_value:.2f}"
+
+    if exit_price is not None:
+        message += f"\n<b>Exit Price:</b> ${exit_price:.4f}"
+
+    return send_alert(message)
+
+
+def send_high_volatility_alert(
+    market_question: str,
+    volatility_3h: float,
+    threshold: float
+) -> bool:
+    """
+    Alert when market volatility exceeds threshold.
+
+    Args:
+        market_question: Market question text
+        volatility_3h: 3-hour volatility percentage
+        threshold: Volatility threshold that was exceeded
+
+    Returns:
+        True if sent successfully
+    """
+    # Truncate long questions
+    if len(market_question) > 80:
+        market_question = market_question[:77] + "..."
+
+    message = f"📊 <b>High Volatility Alert</b>\n\n"
+    message += f"<b>Market:</b> {market_question}\n"
+    message += f"<b>3h Volatility:</b> {volatility_3h:.2f}%\n"
+    message += f"<b>Threshold:</b> {threshold:.2f}%\n"
+    message += f"\n<i>Trading may be paused for this market</i>"
+
+    return send_alert(message)
+
+
+def send_order_fill_alert(
+    side: str,
+    token: str,
+    price: float,
+    size: float,
+    market_question: Optional[str] = None,
+    pnl: Optional[float] = None
+) -> bool:
+    """
+    Alert when an order is filled (trade executed).
+
+    Enhanced version of send_trade_alert with P&L information.
+
+    Args:
+        side: 'BUY' or 'SELL'
+        token: Token ID
+        price: Fill price
+        size: Trade size
+        market_question: Optional market question
+        pnl: Optional profit/loss on this trade
+
+    Returns:
+        True if sent successfully
+    """
+    emoji = "🟢" if side.upper() == "BUY" else "🔴"
+
+    message = f"{emoji} <b>Order Filled</b>\n\n"
+
+    if market_question:
+        if len(market_question) > 80:
+            market_question = market_question[:77] + "..."
+        message += f"<b>Market:</b> {market_question}\n\n"
+
+    message += f"<b>Side:</b> {side.upper()}\n"
+    message += f"<b>Price:</b> ${price:.4f}\n"
+    message += f"<b>Size:</b> ${size:.2f}"
+
+    if pnl is not None:
+        pnl_emoji = "📈" if pnl >= 0 else "📉"
+        message += f"\n{pnl_emoji} <b>P&L:</b> ${pnl:.2f}"
+
+    return send_alert(message)
