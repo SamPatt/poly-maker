@@ -495,6 +495,12 @@ async def perform_trade(market):
                 # Get max_size for logging (same logic as in get_buy_sell_amount)
                 max_size = row.get('max_size', row['trade_size'])
 
+                # Check if min_incentive_size exceeds max_size (would prevent reward-eligible orders)
+                min_incentive_size = row.get('min_incentive_size', row.get('min_size', row['trade_size']))
+                if min_incentive_size > max_size:
+                    print(f"[WARNING] Market {row['question'][:50]}... has min_incentive_size={min_incentive_size} > max_size={max_size}. "
+                          f"Orders will be undersized for liquidity rewards! Increase max_size in hyperparameters.")
+
                 # Prepare order object with all necessary information
                 order = {
                     "token": token,
@@ -513,19 +519,14 @@ async def perform_trade(market):
                 # File to store risk management information for this market
                 fname = 'positions/' + str(market) + '.json'
 
-                # ------- SELL ORDER LOGIC -------
-                if sell_amount > 0:
-                    # Skip if we have no average price (no real position)
-                    if avgPrice == 0:
-                        print("Avg Price is 0. Skipping")
-                        continue
-
+                # ------- STOP-LOSS SELL LOGIC (only with position) -------
+                if sell_amount > 0 and avgPrice > 0 and position > 0:
                     order['size'] = sell_amount
                     order['price'] = ask_price
 
                     # Get fresh market data for risk assessment
                     n_deets = get_best_bid_ask_deets(market, detail['name'], 100, 0.1)
-                    
+
                     # Calculate current market price and spread
                     mid_price = round_up((n_deets['best_bid'] + n_deets['best_ask']) / 2, round_length)
                     spread = round(n_deets['best_ask'] - n_deets['best_bid'], 2)
@@ -534,7 +535,7 @@ async def perform_trade(market):
                     pnl = (mid_price - avgPrice) / avgPrice * 100
 
                     print(f"Mid Price: {mid_price}, Spread: {spread}, PnL: {pnl}")
-                    
+
                     # Prepare risk details for tracking
                     risk_details = {
                         'time': str(pd.Timestamp.utcnow().tz_localize(None)),
@@ -562,7 +563,7 @@ async def perform_trade(market):
                         order['price'] = n_deets['best_bid']
 
                         # Set period to avoid trading after stop-loss
-                        risk_details['sleep_till'] = str(pd.Timestamp.utcnow().tz_localize(None) + 
+                        risk_details['sleep_till'] = str(pd.Timestamp.utcnow().tz_localize(None) +
                                                         pd.Timedelta(hours=params['sleep_period']))
 
                         print("Risking off")
@@ -580,8 +581,8 @@ async def perform_trade(market):
                 # Only buy if:
                 # 1. Position is less than max_size (new logic)
                 # 2. Position is less than absolute cap (250)
-                # 3. Buy amount is above minimum size
-                if position < max_size and position < 250 and buy_amount > 0 and buy_amount >= row['min_size']:
+                # 3. Buy amount meets minimum incentive size for rewards
+                if position < max_size and position < 250 and buy_amount > 0 and buy_amount >= min_incentive_size:
                     # Get reference price from market data
                     sheet_value = row['best_bid']
 
@@ -663,39 +664,55 @@ async def perform_trade(market):
                                 #     print(f"Cancelling buy orders because best size is less than 90% of open orders and spread is too large")
                                 #     global_state.client.cancel_all_asset(order['token'])
                         
-                # ------- TAKE PROFIT / SELL ORDER MANAGEMENT -------            
-                elif sell_amount > 0:
+                # ------- TWO-SIDED MARKET MAKING ASK ORDERS -------
+                # For liquidity rewards, we need to quote ASKs even without inventory
+                # This runs INDEPENDENTLY of buy logic (not elif) to ensure two-sided quoting
+                if sell_amount > 0:
                     order['size'] = sell_amount
-                    
-                    # Calculate take-profit price based on average cost
-                    tp_price = round_up(avgPrice + (avgPrice * params['take_profit_threshold']/100), round_length)
-                    order['price'] = round_up(tp_price if ask_price < tp_price else ask_price, round_length)
-                    
-                    tp_price = float(tp_price)
-                    order_price = float(orders['sell']['price'])
-                    
-                    # Calculate % difference between current order and ideal price
-                    diff = abs(order_price - tp_price)/tp_price * 100
 
-                    # Update sell order if:
-                    # 1. Current order price is significantly different from target
-                    if diff > 2:
-                        print(f"Sending Sell Order for {token} because better current order price of "
-                              f"{order_price} is deviant from the tp_price of {tp_price} and diff is {diff}")
+                    # Determine ASK price based on whether we have inventory
+                    if avgPrice > 0 and position > 0:
+                        # WITH INVENTORY: Use take-profit pricing
+                        tp_price = round_up(avgPrice + (avgPrice * params['take_profit_threshold']/100), round_length)
+                        order['price'] = round_up(tp_price if ask_price < tp_price else ask_price, round_length)
+                        pricing_mode = "take-profit"
+                    else:
+                        # NO INVENTORY: Quote at competitive market-making ask price
+                        # This enables two-sided liquidity rewards even without position
+                        order['price'] = ask_price
+                        pricing_mode = "market-making"
+
+                    order_price = float(orders['sell']['price'])
+                    target_price = float(order['price'])
+
+                    # Calculate % difference between current order and target price
+                    if order_price > 0:
+                        diff = abs(order_price - target_price)/target_price * 100 if target_price > 0 else 100
+                    else:
+                        diff = 100  # No existing order, so place new one
+
+                    print(f"[ASK {pricing_mode}] Token: {token}, Target: {target_price}, "
+                          f"Current: {order_price}, Diff: {diff:.1f}%, Size: {sell_amount}")
+
+                    # Place/update sell order if:
+                    # 1. No existing sell order
+                    if orders['sell']['size'] == 0:
+                        print(f"Sending ASK order for {token} - no existing order (two-sided quoting)")
                         send_sell_order(order)
-                    # 2. Current order size is too small for our position
-                    elif orders['sell']['size'] < position * 0.97:
-                        print(f"Sending Sell Order for {token} because not enough sell size. "
-                              f"Position: {position}, Sell Size: {orders['sell']['size']}")
+                    # 2. Current order price is significantly different from target
+                    elif diff > 2:
+                        print(f"Sending ASK order for {token} - price diff {diff:.1f}% > 2%")
                         send_sell_order(order)
-                    
-                    # Commented out additional conditions for updating sell orders
-                    # elif orders['sell']['price'] < ask_price:
-                    #     print(f"Updating Sell Order for {token} because its not at the right price")
-                    #     send_sell_order(order)
-                    # elif best_ask_size < orders['sell']['size'] * 0.98 and abs(best_ask - second_best_ask) > 0.03...:
-                    #     print(f"Cancelling sell orders because best size is less than 90% of open orders...")
-                    #     send_sell_order(order)
+                    # 3. Current order size is wrong
+                    elif abs(orders['sell']['size'] - sell_amount) > sell_amount * 0.1:
+                        print(f"Sending ASK order for {token} - size mismatch "
+                              f"(current: {orders['sell']['size']}, target: {sell_amount})")
+                        send_sell_order(order)
+                    # 4. For market-making mode, update if we can get better price
+                    elif pricing_mode == "market-making" and order_price > 0 and ask_price < order_price:
+                        print(f"Sending ASK order for {token} - better price available "
+                              f"({ask_price} < {order_price})")
+                        send_sell_order(order)
 
         except Exception as ex:
             print(f"Error performing trade for {market}: {ex}")

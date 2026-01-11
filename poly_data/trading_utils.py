@@ -150,41 +150,72 @@ def round_up(number, decimals):
     return math.ceil(number * factor) / factor
 
 def get_buy_sell_amount(position, bid_price, row, other_token_position=0):
+    """
+    Calculate buy and sell amounts for TWO-SIDED market making.
+
+    For Polymarket liquidity rewards, we need to quote both sides:
+    - Orders must meet min_incentive_size to qualify for rewards
+    - Two-sided liquidity scores much higher than single-sided
+    - For extreme midpoints (<0.10 or >0.90), two-sided is REQUIRED
+
+    Args:
+        position: Current position size for this token
+        bid_price: Current bid price (used for low-price multiplier)
+        row: Market configuration row with trade parameters
+        other_token_position: Position in the opposite outcome token
+
+    Returns:
+        (buy_amount, sell_amount): Amounts to quote on each side
+    """
     buy_amount = 0
     sell_amount = 0
 
     # Get max_size, defaulting to trade_size if not specified
     max_size = row.get('max_size', row['trade_size'])
-    trade_size = row['trade_size']
-    
+
+    # Use min_incentive_size from market config for reward eligibility
+    # Fall back to min_size, then trade_size if not available
+    min_incentive_size = row.get('min_incentive_size', row.get('min_size', row['trade_size']))
+
+    # Order size should be at least min_incentive_size to qualify for rewards
+    # Use the larger of trade_size or min_incentive_size
+    order_size = max(row['trade_size'], min_incentive_size)
+
     # Calculate total exposure across both sides
     total_exposure = position + other_token_position
-    
-    # If we haven't reached max_size on either side, continue building
-    if position < max_size:
-        # Continue quoting trade_size amounts until we reach max_size
-        remaining_to_max = max_size - position
-        buy_amount = min(trade_size, remaining_to_max)
-        
-        # Only sell if we have substantial position (to allow for exit when needed)
-        if position >= trade_size:
-            sell_amount = min(position, trade_size)
-        else:
-            sell_amount = 0
-    else:
-        # We've reached max_size, implement progressive exit strategy
-        # Always offer to sell trade_size amount when at max_size
-        sell_amount = min(position, trade_size)
-        
-        # Continue quoting to buy if total exposure warrants it
-        if total_exposure < max_size * 2:  # Allow some flexibility for market making
-            buy_amount = trade_size
-        else:
-            buy_amount = 0
 
-    # Ensure minimum order size compliance
-    if buy_amount > 0.7 * row['min_size'] and buy_amount < row['min_size']:
-        buy_amount = row['min_size']
+    # ------- TWO-SIDED QUOTING FOR LIQUIDITY REWARDS -------
+    # Always quote on BOTH sides to maximize reward scoring
+
+    # BUY SIDE: Quote if we haven't reached max position
+    if position < max_size and total_exposure < max_size * 2:
+        remaining_to_max = max_size - position
+        buy_amount = min(order_size, remaining_to_max)
+        # Ensure we meet minimum incentive size
+        if buy_amount < min_incentive_size and remaining_to_max >= min_incentive_size:
+            buy_amount = min_incentive_size
+
+    # SELL SIDE: Always quote for two-sided liquidity rewards
+    # Even without inventory, we quote sells (they become short if filled)
+    # This is critical for Polymarket rewards - two-sided scores much higher
+    if position < max_size:
+        # Quote sell at order_size for two-sided liquidity
+        # If we have position, we're selling from inventory
+        # If we don't, this creates a short (offset by the other side's buy)
+        sell_amount = order_size
+    else:
+        # At max_size, sell our full trade amount to reduce position
+        sell_amount = min(position, order_size)
+
+    # Ensure minimum order size compliance for rewards
+    if buy_amount > 0 and buy_amount < min_incentive_size:
+        if position + min_incentive_size <= max_size:
+            buy_amount = min_incentive_size
+        else:
+            buy_amount = 0  # Don't place undersized orders
+
+    if sell_amount > 0 and sell_amount < min_incentive_size:
+        sell_amount = min_incentive_size
 
     # Apply multiplier for low-priced assets (optional per-market setting)
     if bid_price < 0.1 and buy_amount > 0:
