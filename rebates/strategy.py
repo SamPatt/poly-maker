@@ -382,23 +382,27 @@ class DeltaNeutralStrategy:
                     )
                     up_success = up_resp and up_resp.get("success") == True
                 except Exception as e:
-                    error_str = str(e)
-                    if "crosses book" in error_str:
+                    error_str = str(e).lower()
+                    print(f"[{timestamp}] Up order exception: {e}")
+                    if "crosses" in error_str or "cross" in error_str:
                         up_attempts += 1
                         current_up_price = round(current_up_price - tick_size, 2)
-                        print(f"[{timestamp}] Up order crossed book, retrying at {current_up_price}")
-                        continue
-                    else:
-                        raise
+                        if current_up_price >= 0.40:
+                            print(f"[{timestamp}] Up order crossed book, retrying at {current_up_price}")
+                            continue
+                    up_attempts = 3
+                    break
 
                 if not up_success:
-                    error_msg = up_resp.get("errorMsg", "") if up_resp else ""
-                    if "crosses book" in error_msg:
+                    error_msg = str(up_resp.get("errorMsg", "")) if up_resp else ""
+                    print(f"[{timestamp}] Up order failed: {error_msg}")
+                    if "crosses" in error_msg.lower() or "cross" in error_msg.lower():
                         up_attempts += 1
                         current_up_price = round(current_up_price - tick_size, 2)
-                        print(f"[{timestamp}] Up order crossed book, retrying at {current_up_price}")
-                    else:
-                        break
+                        if current_up_price >= 0.40:
+                            print(f"[{timestamp}] Up order crossed book, retrying at {current_up_price}")
+                            continue
+                    break
 
             if not up_success:
                 error_msg = up_resp.get("errorMsg", "") if up_resp else "Empty response"
@@ -429,24 +433,28 @@ class DeltaNeutralStrategy:
                     )
                     down_success = down_resp and down_resp.get("success") == True
                 except Exception as e:
-                    error_str = str(e)
-                    if "crosses book" in error_str:
-                        # Reduce price and retry
+                    error_str = str(e).lower()
+                    print(f"[{timestamp}] Down order exception: {e}")
+                    if "crosses" in error_str or "cross" in error_str:
                         down_attempts += 1
                         current_down_price = round(current_down_price - tick_size, 2)
-                        print(f"[{timestamp}] Down order crossed book, retrying at {current_down_price}")
-                        continue
-                    else:
-                        raise
+                        if current_down_price >= 0.40:  # Don't go too low
+                            print(f"[{timestamp}] Down order crossed book, retrying at {current_down_price}")
+                            continue
+                    # If not crosses error or price too low, break out
+                    down_attempts = 3  # Force exit
+                    break
 
                 if not down_success:
-                    error_msg = down_resp.get("errorMsg", "") if down_resp else ""
-                    if "crosses book" in error_msg:
+                    error_msg = str(down_resp.get("errorMsg", "")) if down_resp else ""
+                    print(f"[{timestamp}] Down order failed: {error_msg}")
+                    if "crosses" in error_msg.lower() or "cross" in error_msg.lower():
                         down_attempts += 1
                         current_down_price = round(current_down_price - tick_size, 2)
-                        print(f"[{timestamp}] Down order crossed book, retrying at {current_down_price}")
-                    else:
-                        break
+                        if current_down_price >= 0.40:
+                            print(f"[{timestamp}] Down order crossed book, retrying at {current_down_price}")
+                            continue
+                    break
 
             if not down_success:
                 # Try to cancel the Up order if Down failed
