@@ -21,6 +21,11 @@ REDEEM_TIMEOUT = 120
 PROJECT_ROOT = Path(__file__).parent.resolve()
 REDEEM_SCRIPT = PROJECT_ROOT / "poly_merger" / "redeem.js"
 
+# Lock to serialize redemption operations and prevent nonce conflicts
+# When multiple redemptions are triggered simultaneously, they would all
+# fetch the same Safe nonce before any transaction is mined, causing conflicts.
+_redemption_lock = threading.Lock()
+
 
 def redeem_position(
     condition_id: str,
@@ -63,52 +68,59 @@ def _do_redeem(
 ) -> Optional[str]:
     """
     Internal function that performs the actual redemption.
+
+    Uses a lock to ensure only one redemption runs at a time,
+    preventing Safe nonce conflicts when multiple markets resolve simultaneously.
     """
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    try:
-        # Use absolute path to redeem script and run from project root
-        node_command = f'node {REDEEM_SCRIPT} {condition_id}'
-        print(f"[{timestamp}] [REDEMPTION] Starting: {condition_id[:20]}...")
+    # Acquire lock to prevent concurrent redemptions from using the same nonce
+    with _redemption_lock:
+        print(f"[{timestamp}] [REDEMPTION] Lock acquired for: {condition_id[:20]}...")
 
-        result = subprocess.run(
-            node_command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=REDEEM_TIMEOUT,
-            cwd=str(PROJECT_ROOT)  # Run from project root for .env loading
-        )
+        try:
+            # Use absolute path to redeem script and run from project root
+            node_command = f'node {REDEEM_SCRIPT} {condition_id}'
+            print(f"[{timestamp}] [REDEMPTION] Starting: {condition_id[:20]}...")
 
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() or "Unknown error"
-            print(f"[{timestamp}] [REDEMPTION] Failed: {error_msg[:100]}")
+            result = subprocess.run(
+                node_command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=REDEEM_TIMEOUT,
+                cwd=str(PROJECT_ROOT)  # Run from project root for .env loading
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or "Unknown error"
+                print(f"[{timestamp}] [REDEMPTION] Failed: {error_msg[:100]}")
+                if on_error:
+                    on_error(condition_id, error_msg)
+                return None
+
+            # Extract transaction hash from output
+            tx_hash = result.stdout.strip()
+            print(f"[{timestamp}] [REDEMPTION] Success: {condition_id[:20]}... -> {tx_hash[:20] if tx_hash else 'no hash'}...")
+
+            if on_success:
+                on_success(condition_id, tx_hash)
+
+            return tx_hash
+
+        except subprocess.TimeoutExpired:
+            error_msg = f"Redemption timed out after {REDEEM_TIMEOUT}s (tx may still be pending)"
+            print(f"[{timestamp}] [REDEMPTION] Timeout: {condition_id[:20]}...")
             if on_error:
                 on_error(condition_id, error_msg)
             return None
 
-        # Extract transaction hash from output
-        tx_hash = result.stdout.strip()
-        print(f"[{timestamp}] [REDEMPTION] Success: {condition_id[:20]}... -> {tx_hash[:20] if tx_hash else 'no hash'}...")
-
-        if on_success:
-            on_success(condition_id, tx_hash)
-
-        return tx_hash
-
-    except subprocess.TimeoutExpired:
-        error_msg = f"Redemption timed out after {REDEEM_TIMEOUT}s (tx may still be pending)"
-        print(f"[{timestamp}] [REDEMPTION] Timeout: {condition_id[:20]}...")
-        if on_error:
-            on_error(condition_id, error_msg)
-        return None
-
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[{timestamp}] [REDEMPTION] Error: {error_msg}")
-        if on_error:
-            on_error(condition_id, error_msg)
-        return None
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[{timestamp}] [REDEMPTION] Error: {error_msg}")
+            if on_error:
+                on_error(condition_id, error_msg)
+            return None
 
 
 def redeem_position_async(
