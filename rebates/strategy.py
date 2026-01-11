@@ -363,48 +363,102 @@ class DeltaNeutralStrategy:
                 )
 
             # Place Up order (BUY on the Up outcome)
-            # post_only=True ensures we're a maker (order rejected if it would immediately match)
-            print(f"[{timestamp}] Placing Up order: {self.trade_size} @ {up_price} (post-only)")
-            up_resp = self.client.create_order(
-                marketId=up_token,
-                action="BUY",
-                price=up_price,
-                size=self.trade_size,
-                neg_risk=neg_risk,
-                post_only=True
-            )
+            # Retry at lower prices if order crosses book
+            up_success = False
+            up_resp = None
+            up_attempts = 0
+            current_up_price = up_price
 
-            # Check for success - API returns {'success': True, 'status': 'live'} on success
-            up_success = up_resp and up_resp.get("success") == True
+            while not up_success and up_attempts < 3:
+                print(f"[{timestamp}] Placing Up order: {self.trade_size} @ {current_up_price} (post-only)")
+                try:
+                    up_resp = self.client.create_order(
+                        marketId=up_token,
+                        action="BUY",
+                        price=current_up_price,
+                        size=self.trade_size,
+                        neg_risk=neg_risk,
+                        post_only=True
+                    )
+                    up_success = up_resp and up_resp.get("success") == True
+                except Exception as e:
+                    error_str = str(e)
+                    if "crosses book" in error_str:
+                        up_attempts += 1
+                        current_up_price = round(current_up_price - tick_size, 2)
+                        print(f"[{timestamp}] Up order crossed book, retrying at {current_up_price}")
+                        continue
+                    else:
+                        raise
+
+                if not up_success:
+                    error_msg = up_resp.get("errorMsg", "") if up_resp else ""
+                    if "crosses book" in error_msg:
+                        up_attempts += 1
+                        current_up_price = round(current_up_price - tick_size, 2)
+                        print(f"[{timestamp}] Up order crossed book, retrying at {current_up_price}")
+                    else:
+                        break
+
             if not up_success:
                 error_msg = up_resp.get("errorMsg", "") if up_resp else "Empty response"
                 return OrderResult(success=False, message=f"Failed to place Up order: {error_msg}")
+
+            up_price = current_up_price  # Update to actual price used
 
             up_order_id = up_resp.get("orderID", "")
             print(f"[{timestamp}] Up order placed: {up_order_id[:20]}...")
 
             # Place Down order (BUY on the Down outcome)
-            print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {down_price} (post-only)")
-            down_resp = self.client.create_order(
-                marketId=down_token,
-                action="BUY",
-                price=down_price,
-                size=self.trade_size,
-                neg_risk=neg_risk,
-                post_only=True
-            )
+            # Retry at lower prices if order crosses book
+            down_success = False
+            down_resp = None
+            down_attempts = 0
+            current_down_price = down_price
 
-            # Check for success
-            down_success = down_resp and down_resp.get("success") == True
+            while not down_success and down_attempts < 3:
+                print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {current_down_price} (post-only)")
+                try:
+                    down_resp = self.client.create_order(
+                        marketId=down_token,
+                        action="BUY",
+                        price=current_down_price,
+                        size=self.trade_size,
+                        neg_risk=neg_risk,
+                        post_only=True
+                    )
+                    down_success = down_resp and down_resp.get("success") == True
+                except Exception as e:
+                    error_str = str(e)
+                    if "crosses book" in error_str:
+                        # Reduce price and retry
+                        down_attempts += 1
+                        current_down_price = round(current_down_price - tick_size, 2)
+                        print(f"[{timestamp}] Down order crossed book, retrying at {current_down_price}")
+                        continue
+                    else:
+                        raise
+
+                if not down_success:
+                    error_msg = down_resp.get("errorMsg", "") if down_resp else ""
+                    if "crosses book" in error_msg:
+                        down_attempts += 1
+                        current_down_price = round(current_down_price - tick_size, 2)
+                        print(f"[{timestamp}] Down order crossed book, retrying at {current_down_price}")
+                    else:
+                        break
+
             if not down_success:
                 # Try to cancel the Up order if Down failed
-                print(f"[{timestamp}] Down order failed, cancelling Up order")
+                print(f"[{timestamp}] Down order failed after retries, cancelling Up order")
                 try:
                     self.client.cancel_all_asset(up_token)
                 except Exception:
                     pass
                 error_msg = down_resp.get("errorMsg", "") if down_resp else "Empty response"
                 return OrderResult(success=False, message=f"Failed to place Down order: {error_msg}")
+
+            down_price = current_down_price  # Update to actual price used
 
             down_order_id = down_resp.get("orderID", "")
             print(f"[{timestamp}] Down order placed: {down_order_id[:20]}...")
