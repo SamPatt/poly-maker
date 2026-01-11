@@ -412,7 +412,7 @@ def send_rebates_rescue_alert(
         message += f"<b>Market:</b> {question}\n"
         message += f"<b>Side:</b> {side}\n"
         message += f"<b>Price:</b> ${new_price:.2f} (crossed spread)\n"
-        message += f"<b>Reason:</b> <30s to resolution"
+        message += f"<b>Reason:</b> Immediate fill to match other side"
     else:
         emoji = "🔄"
         message = f"{emoji} <b>Rescue Order Updated</b>\n\n"
