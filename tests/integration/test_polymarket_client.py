@@ -52,7 +52,7 @@ class TestPolymarketClientIntegration:
         # Use a known active market token
         # Note: This may fail if the market becomes inactive
         try:
-            orderbook = real_client.get_orderbook(
+            orderbook = real_client.get_order_book(
                 "71321045679013447797864514828570804964740509273960966121330942155432910325412"
             )
 
@@ -104,7 +104,10 @@ class TestAPIReadOperations:
             "get_all_orders",
             "get_usdc_balance",
             "create_order",
-            "cancel_all",
+            "cancel_all_asset",
+            "cancel_all_market",
+            "merge_positions",
+            "redeem_positions",
         ]
 
         for method in required_methods:
