@@ -10,7 +10,7 @@ from typing import Dict, Any, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .config import TRADE_SIZE, TARGET_PRICE, DRY_RUN
+from .config import TRADE_SIZE, TARGET_PRICE, DRY_RUN, INITIAL_AGGRESSION
 
 
 @dataclass
@@ -333,8 +333,9 @@ class DeltaNeutralStrategy:
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
             # Get optimal maker prices from order book
-            up_price = self.get_best_maker_price(up_token, tick_size)
-            down_price = self.get_best_maker_price(down_token, tick_size)
+            # Use INITIAL_AGGRESSION to place closer to the ask for better fill rates
+            up_price = self.get_best_maker_price(up_token, tick_size, aggression=INITIAL_AGGRESSION)
+            down_price = self.get_best_maker_price(down_token, tick_size, aggression=INITIAL_AGGRESSION)
 
             # Fall back to target price if order book fetch fails
             if up_price is None:
@@ -478,7 +479,7 @@ class DeltaNeutralStrategy:
             - is_competitive: True if our price is within 1 tick of optimal
             - new_best_price: The current optimal maker price
         """
-        best_price = self.get_best_maker_price(token_id, tick_size)
+        best_price = self.get_best_maker_price(token_id, tick_size, aggression=INITIAL_AGGRESSION)
         if best_price is None:
             return True, None  # Can't check, assume OK
 
