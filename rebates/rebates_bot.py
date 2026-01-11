@@ -89,9 +89,11 @@ class TrackedMarket:
     last_update: Optional[datetime] = None
     neg_risk: bool = False
     tick_size: float = 0.01
-    # Track if rescue orders were placed (to send alerts when filled)
-    up_rescue_attempted: bool = False
-    down_rescue_attempted: bool = False
+    # Track rescue state
+    up_rescue_started: bool = False  # True after first aggressive maker placed
+    down_rescue_started: bool = False
+    up_taker_attempted: bool = False  # True after taker order attempted
+    down_taker_attempted: bool = False
 
 
 class RebatesBot:
@@ -303,181 +305,94 @@ class RebatesBot:
         token_id: str
     ) -> None:
         """
-        Immediately rescue unfilled side by placing aggressive taker order.
+        Rescue unfilled side with aggressive maker order, taker only as last resort.
 
-        Strategy: Cross the spread immediately to guarantee fill.
-        We'd rather pay 52-55% and get filled than sit at 50% and miss.
+        Strategy:
+        1. Place aggressive maker order (80% aggression toward ask)
+        2. Update every 15s to stay competitive (handled by update_upcoming_orders)
+        3. If <30s before market goes LIVE and still not filled → taker order
 
-        Args:
-            tracked: The tracked market
-            side: "UP" or "DOWN"
-            token_id: Token ID for the unfilled side
-        """
-        # Only attempt rescue once per side
-        if side == "UP" and tracked.up_rescue_attempted:
-            return
-        if side == "DOWN" and tracked.down_rescue_attempted:
-            return
-
-        current_price = tracked.up_price if side == "UP" else tracked.down_price
-        self.log(f"  RESCUE {side}: One side filled, crossing spread immediately")
-
-        # Cancel existing order and place taker order
-        try:
-            self.strategy.client.cancel_all_asset(token_id)
-        except Exception as e:
-            self.log(f"  RESCUE {side}: Cancel failed: {e}")
-
-        # Place taker order (cross the spread)
-        success, result = self.strategy.place_taker_order(
-            token_id, self.strategy.trade_size, tracked.neg_risk
-        )
-
-        if success:
-            self.log(f"  RESCUE {side}: Taker order placed successfully")
-            if side == "UP":
-                tracked.up_filled = True
-                tracked.up_rescue_attempted = True
-            else:
-                tracked.down_filled = True
-                tracked.down_rescue_attempted = True
-
-            # Get the taker price for alert
-            taker_price = self.strategy.get_taker_price(token_id) or 0.55
-
-            # Send rescue alert
-            send_rebates_rescue_alert(
-                question=tracked.question,
-                side=side,
-                old_price=current_price,
-                new_price=taker_price,
-                is_taker=True,
-                dry_run=DRY_RUN
-            )
-        else:
-            self.log(f"  RESCUE {side}: Taker order failed: {result}")
-            # Mark as attempted to avoid spam
-            if side == "UP":
-                tracked.up_rescue_attempted = True
-            else:
-                tracked.down_rescue_attempted = True
-
-    def _rescue_single_side(
-        self,
-        tracked: TrackedMarket,
-        side: str,
-        token_id: str,
-        time_remaining: float
-    ) -> None:
-        """
-        Rescue a single unfilled side by re-placing at better price.
-
-        AGGRESSIVE rescue strategy - prioritize getting filled over saving money.
-        Better to pay 55-60% than lose 100% at resolution.
-
-        Price ceiling AND aggression escalation:
-        | Time Left | Max Price | Aggression | Meaning                    |
-        |-----------|-----------|------------|----------------------------|
-        | > 12 min  | 0.55      | 20%        | 20% of spread toward ask   |
-        | 8-12 min  | 0.58      | 30%        | 30% of spread toward ask   |
-        | 5-8 min   | 0.60      | 40%        | 40% of spread toward ask   |
-        | 2-5 min   | 0.62      | 60%        | 60% of spread toward ask   |
-        | 1-2 min   | 0.65      | 80%        | 80% of spread toward ask   |
-        | < 60 sec  | TAKER     | 100%       | Cross spread (cap at 0.70) |
-
-        Example: If bid=0.48, ask=0.52 (spread=0.04):
-        - 20% aggression: 0.48 + 0.01 + (0.04 * 0.2) = 0.498 -> 0.50
-        - 60% aggression: 0.48 + 0.01 + (0.04 * 0.6) = 0.514 -> 0.51
-        - 80% aggression: 0.48 + 0.01 + (0.04 * 0.8) = 0.522 -> 0.52
+        This maximizes chance of earning maker rebates on both sides.
 
         Args:
             tracked: The tracked market
             side: "UP" or "DOWN"
             token_id: Token ID for the unfilled side
-            time_remaining: Seconds until resolution
         """
-        # Get current price for alerts
         current_price = tracked.up_price if side == "UP" else tracked.down_price
+        now = datetime.now(timezone.utc)
+        time_until_live = (tracked.event_start - now).total_seconds()
 
-        # Determine max price based on time remaining - AGGRESSIVE thresholds
-        if time_remaining < 60:
-            # Last resort - taker order at 60 seconds (was 30)
-            # Only attempt taker once
-            if side == "UP" and tracked.up_rescue_attempted:
+        # Check if we need to use taker (last resort before market goes LIVE)
+        if time_until_live < 30:
+            # Only attempt taker once per side
+            if side == "UP" and tracked.up_taker_attempted:
                 return
-            if side == "DOWN" and tracked.down_rescue_attempted:
+            if side == "DOWN" and tracked.down_taker_attempted:
                 return
 
-            self.log(f"  RESCUE {side}: <60s remaining, attempting taker order")
-            taker_price = self.strategy.get_taker_price(token_id)
+            self.log(f"  RESCUE {side}: <30s to LIVE, using taker order")
+
+            # Cancel existing order
+            try:
+                self.strategy.client.cancel_all_asset(token_id)
+            except Exception as e:
+                self.log(f"  RESCUE {side}: Cancel failed: {e}")
+
+            # Place taker order
             success, result = self.strategy.place_taker_order(
                 token_id, self.strategy.trade_size, tracked.neg_risk
             )
+
             if success:
-                self.log(f"  RESCUE {side}: Taker order placed")
+                self.log(f"  RESCUE {side}: Taker order placed successfully")
                 if side == "UP":
                     tracked.up_filled = True
-                    tracked.up_rescue_attempted = True
+                    tracked.up_taker_attempted = True
                 else:
                     tracked.down_filled = True
-                    tracked.down_rescue_attempted = True
-                # Send rescue alert
-                alert_result = send_rebates_rescue_alert(
+                    tracked.down_taker_attempted = True
+
+                taker_price = self.strategy.get_taker_price(token_id) or 0.55
+                send_rebates_rescue_alert(
                     question=tracked.question,
                     side=side,
                     old_price=current_price,
-                    new_price=taker_price or 0.50,
+                    new_price=taker_price,
                     is_taker=True,
                     dry_run=DRY_RUN
                 )
-                self.log(f"  RESCUE {side}: Taker alert sent={alert_result}")
             else:
                 self.log(f"  RESCUE {side}: Taker order failed: {result}")
-                # Mark as attempted so we don't spam taker orders
                 if side == "UP":
-                    tracked.up_rescue_attempted = True
+                    tracked.up_taker_attempted = True
                 else:
-                    tracked.down_rescue_attempted = True
+                    tracked.down_taker_attempted = True
             return
 
-        elif time_remaining < 120:  # 1-2 min
-            max_price = 0.65
-            aggression = 0.8  # Very aggressive - 80% toward ask
-        elif time_remaining < 300:  # 2-5 min
-            max_price = 0.62
-            aggression = 0.6  # Aggressive - 60% toward ask
-        elif time_remaining < 480:  # 5-8 min
-            max_price = 0.60
-            aggression = 0.4  # Moderate - 40% toward ask
-        elif time_remaining < 720:  # 8-12 min
-            max_price = 0.58
-            aggression = 0.3  # Slightly aggressive - 30% toward ask
-        else:  # > 12 min
-            max_price = 0.55
-            aggression = 0.2  # Start with some aggression - 20% toward ask
+        # Use aggressive maker order (80% aggression toward ask)
+        # This runs every 15s via the main loop, continuously updating
+        RESCUE_AGGRESSION = 0.80
+        RESCUE_MAX_PRICE = 0.55  # Cap at 55% to avoid overpaying
 
-        # Get competitive price from orderbook (up to our ceiling)
-        # Aggression determines how close to the ask we place
         new_price = self.strategy.get_best_maker_price(
             token_id,
             tracked.tick_size,
-            max_price=max_price,
-            aggression=aggression
+            max_price=RESCUE_MAX_PRICE,
+            aggression=RESCUE_AGGRESSION
         )
 
         if new_price is None:
             self.log(f"  RESCUE {side}: Could not get orderbook price")
             return
 
-        # Only update if price is better than current
-        # This allows multiple rescues as price ceiling increases
-        if new_price <= current_price:
-            # Already at or above this price, no change needed
-            return
+        # Only update if price changed
+        if abs(new_price - current_price) < tracked.tick_size:
+            return  # Price unchanged, no need to update
 
-        self.log(f"  RESCUE {side}: Updating {current_price:.2f} -> {new_price:.2f} (max={max_price:.2f}, {time_remaining:.0f}s left)")
+        self.log(f"  RESCUE {side}: Aggressive maker {current_price:.2f} -> {new_price:.2f} (80% agg, {time_until_live:.0f}s to LIVE)")
 
-        # Cancel and re-place order
+        # Cancel and re-place with aggressive price
         success, new_order_id = self.strategy.update_single_order(
             token_id, new_price, tracked.neg_risk
         )
@@ -485,25 +400,28 @@ class RebatesBot:
         if success:
             if side == "UP":
                 tracked.up_price = new_price
-                # Don't set rescue_attempted - allow further rescues at higher prices
                 if new_order_id and not new_order_id.startswith("Failed"):
                     tracked.up_order_id = new_order_id
             else:
                 tracked.down_price = new_price
-                # Don't set rescue_attempted - allow further rescues at higher prices
                 if new_order_id and not new_order_id.startswith("Failed"):
                     tracked.down_order_id = new_order_id
 
-            # Send rescue alert
-            alert_result = send_rebates_rescue_alert(
-                question=tracked.question,
-                side=side,
-                old_price=current_price,
-                new_price=new_price,
-                is_taker=False,
-                dry_run=DRY_RUN
-            )
-            self.log(f"  RESCUE {side}: Alert sent={alert_result}")
+            # Only send alert on first rescue (not every update)
+            if not (tracked.up_rescue_started if side == "UP" else tracked.down_rescue_started):
+                send_rebates_rescue_alert(
+                    question=tracked.question,
+                    side=side,
+                    old_price=current_price,
+                    new_price=new_price,
+                    is_taker=False,
+                    dry_run=DRY_RUN
+                )
+                # Mark that we've started rescue (but can keep updating)
+                if side == "UP":
+                    tracked.up_rescue_started = True
+                else:
+                    tracked.down_rescue_started = True
         else:
             self.log(f"  RESCUE {side}: Update failed: {new_order_id}")
 
