@@ -90,9 +90,38 @@ def remove_from_performing(col, id):
     if col in global_state.performing_timestamps:
         global_state.performing_timestamps[col].pop(id, None)
 
-def process_user_data(rows):
+def process_user_data(data):
+    # Handle different WebSocket message formats
+    # Could be: a list of events, a dict wrapper, or a confirmation message
+
+    if isinstance(data, dict):
+        # Check if it's a wrapper with data inside
+        if 'data' in data:
+            rows = data['data']
+        elif 'type' in data and data['type'] in ['subscription_confirmation', 'heartbeat', 'ping']:
+            # Skip non-trade messages
+            return
+        elif 'market' in data:
+            # Single event, wrap in list
+            rows = [data]
+        else:
+            # Unknown dict format, log and skip
+            print(f"[USER WS] Unknown message format: {list(data.keys())[:5]}")
+            return
+    elif isinstance(data, list):
+        rows = data
+    else:
+        print(f"[USER WS] Unexpected data type: {type(data)}")
+        return
 
     for row in rows:
+        # Skip non-dict entries
+        if not isinstance(row, dict):
+            continue
+
+        if 'market' not in row:
+            continue
+
         market = row['market']
 
         side = row['side'].lower()

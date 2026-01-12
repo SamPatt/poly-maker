@@ -7,7 +7,7 @@
       "up_token": "token_up",
       "down_token": "token_down",
       "neg_risk": false,
-      "entry_time": "2026-01-12T13:18:54.663109+00:00",
+      "entry_time": "2026-01-12T13:42:30.071571+00:00",
       "up_entry_price": 0.48,
       "down_entry_price": 0.49,
       "combined_cost": 0.97,
@@ -24,7 +24,7 @@
       "up_token": "token_up",
       "down_token": "token_down",
       "neg_risk": false,
-      "entry_time": "2026-01-12T13:18:54.663242+00:00",
+      "entry_time": "2026-01-12T13:42:30.071677+00:00",
       "up_entry_price": 0.48,
       "down_entry_price": 0.49,
       "combined_cost": 0.97,
@@ -41,5 +41,5 @@
     "total_redemptions": 0,
     "total_profit": 0.0
   },
-  "saved_at": "2026-01-12T13:18:54.663261+00:00"
+  "saved_at": "2026-01-12T13:42:30.071694+00:00"
 }
