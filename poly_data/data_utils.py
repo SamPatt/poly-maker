@@ -47,10 +47,20 @@ def update_positions(avgOnly=False):
         global_state.positions[asset] = position
 
     # Clear positions that no longer exist in the API (position was fully sold/closed)
-    # Only do this when not in avgOnly mode to avoid clearing during partial updates
-    if not avgOnly:
-        for asset in list(global_state.positions.keys()):
-            if asset not in api_assets and global_state.positions[asset].get('size', 0) > 0:
+    # Check for stale positions in both avgOnly and full update modes
+    for asset in list(global_state.positions.keys()):
+        if asset not in api_assets and global_state.positions[asset].get('size', 0) > 0:
+            # Check if there are pending trades for this asset - don't clear if trades are in-flight
+            buy_col = f"{asset}_buy"
+            sell_col = f"{asset}_sell"
+            has_pending = (
+                (buy_col in global_state.performing and len(global_state.performing.get(buy_col, set())) > 0) or
+                (sell_col in global_state.performing and len(global_state.performing.get(sell_col, set())) > 0)
+            )
+
+            if has_pending:
+                print(f"[POSITION SYNC] Skipping clear for {asset[:30]}... (has pending trades)")
+            else:
                 print(f"[POSITION SYNC] Clearing stale position for {asset[:30]}... (no longer in API)")
                 global_state.positions[asset] = {'size': 0, 'avgPrice': 0}
 
