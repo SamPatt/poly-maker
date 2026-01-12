@@ -198,19 +198,15 @@ def get_buy_sell_amount(position, bid_price, row, other_token_position=0):
     # SELL SIDE: Only quote sells when we have inventory
     # Two-sided quoting without inventory requires collateral for shorting
     # which can cause "not enough balance" errors
-    print(f"[DEBUG SELL CALC] position={position}, order_size={order_size}, min_incentive_size={min_incentive_size}")
     if position >= order_size:
         # Have enough inventory to sell
         sell_amount = order_size
-        print(f"[DEBUG SELL CALC] position >= order_size: sell_amount = order_size = {sell_amount}")
     elif position > 0:
         # Have some inventory but less than order_size
         sell_amount = position
-        print(f"[DEBUG SELL CALC] position > 0: sell_amount = position = {sell_amount}")
     else:
         # No inventory - don't quote sells (avoid shorting without collateral)
         sell_amount = 0
-        print(f"[DEBUG SELL CALC] no position: sell_amount = 0")
 
     # Ensure minimum order size compliance for rewards
     if buy_amount > 0 and buy_amount < min_incentive_size:
@@ -222,12 +218,9 @@ def get_buy_sell_amount(position, bid_price, row, other_token_position=0):
     if sell_amount > 0 and sell_amount < min_incentive_size:
         # Only bump to min_incentive_size if we actually have enough inventory
         # Otherwise keep sell_amount as-is (what we actually own)
-        print(f"[DEBUG SELL] sell_amount={sell_amount}, position={position}, min_incentive_size={min_incentive_size}")
         if position >= min_incentive_size:
             sell_amount = min_incentive_size
-            print(f"[DEBUG SELL] Bumped to min_incentive_size: {sell_amount}")
-        else:
-            print(f"[DEBUG SELL] NOT bumping - position too small, keeping sell_amount={sell_amount}")
+        # else: keep sell_amount = position (don't try to sell more than we own)
 
     # Apply multiplier for low-priced assets (optional per-market setting)
     if bid_price < 0.1 and buy_amount > 0:
