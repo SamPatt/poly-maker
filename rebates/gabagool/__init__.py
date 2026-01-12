@@ -8,6 +8,7 @@ When YES + NO prices sum to less than $1.00, buying both guarantees profit at se
 from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerState
 from .scanner import GabagoolScanner, Opportunity
 from .monitor import GabagoolMonitor
+from .executor import GabagoolExecutor, ExecutionResult, TrackedPosition, ExecutionStrategy
 from . import config
 
 __all__ = [
@@ -17,5 +18,9 @@ __all__ = [
     "GabagoolScanner",
     "Opportunity",
     "GabagoolMonitor",
+    "GabagoolExecutor",
+    "ExecutionResult",
+    "TrackedPosition",
+    "ExecutionStrategy",
     "config",
 ]

@@ -14,6 +14,7 @@ from typing import List, Dict, Any, Optional
 from ..market_finder import CryptoMarketFinder
 from .scanner import GabagoolScanner, Opportunity
 from .circuit_breaker import CircuitBreaker
+from .executor import GabagoolExecutor, ExecutionStrategy
 from . import config
 
 logger = logging.getLogger(__name__)
@@ -21,14 +22,16 @@ logger = logging.getLogger(__name__)
 
 class GabagoolMonitor:
     """
-    Monitors markets for Gabagool arbitrage opportunities.
+    Monitors and executes Gabagool arbitrage opportunities.
 
     Integrates with:
     - CryptoMarketFinder: Discovers upcoming 15-minute markets
     - GabagoolScanner: Scans orderbooks for YES+NO < $1 opportunities
     - CircuitBreaker: Enforces risk limits
+    - GabagoolExecutor: Places paired orders when opportunities found
 
-    This is Phase 1: Detection only. Phase 2 will add execution.
+    The monitor continuously scans markets and executes when profitable
+    spreads are detected. Supports dry-run mode for testing.
     """
 
     def __init__(
@@ -36,6 +39,8 @@ class GabagoolMonitor:
         market_finder: CryptoMarketFinder = None,
         scanner: GabagoolScanner = None,
         circuit_breaker: CircuitBreaker = None,
+        executor: GabagoolExecutor = None,
+        client=None,
     ):
         """
         Initialize the monitor.
@@ -44,11 +49,17 @@ class GabagoolMonitor:
             market_finder: Market discovery (defaults to new CryptoMarketFinder)
             scanner: Opportunity scanner (defaults to new GabagoolScanner)
             circuit_breaker: Risk management (defaults from config)
+            executor: Order executor (defaults to new GabagoolExecutor)
+            client: PolymarketClient for order placement (optional)
         """
         self.market_finder = market_finder or CryptoMarketFinder()
         self.scanner = scanner or GabagoolScanner()
         self.circuit_breaker = circuit_breaker or CircuitBreaker(
             config.get_circuit_breaker_config()
+        )
+        self.executor = executor or GabagoolExecutor(
+            client=client,
+            circuit_breaker=self.circuit_breaker,
         )
 
         self.running = False
@@ -156,12 +167,13 @@ class GabagoolMonitor:
 
         return executable_opportunities
 
-    async def run(self, scan_interval: float = None):
+    async def run(self, scan_interval: float = None, execute: bool = True):
         """
-        Run the opportunity detection loop.
+        Run the opportunity detection and execution loop.
 
         Args:
             scan_interval: Seconds between scans (defaults from config)
+            execute: If True, execute on opportunities; if False, just detect
         """
         if scan_interval is None:
             scan_interval = config.SCAN_INTERVAL
@@ -170,7 +182,9 @@ class GabagoolMonitor:
         logger.info(f"Gabagool monitor starting (scan interval: {scan_interval}s)")
 
         if config.DRY_RUN:
-            logger.info("DRY RUN MODE - opportunities will be logged but not executed")
+            logger.info("DRY RUN MODE - orders will be simulated, not placed")
+        elif not execute:
+            logger.info("DETECTION ONLY MODE - opportunities will be logged but not executed")
 
         while self.running:
             try:
@@ -179,10 +193,22 @@ class GabagoolMonitor:
                 if opportunities:
                     logger.info(f"Found {len(opportunities)} executable opportunities")
 
-                    # Phase 1: Just log, Phase 2 will add execution
-                    if config.DRY_RUN:
-                        for opp in opportunities:
-                            self._log_opportunity(opp)
+                    for opp in opportunities:
+                        self._log_opportunity(opp)
+
+                        # Execute on opportunity if enabled
+                        if execute:
+                            result = await self.executor.execute(opp)
+                            if result.success:
+                                logger.info(
+                                    f"Executed on {opp.market_slug}: "
+                                    f"UP={result.up_filled} DOWN={result.down_filled} "
+                                    f"Expected profit=${result.expected_profit:.2f}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"Execution failed for {opp.market_slug}: {result.reason}"
+                                )
 
                 # Wait before next scan
                 await asyncio.sleep(scan_interval)
@@ -235,6 +261,7 @@ class GabagoolMonitor:
     def get_status(self) -> dict:
         """Get current monitor status."""
         cb_status = self.circuit_breaker.get_status()
+        executor_status = self.executor.get_status()
 
         return {
             "running": self.running,
@@ -242,6 +269,7 @@ class GabagoolMonitor:
             "opportunities_detected": self.opportunities_detected,
             "dry_run": config.DRY_RUN,
             "circuit_breaker": cb_status,
+            "executor": executor_status,
             "last_opportunity": {
                 "market": self.last_opportunity.market_slug,
                 "profit_pct": self.last_opportunity.gross_profit_pct,

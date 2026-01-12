@@ -82,6 +82,9 @@ MIN_LIQUIDITY = float(os.getenv("GABAGOOL_MIN_LIQUIDITY", "50"))
 # Maximum gas cost (USD) to allow execution
 MAX_GAS_COST = float(os.getenv("GABAGOOL_MAX_GAS", "0.50"))
 
+# Estimated gas cost per merge transaction (USD)
+GAS_COST_USD = float(os.getenv("GABAGOOL_GAS_COST", "0.002"))
+
 
 # ============== CIRCUIT BREAKER ==============
 
