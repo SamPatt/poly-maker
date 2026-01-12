@@ -393,6 +393,22 @@ ssh trading "tail -30 /tmp/rebates.log"
 - `REBATES_TRADE_SIZE=5` - USDC per side (default: 5, Polymarket minimum)
 - `REBATES_SAFETY_BUFFER=30` - Seconds before market start to stop trading (default: 30)
 - `REBATES_CHECK_INTERVAL=60` - Seconds between market scans (default: 60)
+- `REBATES_MAX_IMBALANCE=10` - Max allowed position imbalance in shares (default: 10)
+
+**Position Imbalance Protection:**
+
+The rebates bot places maker orders on both Up and Down sides, but takers may fill one side more frequently than the other. This creates directional risk (e.g., holding 30 Up vs 15 Down).
+
+To prevent excessive imbalance:
+1. Before placing orders, the bot calculates total Up vs Down positions across all tracked markets
+2. If `abs(up_total - down_total) > MAX_POSITION_IMBALANCE`:
+   - **Long Up**: Skip placing Up orders, only place Down orders
+   - **Long Down**: Skip placing Down orders, only place Up orders
+3. This allows the underweight side to catch up naturally
+
+Logs will show: `IMBALANCE: Up=66.3 Down=50.0 (imbalance=+16.3) - skipping Up order to rebalance`
+
+The status summary (every 5 cycles) also shows: `Positions: Up=66.3 Down=50.0 Imbalance=+16.3 [REBALANCING]`
 
 **Testing:**
 ```bash
