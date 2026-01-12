@@ -18,10 +18,11 @@ cp .env.example .env              # Create environment file
 
 ### Running
 ```bash
-uv run python main.py             # Run the market making bot
-uv run python update_markets.py   # Update market data (run continuously, separate IP recommended)
-uv run python update_stats.py     # Update account statistics
-uv run python -m rebates.rebates_bot  # Run 15-minute rebates bot (separate process)
+uv run python main.py                  # Run the market making bot
+uv run python update_markets.py        # Update market data (run continuously, separate IP recommended)
+uv run python update_stats.py          # Update account statistics
+uv run python -m rebates.rebates_bot   # Run 15-minute rebates bot (separate process)
+uv run python -m rebates.gabagool.run  # Run Gabagool arbitrage bot (separate process)
 ```
 
 ### Development
@@ -53,17 +54,23 @@ uv run pytest tests/ -v --tb=short
 ### Test Directory Structure
 ```
 tests/
-├── conftest.py                    # Shared fixtures (mock_global_state, mock_client)
+├── conftest.py                        # Shared fixtures (mock_global_state, mock_client)
 ├── unit/
-│   ├── test_trading_utils.py      # Orderbook analysis, price calculations
-│   ├── test_data_utils.py         # Position/order state management
-│   ├── test_trading.py            # Order creation, cancellation logic
-│   └── test_telegram.py           # Alert formatting
+│   ├── test_trading_utils.py          # Orderbook analysis, price calculations
+│   ├── test_data_utils.py             # Position/order state management
+│   ├── test_trading.py                # Order creation, cancellation logic
+│   ├── test_telegram.py               # Alert formatting
+│   ├── test_circuit_breaker.py        # Gabagool circuit breaker (26 tests)
+│   ├── test_gabagool_scanner.py       # Gabagool orderbook scanning (16 tests)
+│   ├── test_gabagool_monitor.py       # Gabagool detection loop (16 tests)
+│   ├── test_gabagool_executor.py      # Gabagool order execution (21 tests)
+│   ├── test_gabagool_reconciler.py    # Gabagool partial fill handling (10 tests)
+│   └── test_gabagool_position_manager.py  # Position lifecycle (28 tests)
 ├── integration/
-│   ├── test_polymarket_client.py  # Real API tests (read-only)
-│   └── test_database.py           # Database connectivity tests
+│   ├── test_polymarket_client.py      # Real API tests (read-only)
+│   └── test_database.py               # Database connectivity tests
 └── fixtures/
-    └── market_data.py             # Sample orderbooks, market rows, positions
+    └── market_data.py                 # Sample orderbooks, market rows, positions
 ```
 
 ### Key Test Fixtures
@@ -143,11 +150,21 @@ node poly_merger/merge.js [amount] [condition_id] [is_neg_risk]
 - `app.py` - FastAPI application
 - `templates/` - Jinja2 HTML templates
 
-**`rebates/`** - 15-Minute Crypto Rebates Bot
-- `rebates_bot.py` - Main entry point, runs continuously to find and trade 15-minute markets
+**`rebates/`** - 15-Minute Crypto Trading Strategies
+- `rebates_bot.py` - Main entry point for rebates strategy
 - `market_finder.py` - Discovers upcoming BTC/ETH/SOL 15-minute Up/Down markets from Gamma API
 - `strategy.py` - Delta-neutral order placement (buys both Up and Down at 50%)
 - `config.py` - Configuration (trade size, safety buffer, dry run mode)
+
+**`rebates/gabagool/`** - Gabagool Arbitrage Strategy (YES+NO < $1.00)
+- `monitor.py` - Main detection and execution loop
+- `scanner.py` - Orderbook scanning with VWAP anti-spoofing
+- `executor.py` - Order execution (taker/maker/hybrid strategies)
+- `position_manager.py` - Position lifecycle management with persistence
+- `reconciler.py` - Partial fill handling and rescue operations
+- `circuit_breaker.py` - Risk management (position limits, loss limits, error tracking)
+- `config.py` - Environment-based configuration
+- `run.py` - CLI runner with dry-run support
 
 ## VPS Deployment
 
@@ -389,6 +406,97 @@ REBATES_DRY_RUN=false REBATES_TRADE_SIZE=5 python -m rebates.rebates_bot
 REBATES_DRY_RUN=false REBATES_TRADE_SIZE=10 python -m rebates.rebates_bot
 ```
 
+### Gabagool Arbitrage Bot
+
+The Gabagool bot exploits arbitrage opportunities when YES + NO prices on 15-minute crypto markets sum to less than $1.00. Buying both sides guarantees profit at settlement since one side always pays $1.00.
+
+**Strategy:**
+- Scans orderbooks for opportunities where combined YES + NO cost < $0.99
+- Uses VWAP pricing to avoid spoofing attacks from small orders
+- Executes paired orders simultaneously to minimize directional exposure
+- Merges balanced positions immediately to realize profit
+- Handles partial fills with automatic rescue operations
+
+**Key Features:**
+- Three execution strategies: taker (fast), maker (cheap), hybrid (recommended)
+- Circuit breaker for risk management (position limits, loss limits, error tracking)
+- Position persistence across restarts
+- Automatic post-resolution redemption
+
+**Running the Gabagool Bot:**
+```bash
+# SSH into trading server
+ssh trading
+
+# Start in dry-run mode (default - simulates trades)
+screen -dmS gabagool bash -c 'cd /home/polymaker/poly-maker && source .venv/bin/activate && python -u -m rebates.gabagool.run 2>&1 | tee /tmp/gabagool.log'
+
+# Start with LIVE trading enabled
+screen -dmS gabagool bash -c 'cd /home/polymaker/poly-maker && source .venv/bin/activate && GABAGOOL_DRY_RUN=false python -u -m rebates.gabagool.run 2>&1 | tee /tmp/gabagool.log'
+
+# Detection only (no execution)
+screen -dmS gabagool bash -c 'cd /home/polymaker/poly-maker && source .venv/bin/activate && python -u -m rebates.gabagool.run --detect-only 2>&1 | tee /tmp/gabagool.log'
+
+# Attach to see live output
+screen -r gabagool
+
+# View logs
+tail -f /tmp/gabagool.log
+
+# Stop the bot
+screen -S gabagool -X quit
+```
+
+**Remote commands (from local machine):**
+```bash
+# Start gabagool bot (dry-run)
+ssh trading "screen -S gabagool -X quit 2>/dev/null || true"
+ssh trading "cd /home/polymaker/poly-maker && screen -dmS gabagool bash -c 'source .venv/bin/activate && python -u -m rebates.gabagool.run 2>&1 | tee /tmp/gabagool.log'"
+
+# Start gabagool bot (LIVE trading)
+ssh trading "screen -S gabagool -X quit 2>/dev/null || true"
+ssh trading "cd /home/polymaker/poly-maker && screen -dmS gabagool bash -c 'source .venv/bin/activate && GABAGOOL_DRY_RUN=false python -u -m rebates.gabagool.run 2>&1 | tee /tmp/gabagool.log'"
+
+# Check status
+ssh trading "pgrep -f 'rebates.gabagool.run' && echo 'Gabagool bot running' || echo 'Gabagool bot stopped'"
+
+# View logs
+ssh trading "tail -30 /tmp/gabagool.log"
+```
+
+**Configuration (via environment variables):**
+- `GABAGOOL_DRY_RUN=true` - Simulate trades without executing (default: true)
+- `GABAGOOL_PROFIT_THRESHOLD=0.99` - Max combined YES+NO cost to trade (default: 0.99)
+- `GABAGOOL_TRADE_SIZE=50` - Position size per opportunity in USDC (default: 50)
+- `GABAGOOL_SCAN_INTERVAL=1.0` - Seconds between scans (default: 1.0)
+- `GABAGOOL_MIN_LIQUIDITY=50` - Minimum shares available (default: 50)
+- `GABAGOOL_MIN_NET_PROFIT=0.5` - Minimum net profit % to execute (default: 0.5)
+
+**Circuit Breaker Configuration:**
+- `GABAGOOL_CB_MAX_POS_MARKET=500` - Max position per market
+- `GABAGOOL_CB_MAX_POS_TOTAL=2000` - Max total position across all markets
+- `GABAGOOL_CB_MAX_DAILY_LOSS=100` - Max daily loss before halt
+- `GABAGOOL_CB_MAX_CONSEC_ERRORS=5` - Max consecutive errors before halt
+- `GABAGOOL_CB_COOLDOWN=300` - Cooldown seconds after halt
+
+**Testing:**
+```bash
+# Quick one-shot scan to see current spreads
+python -m rebates.gabagool.scan_once
+
+# Run in dry-run mode
+python -m rebates.gabagool.run
+
+# Run detection only (no execution even in live mode)
+python -m rebates.gabagool.run --detect-only
+
+# Run with verbose logging
+python -m rebates.gabagool.run -v
+
+# Run Gabagool unit tests (117 tests)
+uv run pytest tests/unit/test_gabagool*.py tests/unit/test_circuit_breaker.py -v
+```
+
 ### State Management
 
 Global state in `poly_data/global_state.py` tracks:
@@ -484,6 +592,14 @@ Key settings in `.env`:
 - `REBATES_TRADE_SIZE` - USDC per side for rebates bot (default: 5, Polymarket minimum)
 - `REBATES_SAFETY_BUFFER` - Seconds before market start to stop trading (default: 30)
 - `REBATES_CHECK_INTERVAL` - Seconds between market scans (default: 60)
+
+Gabagool Arbitrage Bot settings:
+- `GABAGOOL_DRY_RUN` - Set to `true` to simulate trades (default: true)
+- `GABAGOOL_PROFIT_THRESHOLD` - Max combined YES+NO to trade (default: 0.99)
+- `GABAGOOL_TRADE_SIZE` - USDC per opportunity (default: 50)
+- `GABAGOOL_SCAN_INTERVAL` - Seconds between scans (default: 1.0)
+- `GABAGOOL_MIN_LIQUIDITY` - Minimum shares available (default: 50)
+- `GABAGOOL_CB_MAX_DAILY_LOSS` - Circuit breaker daily loss limit (default: 100)
 
 ## External Dependencies
 
