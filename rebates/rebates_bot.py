@@ -715,16 +715,33 @@ class RebatesBot:
             if time_until_resolution < 120:
                 continue
 
-            # Check if we can place an order on the needed side
+            # Cancel orders on the OVERweight side (they make imbalance worse)
+            if need_more_down and self._has_open_order(tracked.up_token):
+                # We're long Up, cancel any Buy Up orders
+                self.log(f"  REBALANCE: Cancelling Up order (we're long Up) on {tracked.question[:40]}...")
+                try:
+                    self.client.cancel_all_asset(tracked.up_token)
+                except Exception as e:
+                    self.log(f"  REBALANCE: Cancel failed: {e}")
+
+            if need_more_up and self._has_open_order(tracked.down_token):
+                # We're long Down, cancel any Buy Down orders
+                self.log(f"  REBALANCE: Cancelling Down order (we're long Down) on {tracked.question[:40]}...")
+                try:
+                    self.client.cancel_all_asset(tracked.down_token)
+                except Exception as e:
+                    self.log(f"  REBALANCE: Cancel failed: {e}")
+
+            # Place order on the UNDERweight side if we don't already have one
             token_to_buy = None
             side_name = None
 
-            if need_more_down and tracked.up_filled and not self._has_open_order(tracked.down_token):
-                # We're long Up overall, this market has Up filled, place Down order
+            if need_more_down and not self._has_open_order(tracked.down_token):
+                # We're long Up overall, place Down order to balance
                 token_to_buy = tracked.down_token
                 side_name = "DOWN"
-            elif need_more_up and tracked.down_filled and not self._has_open_order(tracked.up_token):
-                # We're long Down overall, this market has Down filled, place Up order
+            elif need_more_up and not self._has_open_order(tracked.up_token):
+                # We're long Down overall, place Up order to balance
                 token_to_buy = tracked.up_token
                 side_name = "UP"
 
