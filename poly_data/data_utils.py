@@ -3,14 +3,17 @@ from poly_data.utils import get_sheet_df
 import time
 import poly_data.global_state as global_state
 
-#sth here seems to be removing the position
 def update_positions(avgOnly=False):
     pos_df = global_state.client.get_all_positions()
 
+    # Track which assets are in the API response
+    api_assets = set()
+
     for idx, row in pos_df.iterrows():
         asset = str(row['asset'])
+        api_assets.add(asset)
 
-        if asset in  global_state.positions:
+        if asset in global_state.positions:
             position = global_state.positions[asset].copy()
         else:
             position = {'size': 0, 'avgPrice': 0}
@@ -20,7 +23,7 @@ def update_positions(avgOnly=False):
         if not avgOnly:
             position['size'] = row['size']
         else:
-            
+
             for col in [f"{asset}_sell", f"{asset}_buy"]:
                 #need to review this
                 if col not in global_state.performing or not isinstance(global_state.performing[col], set) or len(global_state.performing[col]) == 0:
@@ -29,19 +32,27 @@ def update_positions(avgOnly=False):
                     except:
                         old_size = 0
 
-                    if asset in  global_state.last_trade_update:
+                    if asset in global_state.last_trade_update:
                         if time.time() - global_state.last_trade_update[asset] < 5:
                             print(f"Skipping update for {asset} because last trade update was less than 5 seconds ago")
                             continue
 
                     if old_size != row['size']:
                         print(f"No trades are pending. Updating position from {old_size} to {row['size']} and avgPrice to {row['avgPrice']} using API")
-    
+
                     position['size'] = row['size']
                 else:
                     print(f"ALERT: Skipping update for {asset} because there are trades pending for {col} looking like {global_state.performing[col]}")
-    
+
         global_state.positions[asset] = position
+
+    # Clear positions that no longer exist in the API (position was fully sold/closed)
+    # Only do this when not in avgOnly mode to avoid clearing during partial updates
+    if not avgOnly:
+        for asset in list(global_state.positions.keys()):
+            if asset not in api_assets and global_state.positions[asset].get('size', 0) > 0:
+                print(f"[POSITION SYNC] Clearing stale position for {asset[:30]}... (no longer in API)")
+                global_state.positions[asset] = {'size': 0, 'avgPrice': 0}
 
 def get_position(token):
     token = str(token)
