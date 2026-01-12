@@ -1,17 +1,24 @@
 """
 Delta-neutral strategy for 15-minute crypto markets.
 
-Places mirror YES/NO (Up/Down) orders at the same price to capture
-maker rebates without directional exposure.
+"Only 50" Strategy:
+- Always place BUY orders at exactly 0.50 on both UP and DOWN sides
+- Let orders sit until they fill (no competitive updates, no rescue)
+- When price crosses 50, orders fill automatically
+- The only failure mode is execution risk (order doesn't fill when price crosses)
+
+This is dramatically simpler than dynamic pricing because:
+1. If both sides fill at 50: delta-neutral, earn rebates on both
+2. If one side fills: order at 50 on other side will fill when outcome crosses 50
+3. No need to chase, update, or rescue - the order at 50 IS the rescue
 """
 import json
-import requests
 import time
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .config import TRADE_SIZE, TARGET_PRICE, DRY_RUN, INITIAL_AGGRESSION
+from .config import TRADE_SIZE, FIXED_PRICE, DRY_RUN
 
 
 @dataclass
@@ -24,15 +31,16 @@ class OrderResult:
     up_price: float = 0.0
     down_price: float = 0.0
 
-CLOB_API_BASE = "https://clob.polymarket.com"
-
 
 class DeltaNeutralStrategy:
     """
-    Delta-neutral market making strategy for maker rebates.
+    Delta-neutral market making strategy using "Only 50" approach.
 
-    Places equal-sized orders on both Up and Down outcomes at 50% price
+    Places equal-sized orders on both Up and Down outcomes at exactly 0.50
     to maximize maker rebates while maintaining delta-neutral exposure.
+
+    Key insight: In a binary market, if the outcome crosses 50, the price
+    must cross 50. So an order sitting at 50 will fill when needed.
     """
 
     def __init__(self, client, trade_size: float = None):
@@ -45,7 +53,6 @@ class DeltaNeutralStrategy:
         """
         self.client = client
         self.trade_size = trade_size if trade_size is not None else TRADE_SIZE
-        self.target_price = TARGET_PRICE
 
     def get_tokens(self, market: Dict[str, Any]) -> Tuple[str, str]:
         """
@@ -76,235 +83,77 @@ class DeltaNeutralStrategy:
             neg_risk = market.get("neg_risk")
         return neg_risk == True or neg_risk == "TRUE" or neg_risk == "true"
 
-    def _calculate_vwap(
-        self,
-        orders: list,
-        min_order_size: float = 5.0,
-        depth_limit: int = 5
-    ) -> Optional[float]:
-        """
-        Calculate Volume-Weighted Average Price for orders.
-
-        This protects against spoofing attacks where someone places small
-        fake orders to manipulate the bot's pricing.
-
-        Args:
-            orders: List of order dicts with 'price' and 'size' keys
-            min_order_size: Minimum $ size to consider (filters small spoof orders)
-            depth_limit: Max number of price levels to consider
-
-        Returns:
-            VWAP or None if no valid orders
-        """
-        if not orders:
-            return None
-
-        # Filter out small orders that might be spoofing
-        valid_orders = []
-        for order in orders[:depth_limit]:
-            price = float(order.get("price", 0))
-            size = float(order.get("size", 0))
-            dollar_value = price * size
-            if dollar_value >= min_order_size:
-                valid_orders.append((price, size))
-
-        if not valid_orders:
-            # Fall back to best price if all orders are small
-            return float(orders[0].get("price", 0)) if orders else None
-
-        # Calculate VWAP
-        total_value = sum(price * size for price, size in valid_orders)
-        total_size = sum(size for _, size in valid_orders)
-
-        if total_size == 0:
-            return None
-
-        return total_value / total_size
-
-    def get_best_maker_price(
+    def _place_single_order(
         self,
         token_id: str,
-        tick_size: float = 0.01,
-        max_price: Optional[float] = None,
-        min_price: float = 0.40,
-        aggression: float = 0.0
-    ) -> Optional[float]:
+        neg_risk: bool,
+        side_name: str,
+        tick_size: float = 0.01
+    ) -> Tuple[bool, str, str]:
         """
-        Get the best price for a maker BUY order using VWAP-based pricing.
+        Place a single BUY order at FIXED_PRICE (0.50).
 
-        Uses Volume-Weighted Average Price instead of just the best bid to
-        protect against spoofing attacks where someone places small fake
-        orders to manipulate the bot's pricing.
-
-        Strategy:
-        - max_safe_price = best_ask - 1*tick_size (don't cross the book)
-        - vwap_bid = volume-weighted average of top bids (ignoring small orders)
-        - spread = best_ask - vwap_bid
-        - competitive_price = vwap_bid + tick_size + (spread * aggression)
-        - our_price = min(competitive_price, max_safe_price, max_price)
+        Includes retry logic for "crosses book" errors - reduces price by 1 tick.
 
         Args:
-            token_id: The token to get price for
-            tick_size: Minimum price increment
-            max_price: Optional ceiling for our price (for rescue scenarios)
-            min_price: Floor for our price (default 0.40)
-            aggression: How much of the spread to cross (0.0 = at bid, 1.0 = at ask)
-                       - 0.0: Conservative, place at top of bid queue
-                       - 0.5: Place halfway between bid and ask
-                       - 0.8: Aggressive, place very close to ask
-
-        Returns None if order book fetch fails.
-        """
-        if max_price is None:
-            max_price = self.target_price
-
-        try:
-            url = f"{CLOB_API_BASE}/book?token_id={token_id}"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code != 200:
-                return None
-
-            data = resp.json()
-            asks = data.get("asks", [])
-            bids = data.get("bids", [])
-
-            # Calculate maximum safe price (don't cross the book)
-            # Only need 1 tick buffer to avoid crossing
-            if asks:
-                asks_sorted = sorted(asks, key=lambda x: float(x["price"]))
-                best_ask = float(asks_sorted[0]["price"])
-                max_safe_price = round(best_ask - tick_size, 2)
-            else:
-                # No asks = no sellers, we can place at any price up to max
-                best_ask = None
-                max_safe_price = max_price
-
-            # Calculate competitive price using VWAP (protects against spoofing)
-            if bids:
-                bids_sorted = sorted(bids, key=lambda x: float(x["price"]), reverse=True)
-                best_bid = float(bids_sorted[0]["price"])
-
-                # Use VWAP instead of just best bid
-                vwap_bid = self._calculate_vwap(bids_sorted, min_order_size=5.0, depth_limit=5)
-                if vwap_bid is None:
-                    vwap_bid = best_bid
-
-                # Calculate spread and apply aggression
-                if best_ask is not None:
-                    spread = best_ask - vwap_bid
-                    # Base price is 1 tick above VWAP, then add aggression portion of spread
-                    competitive_price = round(vwap_bid + tick_size + (spread * aggression), 2)
-                else:
-                    # No asks, just go 1 tick above bid
-                    competitive_price = round(vwap_bid + tick_size, 2)
-            else:
-                # No bids = no competition, use a reasonable default
-                best_bid = None
-                vwap_bid = None
-                competitive_price = 0.45
-
-            # Use the competitive price, but don't exceed max safe price or our ceiling
-            maker_price = min(competitive_price, max_safe_price, max_price)
-
-            # Don't go below minimum
-            if maker_price < min_price:
-                maker_price = min_price
-
-            # Log pricing details for monitoring
-            best_bid_str = f"{best_bid:.2f}" if best_bid else "none"
-            vwap_str = f"{vwap_bid:.2f}" if vwap_bid is not None else "none"
-            best_ask_str = f"{best_ask:.2f}" if best_ask else "none"
-            agg_str = f" agg={aggression:.0%}" if aggression > 0 else ""
-            print(f"  Pricing: bid={best_bid_str} vwap={vwap_str} ask={best_ask_str}{agg_str} -> competitive={competitive_price:.2f} safe={max_safe_price:.2f} max={max_price:.2f} -> final={maker_price:.2f}")
-
-            return maker_price
-
-        except Exception as e:
-            print(f"Error fetching order book for {token_id[:20]}...: {e}")
-            return None
-
-    def get_taker_price(self, token_id: str) -> Optional[float]:
-        """
-        Get the price to immediately fill (cross the spread).
-
-        This is used as a last resort to ensure delta-neutrality.
-        Returns the best ask price (what we'd pay to buy immediately).
-        """
-        try:
-            url = f"{CLOB_API_BASE}/book?token_id={token_id}"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code != 200:
-                return None
-
-            data = resp.json()
-            asks = data.get("asks", [])
-
-            if asks:
-                asks_sorted = sorted(asks, key=lambda x: float(x["price"]))
-                best_ask = float(asks_sorted[0]["price"])
-                print(f"  Taker price (best ask): {best_ask:.2f}")
-                return best_ask
-            else:
-                # No asks - can't market buy
-                return None
-
-        except Exception as e:
-            print(f"Error fetching taker price for {token_id[:20]}...: {e}")
-            return None
-
-    def place_taker_order(
-        self,
-        token_id: str,
-        size: float,
-        neg_risk: bool
-    ) -> Tuple[bool, str]:
-        """
-        Place a taker order (market buy) to immediately fill.
-
-        Used as last resort rescue when maker orders aren't getting filled.
+            token_id: Token to buy
+            neg_risk: Whether market uses negative risk adapter
+            side_name: "UP" or "DOWN" for logging
+            tick_size: Price increment for retries
 
         Returns:
-            Tuple of (success, order_id or error message)
+            Tuple of (success, order_id, error_message)
         """
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-        if DRY_RUN:
-            print(f"[{timestamp}] [DRY RUN] Would place taker (market) order")
-            return True, ""
+        current_price = FIXED_PRICE
+        max_retries = 3  # Allow reducing price up to 3 ticks (0.50 -> 0.47)
+        min_price = 0.45  # Don't go below this
 
-        taker_price = self.get_taker_price(token_id)
-        if taker_price is None:
-            return False, "Could not get taker price"
+        for attempt in range(max_retries):
+            print(f"[{timestamp}] Placing {side_name} order: {self.trade_size} @ {current_price} (post-only)")
 
-        # Cap at reasonable price to avoid disasters
-        # Using 0.70 as cap - better to lose 20% than 100% at resolution
-        if taker_price > 0.70:
-            print(f"[{timestamp}] Taker price too high ({taker_price:.2f}), skipping rescue")
-            return False, f"Taker price too high: {taker_price}"
+            try:
+                resp = self.client.create_order(
+                    marketId=token_id,
+                    action="BUY",
+                    price=current_price,
+                    size=self.trade_size,
+                    neg_risk=neg_risk,
+                    post_only=True
+                )
 
-        try:
-            print(f"[{timestamp}] Placing TAKER order: {size} @ {taker_price} (crossing spread)")
+                if resp and resp.get("success") == True:
+                    order_id = resp.get("orderID", "")
+                    print(f"[{timestamp}] {side_name} order placed: {order_id[:20]}...")
+                    return True, order_id, ""
 
-            # Regular order (not post_only) will cross the spread
-            resp = self.client.create_order(
-                marketId=token_id,
-                action="BUY",
-                price=taker_price,
-                size=size,
-                neg_risk=neg_risk,
-                post_only=False  # Allow taker fills
-            )
+                # Check for "crosses book" error
+                error_msg = str(resp.get("errorMsg", "")) if resp else ""
+                if "cross" in error_msg.lower():
+                    # Price would cross the book - try lower price
+                    current_price = round(current_price - tick_size, 2)
+                    if current_price < min_price:
+                        return False, "", f"Price too low after retries: {current_price}"
+                    print(f"[{timestamp}] {side_name} order crossed book, reducing to {current_price}")
+                    time.sleep(0.1)
+                    continue
+                else:
+                    return False, "", error_msg or "Unknown error"
 
-            if resp and resp.get("success") == True:
-                order_id = resp.get("orderID", "")
-                print(f"[{timestamp}] Taker order placed: {order_id[:20]}...")
-                return True, order_id
-            else:
-                error_msg = resp.get("errorMsg", "") if resp else "Empty response"
-                return False, f"Failed: {error_msg}"
+            except Exception as e:
+                error_str = str(e).lower()
+                if "cross" in error_str:
+                    current_price = round(current_price - tick_size, 2)
+                    if current_price < min_price:
+                        return False, "", f"Price too low after retries: {current_price}"
+                    print(f"[{timestamp}] {side_name} order crossed book (exception), reducing to {current_price}")
+                    time.sleep(0.1)
+                    continue
+                else:
+                    return False, "", str(e)
 
-        except Exception as e:
-            return False, f"Error: {e}"
+        return False, "", "Max retries exceeded"
 
     def place_mirror_orders(
         self,
@@ -313,10 +162,7 @@ class DeltaNeutralStrategy:
         skip_down: bool = False
     ) -> OrderResult:
         """
-        Place mirror Up and Down orders at optimal maker prices.
-
-        Checks the order book for each side and places BUY orders just below
-        the best ask to ensure maker status.
+        Place mirror Up and Down orders at FIXED_PRICE (0.50).
 
         This creates a delta-neutral position: regardless of the outcome,
         one side will win and the other will lose, netting to approximately
@@ -340,194 +186,64 @@ class DeltaNeutralStrategy:
 
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-            # Get optimal maker prices from order book
-            # Use INITIAL_AGGRESSION to place closer to the ask for better fill rates
-            up_price = self.get_best_maker_price(up_token, tick_size, aggression=INITIAL_AGGRESSION)
-            down_price = self.get_best_maker_price(down_token, tick_size, aggression=INITIAL_AGGRESSION)
-
-            # Fall back to target price if order book fetch fails
-            if up_price is None:
-                up_price = self.target_price
-                print(f"[{timestamp}] Using fallback price for Up: {up_price}")
-            if down_price is None:
-                down_price = self.target_price
-                print(f"[{timestamp}] Using fallback price for Down: {down_price}")
-
             if DRY_RUN:
                 print(f"[{timestamp}] [DRY RUN] Would place POST-ONLY orders:")
                 print(f"  Market: {question}")
                 print(f"  Up token: {up_token[:20]}...")
                 print(f"  Down token: {down_token[:20]}...")
-                print(f"  Up price: {up_price} (from order book){' [SKIP]' if skip_up else ''}")
-                print(f"  Down price: {down_price} (from order book){' [SKIP]' if skip_down else ''}")
+                print(f"  Price: {FIXED_PRICE} (fixed){' [UP SKIP]' if skip_up else ''}{' [DOWN SKIP]' if skip_down else ''}")
                 print(f"  Size: ${self.trade_size} per side")
                 print(f"  Neg risk: {neg_risk}")
-                print(f"  Post-only: True (maker-only, rejected if would immediately match)")
                 return OrderResult(
                     success=True,
                     message="Dry run - orders not placed",
-                    up_price=up_price,
-                    down_price=down_price
+                    up_price=FIXED_PRICE,
+                    down_price=FIXED_PRICE
                 )
 
-            # Track which orders we placed
             up_order_id = ""
             down_order_id = ""
+            up_price = FIXED_PRICE
+            down_price = FIXED_PRICE
 
-            # Place Up order (BUY on the Up outcome) - unless skipping
+            # Place Up order
             if skip_up:
                 print(f"[{timestamp}] SKIPPING Up order (position imbalance)")
-                up_success = True  # Consider skipped as "successful"
             else:
-                # Retry at same price 3 times before reducing price
-                up_success = False
-                up_resp = None
-                current_up_price = up_price
-                price_reductions = 0
-                max_price_reductions = 3
+                success, order_id, error = self._place_single_order(
+                    up_token, neg_risk, "UP", tick_size
+                )
+                if not success:
+                    return OrderResult(success=False, message=f"Failed to place Up order: {error}")
+                up_order_id = order_id
 
-                while not up_success and price_reductions < max_price_reductions:
-                    # Try same price up to 3 times with small delay
-                    for same_price_attempt in range(3):
-                        print(f"[{timestamp}] Placing Up order: {self.trade_size} @ {current_up_price} (post-only, attempt {same_price_attempt + 1})")
-                        try:
-                            up_resp = self.client.create_order(
-                                marketId=up_token,
-                                action="BUY",
-                                price=current_up_price,
-                                size=self.trade_size,
-                                neg_risk=neg_risk,
-                                post_only=True
-                            )
-                            up_success = up_resp and up_resp.get("success") == True
-                            if up_success:
-                                break
-                        except Exception as e:
-                            error_str = str(e).lower()
-                            print(f"[{timestamp}] Up order exception: {e}")
-                            if "crosses" not in error_str and "cross" not in error_str:
-                                # Non-crosses error, give up
-                                price_reductions = max_price_reductions
-                                break
-
-                        if not up_success:
-                            error_msg = str(up_resp.get("errorMsg", "")) if up_resp else ""
-                            if error_msg:
-                                print(f"[{timestamp}] Up order failed: {error_msg}")
-                            if "crosses" not in error_msg.lower() and "cross" not in error_msg.lower() and error_msg:
-                                # Non-crosses error, give up
-                                price_reductions = max_price_reductions
-                                break
-
-                        # Small delay before retry at same price
-                        if same_price_attempt < 2:
-                            time.sleep(0.15)
-
-                    if up_success:
-                        break
-
-                    # All attempts at this price failed, reduce price
-                    price_reductions += 1
-                    current_up_price = round(current_up_price - tick_size, 2)
-                    if current_up_price < 0.40:
-                        print(f"[{timestamp}] Up order price too low, giving up")
-                        break
-                    print(f"[{timestamp}] Up order crossed book, reducing to {current_up_price}")
-
-                if not up_success:
-                    error_msg = up_resp.get("errorMsg", "") if up_resp else "Empty response"
-                    return OrderResult(success=False, message=f"Failed to place Up order: {error_msg}")
-
-                up_price = current_up_price  # Update to actual price used
-
-                up_order_id = up_resp.get("orderID", "")
-                print(f"[{timestamp}] Up order placed: {up_order_id[:20]}...")
-
-            # Place Down order (BUY on the Down outcome) - unless skipping
+            # Place Down order
             if skip_down:
                 print(f"[{timestamp}] SKIPPING Down order (position imbalance)")
-                down_success = True  # Consider skipped as "successful"
             else:
-                # Retry at same price 3 times before reducing price
-                down_success = False
-                down_resp = None
-                current_down_price = down_price
-                price_reductions = 0
-                max_price_reductions = 3
-
-                while not down_success and price_reductions < max_price_reductions:
-                    # Try same price up to 3 times with small delay
-                    for same_price_attempt in range(3):
-                        print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {current_down_price} (post-only, attempt {same_price_attempt + 1})")
-                        try:
-                            down_resp = self.client.create_order(
-                                marketId=down_token,
-                                action="BUY",
-                                price=current_down_price,
-                                size=self.trade_size,
-                                neg_risk=neg_risk,
-                                post_only=True
-                            )
-                            down_success = down_resp and down_resp.get("success") == True
-                            if down_success:
-                                break
-                        except Exception as e:
-                            error_str = str(e).lower()
-                            print(f"[{timestamp}] Down order exception: {e}")
-                            if "crosses" not in error_str and "cross" not in error_str:
-                                # Non-crosses error, give up
-                                price_reductions = max_price_reductions
-                                break
-
-                        if not down_success:
-                            error_msg = str(down_resp.get("errorMsg", "")) if down_resp else ""
-                            if error_msg:
-                                print(f"[{timestamp}] Down order failed: {error_msg}")
-                            if "crosses" not in error_msg.lower() and "cross" not in error_msg.lower() and error_msg:
-                                # Non-crosses error, give up
-                                price_reductions = max_price_reductions
-                                break
-
-                        # Small delay before retry at same price
-                        if same_price_attempt < 2:
-                            time.sleep(0.15)
-
-                    if down_success:
-                        break
-
-                    # All attempts at this price failed, reduce price
-                    price_reductions += 1
-                    current_down_price = round(current_down_price - tick_size, 2)
-                    if current_down_price < 0.40:
-                        print(f"[{timestamp}] Down order price too low, giving up")
-                        break
-                    print(f"[{timestamp}] Down order crossed book, reducing to {current_down_price}")
-
-                if not down_success:
-                    # Try to cancel the Up order if Down failed (only if we placed an Up order)
+                success, order_id, error = self._place_single_order(
+                    down_token, neg_risk, "DOWN", tick_size
+                )
+                if not success:
+                    # Cancel Up order if Down failed
                     if not skip_up:
-                        print(f"[{timestamp}] Down order failed after retries, cancelling Up order")
+                        print(f"[{timestamp}] Down order failed, cancelling Up order")
                         try:
                             self.client.cancel_all_asset(up_token)
                         except Exception:
                             pass
-                    error_msg = down_resp.get("errorMsg", "") if down_resp else "Empty response"
-                    return OrderResult(success=False, message=f"Failed to place Down order: {error_msg}")
+                    return OrderResult(success=False, message=f"Failed to place Down order: {error}")
+                down_order_id = order_id
 
-                down_price = current_down_price  # Update to actual price used
-
-                down_order_id = down_resp.get("orderID", "")
-                print(f"[{timestamp}] Down order placed: {down_order_id[:20]}...")
-
-            # Build message based on what was placed
+            # Build result message
             if skip_up and skip_down:
                 msg = f"Both orders skipped (imbalance) on {slug}"
             elif skip_up:
-                msg = f"Placed Down only @ {down_price} on {slug} (Up skipped - rebalancing)"
+                msg = f"Placed Down @ {FIXED_PRICE} on {slug} (Up skipped)"
             elif skip_down:
-                msg = f"Placed Up only @ {up_price} on {slug} (Down skipped - rebalancing)"
+                msg = f"Placed Up @ {FIXED_PRICE} on {slug} (Down skipped)"
             else:
-                msg = f"Placed mirror orders @ Up:{up_price}/Down:{down_price} on {slug}"
+                msg = f"Placed mirror orders @ {FIXED_PRICE} on {slug}"
 
             return OrderResult(
                 success=True,
@@ -584,69 +300,3 @@ class DeltaNeutralStrategy:
         except Exception as e:
             print(f"Error cancelling orders: {e}")
             return False
-
-    def check_order_competitiveness(
-        self,
-        token_id: str,
-        current_price: float,
-        tick_size: float = 0.01
-    ) -> Tuple[bool, Optional[float]]:
-        """
-        Check if our order is still at a competitive price.
-
-        Returns:
-            Tuple of (is_competitive, new_best_price)
-            - is_competitive: True if our price is within 1 tick of optimal
-            - new_best_price: The current optimal maker price
-        """
-        best_price = self.get_best_maker_price(token_id, tick_size, aggression=INITIAL_AGGRESSION)
-        if best_price is None:
-            return True, None  # Can't check, assume OK
-
-        # We're competitive if we're within 1 tick of the best maker price
-        price_diff = abs(best_price - current_price)
-        is_competitive = price_diff <= tick_size
-
-        return is_competitive, best_price
-
-    def update_single_order(
-        self,
-        token_id: str,
-        new_price: float,
-        neg_risk: bool
-    ) -> Tuple[bool, str]:
-        """
-        Cancel existing order and place a new one at the new price.
-
-        Returns:
-            Tuple of (success, new_order_id)
-        """
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-        if DRY_RUN:
-            print(f"[{timestamp}] [DRY RUN] Would update order to {new_price}")
-            return True, ""
-
-        try:
-            # Cancel existing order for this token
-            self.client.cancel_all_asset(token_id)
-
-            # Place new order at better price
-            resp = self.client.create_order(
-                marketId=token_id,
-                action="BUY",
-                price=new_price,
-                size=self.trade_size,
-                neg_risk=neg_risk,
-                post_only=True
-            )
-
-            if resp and resp.get("success") == True:
-                order_id = resp.get("orderID", "")
-                return True, order_id
-            else:
-                error_msg = resp.get("errorMsg", "") if resp else "Empty response"
-                return False, f"Failed: {error_msg}"
-
-        except Exception as e:
-            return False, f"Error: {e}"

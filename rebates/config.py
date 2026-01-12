@@ -1,20 +1,20 @@
 """
 Configuration for the 15-minute crypto rebates bot.
+
+Strategy: "Only 50"
+- Always place orders at exactly 0.50 on both UP and DOWN sides
+- Let orders sit until they fill (no competitive updates)
+- When price crosses 50, orders fill automatically
+- Only failure mode is execution risk (order doesn't fill when price crosses)
 """
 import os
 
 # Trading parameters
 TRADE_SIZE = float(os.getenv("REBATES_TRADE_SIZE", "5"))  # $ per side (5 = Polymarket minimum)
-# Use 0.50 as target - we want fills more than being conservative
-# Rebates are still earned at any price, 50% just gives slightly higher rate
-TARGET_PRICE = float(os.getenv("REBATES_TARGET_PRICE", "0.50"))
 
-# Initial aggression: how much of the spread to cross toward the ask (0.0-1.0)
-# 0.0 = place at bid + 1 tick (conservative, may not fill)
-# 0.5 = place at midpoint (good fill rate)
-# 0.7 = place 70% toward ask (high fill rate, still maker)
-# Goal: maximize fills on BOTH sides at ~0.50 for max rebates
-INITIAL_AGGRESSION = float(os.getenv("REBATES_INITIAL_AGGRESSION", "0.50"))
+# Fixed price - always place at 0.50
+# This is the core of the "Only 50" strategy
+FIXED_PRICE = 0.50
 
 # Timing parameters
 SAFETY_BUFFER_SECONDS = int(os.getenv("REBATES_SAFETY_BUFFER", "30"))  # Don't trade if market starts within this time

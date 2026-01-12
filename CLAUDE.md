@@ -395,29 +395,31 @@ ssh trading "tail -30 /tmp/rebates.log"
 - `REBATES_CHECK_INTERVAL=60` - Seconds between market scans (default: 60)
 - `REBATES_MAX_IMBALANCE=10` - Max allowed position imbalance in shares (default: 10)
 
+**"Only 50" Strategy:**
+
+The rebates bot uses a simplified "Only 50" strategy:
+- Always place BUY orders at exactly 0.50 on both UP and DOWN sides
+- Let orders sit until they fill (no competitive updates, no rescue)
+- When price crosses 50, orders fill automatically
+
+**Why this works:**
+1. In a binary market (UP + DOWN = 100%), if the outcome crosses 50%, the price must cross 50%
+2. An order sitting at 50 will fill when the price crosses
+3. The only failure mode is execution risk (order doesn't fill when price crosses)
+
+**Scenarios:**
+- Both sides fill at 50: Delta-neutral, earn rebates on both sides
+- One side fills, other doesn't: The unfilled order at 50 will fill when the outcome crosses 50
+- Neither fills: No position, no risk, try again on next market
+
 **Position Imbalance Protection:**
 
-The rebates bot places maker orders on both Up and Down sides, but takers may fill one side more frequently than the other. This creates directional risk (e.g., holding 31 Up vs 15 Down). The goal is always to match quantities - any imbalance is risk.
-
-**Three layers of protection:**
-
-| Mechanism | Threshold | Purpose |
-|-----------|-----------|---------|
-| **Prevention** | > MAX_IMBALANCE (10) | Skip overweight side on NEW markets |
-| **Rebalance** | >= 1 share | Always try to match on LIVE markets |
-| **Rescue** | Per-market | Fill unfilled side within same market |
-
-1. **Prevention** (new markets): If imbalance exceeds `MAX_POSITION_IMBALANCE`, skip placing orders on the overweight side for new markets. This prevents making imbalance worse.
-
-2. **Rebalance** (cross-market): On ANY imbalance >= 1 share, actively place orders on the underweight side across all LIVE markets. Markets swing through 50% during trading, so maker orders at ~50% (capped at 52%) can fill.
-
-3. **Rescue** (per-market): When one side of a specific market fills but the other doesn't, aggressively try to fill the unfilled side with maker orders (or taker as last resort in final 2 minutes).
+If imbalance exceeds `MAX_POSITION_IMBALANCE` (10 shares), skip placing orders on the overweight side for new markets. This prevents accumulating directional risk across markets.
 
 **Log messages:**
-- Prevention: `IMBALANCE: Up=66.3 Down=50.0 (imbalance=+16.3) - skipping Up order to rebalance`
-- Rebalance: `REBALANCE DOWN: Placing order @ 0.50 on Bitcoin Up or Down... (imbalance=+16.3)`
-- Rescue: `RESCUE DOWN: Aggressive maker 0.49 -> 0.50 (80% agg, LIVE, 540s to resolution)`
-- Status: `Positions: Up=66.3 Down=50.0 Imbalance=+16.3 [REBALANCING]`
+- Position check: `Position: Up=10.0 Down=10.0 (within threshold)`
+- Imbalance: `IMBALANCE: Up=15.0 Down=5.0 - skipping Up`
+- Execution stats: `Execution Stats: 50 markets | Both filled: 80.0% | One filled: 15.0% | None: 5.0%`
 
 **Testing:**
 ```bash
