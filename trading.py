@@ -239,7 +239,24 @@ def send_sell_order(order):
 
         # Check if order creation failed
         if isinstance(result, dict) and result.get('success') == False:
-            print(f"[SELL ORDER FAILED] {result.get('errorMsg', 'Unknown error')}")
+            error_msg = result.get('errorMsg', 'Unknown error')
+            print(f"[SELL ORDER FAILED] {error_msg}")
+
+            # If error is "not enough balance / allowance", we likely don't own these shares
+            # Clear the local position to stop retry loop
+            if 'not enough balance' in error_msg.lower() or 'allowance' in error_msg.lower():
+                token_str = str(order['token'])
+                if token_str in global_state.positions and global_state.positions[token_str].get('size', 0) > 0:
+                    print(f"[SELL ORDER FAILED] Clearing stale position for {token_str[:30]}... (sell failed due to balance)")
+                    global_state.positions[token_str] = {'size': 0, 'avgPrice': 0}
+
+                # Also clear any performing entries for this token
+                for col in [f"{token_str}_buy", f"{token_str}_sell"]:
+                    if col in global_state.performing:
+                        global_state.performing[col] = set()
+                    if col in global_state.performing_timestamps:
+                        global_state.performing_timestamps[col] = {}
+
             return  # Don't update state or send alert for failed orders
 
         # CRITICAL: Update local order state immediately to prevent duplicate orders
