@@ -71,7 +71,7 @@ class TestSendTradeAlert:
 
             # Check the message contains expected elements
             call_args = mock_send.call_args[0][0]
-            assert "Trade Executed" in call_args
+            assert "Order Placed" in call_args
             assert "BUY" in call_args
             assert "0.45" in call_args or "0.4500" in call_args
             assert "100" in call_args

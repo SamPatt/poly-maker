@@ -70,9 +70,18 @@ def send_alert(message: str) -> bool:
             asyncio.create_task(_send_telegram_message(message))
             return True
         else:
-            return asyncio.run(_send_telegram_message(message))
-    except RuntimeError:
-        return asyncio.run(_send_telegram_message(message))
+            result = asyncio.run(_send_telegram_message(message))
+            if not result:
+                print(f"[ALERT - Send failed] {message[:100]}...")
+            return result
+    except RuntimeError as e:
+        try:
+            result = asyncio.run(_send_telegram_message(message))
+            if not result:
+                print(f"[ALERT - Send failed] {message[:100]}...")
+            return result
+        except Exception as e2:
+            print(f"[ALERT - Exception] Failed to send: {e2}")
 
 
 def send_trade_alert(
@@ -84,13 +93,13 @@ def send_trade_alert(
     outcome: Optional[str] = None
 ) -> bool:
     """
-    Send an alert when a trade is executed.
+    Send an alert when an order is placed.
 
     Args:
         side: 'BUY' or 'SELL'
         token: Token ID
-        price: Execution price
-        size: Trade size
+        price: Order price
+        size: Order size
         market_question: Optional market question for context
         outcome: Optional outcome name (e.g., 'Yes', 'No', 'Up', 'Down')
 
@@ -100,7 +109,7 @@ def send_trade_alert(
     emoji = "🟢" if side.upper() == "BUY" else "🔴"
     side_text = side.upper()
 
-    message = f"{emoji} <b>Trade Executed</b>\n\n"
+    message = f"{emoji} <b>Order Placed</b>\n\n"
 
     # Show market first for context
     if market_question:

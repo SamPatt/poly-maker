@@ -4,9 +4,16 @@ import poly_data.global_state as global_state
 import poly_data.CONSTANTS as CONSTANTS
 
 from trading import perform_trade
-import time 
+import time
 import asyncio
 from poly_data.data_utils import set_position, set_order, update_positions
+
+# Import Telegram alerts for order fills
+try:
+    from alerts.telegram import send_order_fill_alert
+    TELEGRAM_ENABLED = True
+except ImportError:
+    TELEGRAM_ENABLED = False
 
 def process_book_data(asset, json_data):
     global_state.all_data[asset] = {
@@ -182,6 +189,20 @@ def process_user_data(data):
                     print("Last trade update is ", global_state.last_trade_update)
                     print("Performing is ", global_state.performing)
                     print("Performing timestamps is ", global_state.performing_timestamps)
+
+                    # Send order fill alert
+                    if TELEGRAM_ENABLED:
+                        try:
+                            # Try to get market question from global_state
+                            market_question = None
+                            if hasattr(global_state, 'df') and global_state.df is not None:
+                                market_rows = global_state.df[global_state.df['market'] == market]
+                                if len(market_rows) > 0:
+                                    market_question = market_rows.iloc[0].get('question', None)
+                            send_order_fill_alert(side.upper(), token, price, size, market_question)
+                        except Exception as e:
+                            print(f"Failed to send order fill alert: {e}")
+
                     asyncio.create_task(perform_trade(market))
                 elif row['status'] == 'MINED':
                     remove_from_performing(col, row['id'])
