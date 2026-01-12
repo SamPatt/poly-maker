@@ -198,15 +198,19 @@ def get_buy_sell_amount(position, bid_price, row, other_token_position=0):
     # SELL SIDE: Only quote sells when we have inventory
     # Two-sided quoting without inventory requires collateral for shorting
     # which can cause "not enough balance" errors
+    print(f"[DEBUG SELL CALC] position={position}, order_size={order_size}, min_incentive_size={min_incentive_size}")
     if position >= order_size:
         # Have enough inventory to sell
         sell_amount = order_size
+        print(f"[DEBUG SELL CALC] position >= order_size: sell_amount = order_size = {sell_amount}")
     elif position > 0:
         # Have some inventory but less than order_size
         sell_amount = position
+        print(f"[DEBUG SELL CALC] position > 0: sell_amount = position = {sell_amount}")
     else:
         # No inventory - don't quote sells (avoid shorting without collateral)
         sell_amount = 0
+        print(f"[DEBUG SELL CALC] no position: sell_amount = 0")
 
     # Ensure minimum order size compliance for rewards
     if buy_amount > 0 and buy_amount < min_incentive_size:
