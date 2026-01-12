@@ -702,20 +702,29 @@ class RebatesBot:
         need_more_down = imbalance > 0  # Long Up, need more Down
         need_more_up = imbalance < 0    # Long Down, need more Up
 
-        # Find LIVE markets where we can place rebalancing orders
+        # Find LIVE or UPCOMING markets where we can place rebalancing orders
         # Only place ONE order per cycle to avoid over-ordering
         order_placed = False
 
         for slug, tracked in self.tracked_markets.items():
-            if tracked.status != "LIVE":
+            # Rebalance on both LIVE and UPCOMING markets
+            if tracked.status not in ("LIVE", "UPCOMING"):
                 continue
 
-            # Skip if market is about to resolve (< 2 min left)
             now = datetime.now(timezone.utc)
-            resolution_time = tracked.event_start + timedelta(minutes=15)
-            time_until_resolution = (resolution_time - now).total_seconds()
-            if time_until_resolution < 120:
-                continue
+
+            # For LIVE markets: skip if about to resolve (< 2 min left)
+            if tracked.status == "LIVE":
+                resolution_time = tracked.event_start + timedelta(minutes=15)
+                time_until_resolution = (resolution_time - now).total_seconds()
+                if time_until_resolution < 120:
+                    continue
+
+            # For UPCOMING markets: skip if about to go live (< 5 sec)
+            if tracked.status == "UPCOMING":
+                time_until_live = (tracked.event_start - now).total_seconds()
+                if time_until_live < 5:
+                    continue
 
             # Cancel orders on the OVERweight side (they make imbalance worse)
             if need_more_down and self._has_open_order(tracked.up_token):
