@@ -15,6 +15,8 @@ from ..market_finder import CryptoMarketFinder
 from .scanner import GabagoolScanner, Opportunity
 from .circuit_breaker import CircuitBreaker
 from .executor import GabagoolExecutor, ExecutionStrategy
+from .position_manager import PositionManager
+from .reconciler import PositionReconciler
 from . import config
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ class GabagoolMonitor:
         scanner: GabagoolScanner = None,
         circuit_breaker: CircuitBreaker = None,
         executor: GabagoolExecutor = None,
+        position_manager: PositionManager = None,
         client=None,
     ):
         """
@@ -50,8 +53,10 @@ class GabagoolMonitor:
             scanner: Opportunity scanner (defaults to new GabagoolScanner)
             circuit_breaker: Risk management (defaults from config)
             executor: Order executor (defaults to new GabagoolExecutor)
+            position_manager: Position lifecycle management (defaults to new PositionManager)
             client: PolymarketClient for order placement (optional)
         """
+        self.client = client
         self.market_finder = market_finder or CryptoMarketFinder()
         self.scanner = scanner or GabagoolScanner()
         self.circuit_breaker = circuit_breaker or CircuitBreaker(
@@ -61,6 +66,7 @@ class GabagoolMonitor:
             client=client,
             circuit_breaker=self.circuit_breaker,
         )
+        self.position_manager = position_manager or PositionManager(client=client)
 
         self.running = False
         self.opportunities_detected = 0
@@ -186,8 +192,16 @@ class GabagoolMonitor:
         elif not execute:
             logger.info("DETECTION ONLY MODE - opportunities will be logged but not executed")
 
+        # Load any persisted positions
+        loaded = self.position_manager.load_positions()
+        if loaded > 0:
+            logger.info(f"Loaded {loaded} positions from previous session")
+
+        scan_count = 0
+
         while self.running:
             try:
+                # 1. Scan for new opportunities
                 opportunities = await self.scan_once()
 
                 if opportunities:
@@ -205,10 +219,20 @@ class GabagoolMonitor:
                                     f"UP={result.up_filled} DOWN={result.down_filled} "
                                     f"Expected profit=${result.expected_profit:.2f}"
                                 )
+
+                                # Track the new position
+                                for pos in self.executor.active_positions:
+                                    if pos.id not in [p.id for p in self.position_manager.positions.values()]:
+                                        self.position_manager.add_position(pos)
                             else:
                                 logger.warning(
                                     f"Execution failed for {opp.market_slug}: {result.reason}"
                                 )
+
+                # 2. Position management tasks (every 10 scans)
+                scan_count += 1
+                if scan_count % 10 == 0 and execute:
+                    await self._run_position_maintenance()
 
                 # Wait before next scan
                 await asyncio.sleep(scan_interval)
@@ -227,6 +251,23 @@ class GabagoolMonitor:
 
                 # Wait before retrying
                 await asyncio.sleep(scan_interval * 2)
+
+    async def _run_position_maintenance(self):
+        """Run periodic position maintenance tasks."""
+        # Reconcile any imbalanced positions
+        reconcile_results = await self.position_manager.reconcile_positions()
+        if reconcile_results:
+            logger.info(f"Reconciled {len(reconcile_results)} positions")
+
+        # Process any positions ready for merge
+        merge_count = await self.position_manager.process_merges()
+        if merge_count > 0:
+            logger.info(f"Merged {merge_count} positions")
+
+        # Check for resolved markets
+        redeem_count = await self.position_manager.check_resolutions()
+        if redeem_count > 0:
+            logger.info(f"Redeemed {redeem_count} positions")
 
     def stop(self):
         """Stop the monitoring loop."""
@@ -262,6 +303,7 @@ class GabagoolMonitor:
         """Get current monitor status."""
         cb_status = self.circuit_breaker.get_status()
         executor_status = self.executor.get_status()
+        position_status = self.position_manager.get_summary()
 
         return {
             "running": self.running,
@@ -270,6 +312,7 @@ class GabagoolMonitor:
             "dry_run": config.DRY_RUN,
             "circuit_breaker": cb_status,
             "executor": executor_status,
+            "positions": position_status,
             "last_opportunity": {
                 "market": self.last_opportunity.market_slug,
                 "profit_pct": self.last_opportunity.gross_profit_pct,

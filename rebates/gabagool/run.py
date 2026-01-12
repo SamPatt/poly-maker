@@ -143,10 +143,21 @@ async def run(detect_only: bool = False, scan_interval: float = None):
         status = monitor.get_status()
         print(f"  Scans performed:       {status['scans_performed']}")
         print(f"  Opportunities found:   {status['opportunities_detected']}")
+
         exec_status = status.get('executor', {})
         print(f"  Executions attempted:  {exec_status.get('executions_attempted', 0)}")
         print(f"  Executions successful: {exec_status.get('executions_successful', 0)}")
-        print(f"  Total profit:          ${exec_status.get('total_profit', 0):.2f}")
+
+        pos_status = status.get('positions', {})
+        print(f"  Active positions:      {pos_status.get('active_positions', 0)}")
+        print(f"  Positions merged:      {pos_status.get('total_merges', 0)}")
+        print(f"  Total profit:          ${pos_status.get('total_profit', 0):.2f}")
+
+        reconciler = pos_status.get('reconciler', {})
+        if reconciler.get('rescues_attempted', 0) > 0:
+            print(f"  Rescues attempted:     {reconciler['rescues_attempted']}")
+            print(f"  Rescues successful:    {reconciler['rescues_successful']}")
+
         print("=" * 60)
         print()
 
