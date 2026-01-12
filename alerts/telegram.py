@@ -251,6 +251,8 @@ def send_startup_alert(dry_run: bool = False) -> bool:
     message += f"<b>Mode:</b> {mode}\n"
     message += f"<b>Time:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
 
+    print(f"[STARTUP] Sending startup alert (mode={mode}, telegram_enabled={TELEGRAM_ENABLED})")
+
     return send_alert(message)
 
 

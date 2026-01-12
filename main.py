@@ -270,10 +270,6 @@ async def main():
         print("*" * 60)
         print("")
 
-    # Send startup alert via Telegram
-    if TELEGRAM_ENABLED:
-        send_startup_alert(dry_run=DRY_RUN)
-
     # Initialize client
     global_state.client = PolymarketClient()
 
@@ -284,6 +280,10 @@ async def main():
 
     print("\n")
     print(f'There are {len(global_state.df)} market, {len(global_state.positions)} positions and {len(global_state.orders)} orders. Starting positions: {global_state.positions}')
+
+    # Send startup alert via Telegram (after client init so we have position data)
+    if TELEGRAM_ENABLED:
+        send_startup_alert(dry_run=DRY_RUN)
 
     # Start background update thread
     update_thread = threading.Thread(target=update_periodically, daemon=True)
