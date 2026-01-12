@@ -356,3 +356,210 @@ class TestDailySummaryAlert:
 
             call_args = mock_send.call_args[0][0]
             assert "-15" in call_args
+
+
+# ============================================
+# Gabagool Alert Tests
+# ============================================
+
+
+class TestGabagoolStartupAlert:
+    """Tests for send_gabagool_startup_alert()."""
+
+    def test_formats_startup_alert(self):
+        """Should format Gabagool startup alert correctly."""
+        with patch("alerts.telegram.send_alert") as mock_send:
+            mock_send.return_value = True
+
+            from alerts.telegram import send_gabagool_startup_alert
+
+            send_gabagool_startup_alert(
+                dry_run=True,
+                trade_size=50.0,
+                profit_threshold=0.99,
+            )
+
+            call_args = mock_send.call_args[0][0]
+            assert "Gabagool" in call_args
+            assert "Started" in call_args
+            assert "DRY RUN" in call_args
+            assert "50" in call_args
+            assert "0.99" in call_args
+
+    def test_live_mode_indicator(self):
+        """Should indicate LIVE mode correctly."""
+        with patch("alerts.telegram.send_alert") as mock_send:
+            mock_send.return_value = True
+
+            from alerts.telegram import send_gabagool_startup_alert
+
+            send_gabagool_startup_alert(
+                dry_run=False,
+                trade_size=100.0,
+                profit_threshold=0.98,
+            )
+
+            call_args = mock_send.call_args[0][0]
+            assert "LIVE" in call_args
+
+
+class TestGabagoolOpportunityAlert:
+    """Tests for send_gabagool_opportunity_alert()."""
+
+    def test_formats_opportunity_alert(self):
+        """Should format opportunity alert correctly."""
+        with patch("alerts.telegram.send_alert") as mock_send:
+            mock_send.return_value = True
+
+            from alerts.telegram import send_gabagool_opportunity_alert
+
+            send_gabagool_opportunity_alert(
+                market_slug="btc-15min-up-down-2024",
+                combined_cost=0.97,
+                up_price=0.48,
+                down_price=0.49,
+                expected_profit=1.50,
+                max_size=200.0,
+                dry_run=False,
+            )
+
+            call_args = mock_send.call_args[0][0]
+            assert "Gabagool" in call_args
+            assert "Opportunity" in call_args
+            assert "0.97" in call_args
+            assert "0.48" in call_args
+            assert "1.50" in call_args
+
+    def test_shows_profit_percentage(self):
+        """Should calculate and show profit percentage."""
+        with patch("alerts.telegram.send_alert") as mock_send:
+            mock_send.return_value = True
+
+            from alerts.telegram import send_gabagool_opportunity_alert
+
+            send_gabagool_opportunity_alert(
+                market_slug="eth-market",
+                combined_cost=0.97,  # 3% profit
+                up_price=0.48,
+                down_price=0.49,
+                expected_profit=1.50,
+                max_size=100.0,
+            )
+
+            call_args = mock_send.call_args[0][0]
+            assert "3.00%" in call_args  # (1.0 - 0.97) * 100
+
+
+class TestGabagoolExecutionAlert:
+    """Tests for send_gabagool_execution_alert()."""
+
+    def test_formats_success_alert(self):
+        """Should format successful execution alert."""
+        with patch("alerts.telegram.send_alert") as mock_send:
+            mock_send.return_value = True
+
+            from alerts.telegram import send_gabagool_execution_alert
+
+            send_gabagool_execution_alert(
+                market_slug="btc-market",
+                success=True,
+                up_filled=50.0,
+                down_filled=50.0,
+                expected_profit=1.50,
+            )
+
+            call_args = mock_send.call_args[0][0]
+            assert "Executed" in call_args
+            assert "50" in call_args
+            assert "1.50" in call_args
+
+    def test_formats_failure_alert(self):
+        """Should format failed execution alert with reason."""
+        with patch("alerts.telegram.send_alert") as mock_send:
+            mock_send.return_value = True
+
+            from alerts.telegram import send_gabagool_execution_alert
+
+            send_gabagool_execution_alert(
+                market_slug="btc-market",
+                success=False,
+                up_filled=0.0,
+                down_filled=0.0,
+                expected_profit=0.0,
+                reason="Circuit breaker triggered",
+            )
+
+            call_args = mock_send.call_args[0][0]
+            assert "Failed" in call_args
+            assert "Circuit breaker" in call_args
+
+
+class TestGabagoolMergeAlert:
+    """Tests for send_gabagool_merge_alert()."""
+
+    def test_formats_merge_alert(self):
+        """Should format merge alert correctly."""
+        with patch("alerts.telegram.send_alert") as mock_send:
+            mock_send.return_value = True
+
+            from alerts.telegram import send_gabagool_merge_alert
+
+            send_gabagool_merge_alert(
+                market_slug="btc-market",
+                shares_merged=50.0,
+                profit_realized=1.50,
+                dry_run=False,
+            )
+
+            call_args = mock_send.call_args[0][0]
+            assert "Merged" in call_args
+            assert "50" in call_args
+            assert "1.50" in call_args
+
+
+class TestGabagoolCircuitBreakerAlert:
+    """Tests for send_gabagool_circuit_breaker_alert()."""
+
+    def test_formats_circuit_breaker_alert(self):
+        """Should format circuit breaker alert."""
+        with patch("alerts.telegram.send_alert") as mock_send:
+            mock_send.return_value = True
+
+            from alerts.telegram import send_gabagool_circuit_breaker_alert
+
+            send_gabagool_circuit_breaker_alert(
+                reason="Daily loss limit exceeded",
+                details={"daily_pnl": "$-50.00", "cooldown_seconds": 300},
+            )
+
+            call_args = mock_send.call_args[0][0]
+            assert "Circuit Breaker" in call_args
+            assert "Daily loss" in call_args
+            assert "halted" in call_args.lower()
+
+
+class TestGabagoolSummaryAlert:
+    """Tests for send_gabagool_summary_alert()."""
+
+    def test_formats_summary_alert(self):
+        """Should format session summary alert."""
+        with patch("alerts.telegram.send_alert") as mock_send:
+            mock_send.return_value = True
+
+            from alerts.telegram import send_gabagool_summary_alert
+
+            send_gabagool_summary_alert(
+                scans_performed=100,
+                opportunities_found=5,
+                executions_successful=3,
+                total_profit=4.50,
+                duration_minutes=60.5,
+            )
+
+            call_args = mock_send.call_args[0][0]
+            assert "Summary" in call_args
+            assert "100" in call_args
+            assert "5" in call_args
+            assert "3" in call_args
+            assert "4.50" in call_args
+            assert "60" in call_args

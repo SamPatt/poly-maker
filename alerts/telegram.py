@@ -742,3 +742,256 @@ def send_order_fill_alert(
         message += f"\n{pnl_emoji} <b>P&L:</b> ${pnl:.2f}"
 
     return send_alert(message)
+
+
+# ============================================
+# Gabagool Arbitrage Bot Alerts
+# ============================================
+
+
+def send_gabagool_startup_alert(dry_run: bool, trade_size: float, profit_threshold: float) -> bool:
+    """
+    Send alert when Gabagool bot starts.
+
+    Args:
+        dry_run: Whether bot is in dry-run mode
+        trade_size: Trade size per opportunity
+        profit_threshold: Max combined cost to trade
+
+    Returns:
+        True if sent successfully
+    """
+    mode = "DRY RUN" if dry_run else "LIVE"
+    emoji = "🧪" if dry_run else "🍖"
+
+    message = f"{emoji} <b>Gabagool Bot Started</b>\n\n"
+    message += f"<b>Mode:</b> {mode}\n"
+    message += f"<b>Trade Size:</b> ${trade_size:.2f}\n"
+    message += f"<b>Profit Threshold:</b> {profit_threshold:.4f}\n"
+    message += f"<b>Time:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+
+    return send_alert(message)
+
+
+def send_gabagool_opportunity_alert(
+    market_slug: str,
+    combined_cost: float,
+    up_price: float,
+    down_price: float,
+    expected_profit: float,
+    max_size: float,
+    dry_run: bool = False
+) -> bool:
+    """
+    Send alert when a Gabagool arbitrage opportunity is detected.
+
+    Args:
+        market_slug: Market identifier
+        combined_cost: Total cost of YES + NO
+        up_price: UP/YES price
+        down_price: DOWN/NO price
+        expected_profit: Expected profit in USD
+        max_size: Maximum available size
+        dry_run: Whether in dry-run mode
+
+    Returns:
+        True if sent successfully
+    """
+    mode_text = "[DRY RUN] " if dry_run else ""
+    gross_profit_pct = (1.0 - combined_cost) * 100
+
+    # Truncate long slugs
+    if len(market_slug) > 50:
+        market_slug = market_slug[:47] + "..."
+
+    message = f"🍖 <b>{mode_text}Gabagool Opportunity</b>\n\n"
+    message += f"<b>Market:</b> {market_slug}\n"
+    message += f"<b>Combined:</b> {combined_cost:.4f}\n"
+    message += f"<b>UP:</b> {up_price:.4f} | <b>DOWN:</b> {down_price:.4f}\n"
+    message += f"<b>Profit:</b> {gross_profit_pct:.2f}%\n"
+    message += f"<b>Expected:</b> ${expected_profit:.2f}\n"
+    message += f"<b>Size:</b> {max_size:.0f} shares"
+
+    return send_alert(message)
+
+
+def send_gabagool_execution_alert(
+    market_slug: str,
+    success: bool,
+    up_filled: float,
+    down_filled: float,
+    expected_profit: float,
+    reason: Optional[str] = None,
+    dry_run: bool = False
+) -> bool:
+    """
+    Send alert when Gabagool execution completes.
+
+    Args:
+        market_slug: Market identifier
+        success: Whether execution succeeded
+        up_filled: UP shares filled
+        down_filled: DOWN shares filled
+        expected_profit: Expected profit
+        reason: Failure reason if not successful
+        dry_run: Whether in dry-run mode
+
+    Returns:
+        True if sent successfully
+    """
+    mode_text = "[DRY RUN] " if dry_run else ""
+
+    if success:
+        emoji = "✅"
+        status = "Executed"
+    else:
+        emoji = "❌"
+        status = "Failed"
+
+    # Truncate long slugs
+    if len(market_slug) > 50:
+        market_slug = market_slug[:47] + "..."
+
+    message = f"{emoji} <b>{mode_text}Gabagool {status}</b>\n\n"
+    message += f"<b>Market:</b> {market_slug}\n"
+    message += f"<b>UP Filled:</b> {up_filled:.2f}\n"
+    message += f"<b>DOWN Filled:</b> {down_filled:.2f}\n"
+
+    if success:
+        message += f"<b>Expected Profit:</b> ${expected_profit:.2f}"
+    elif reason:
+        message += f"<b>Reason:</b> {reason[:100]}"
+
+    return send_alert(message)
+
+
+def send_gabagool_merge_alert(
+    market_slug: str,
+    shares_merged: float,
+    profit_realized: float,
+    dry_run: bool = False
+) -> bool:
+    """
+    Send alert when Gabagool positions are merged.
+
+    Args:
+        market_slug: Market identifier
+        shares_merged: Number of shares merged
+        profit_realized: Profit from merge
+        dry_run: Whether in dry-run mode
+
+    Returns:
+        True if sent successfully
+    """
+    mode_text = "[DRY RUN] " if dry_run else ""
+
+    # Truncate long slugs
+    if len(market_slug) > 50:
+        market_slug = market_slug[:47] + "..."
+
+    message = f"💰 <b>{mode_text}Gabagool Merged</b>\n\n"
+    message += f"<b>Market:</b> {market_slug}\n"
+    message += f"<b>Shares:</b> {shares_merged:.2f}\n"
+    message += f"<b>Profit:</b> ${profit_realized:.2f}"
+
+    return send_alert(message)
+
+
+def send_gabagool_circuit_breaker_alert(
+    reason: str,
+    details: Optional[dict] = None
+) -> bool:
+    """
+    Send alert when Gabagool circuit breaker triggers.
+
+    Args:
+        reason: Reason for circuit breaker trigger
+        details: Optional additional details
+
+    Returns:
+        True if sent successfully
+    """
+    message = f"🚨 <b>Gabagool Circuit Breaker</b>\n\n"
+    message += f"<b>Reason:</b> {reason}\n"
+
+    if details:
+        message += "\n<b>Details:</b>\n"
+        for key, value in list(details.items())[:5]:
+            str_value = str(value)
+            if len(str_value) > 40:
+                str_value = str_value[:37] + "..."
+            message += f"• {key}: {str_value}\n"
+
+    message += f"\n<i>Trading halted until cooldown expires</i>"
+
+    return send_alert(message)
+
+
+def send_gabagool_rescue_alert(
+    market_slug: str,
+    side: str,
+    needed_size: float,
+    success: bool,
+    dry_run: bool = False
+) -> bool:
+    """
+    Send alert when Gabagool rescue operation occurs.
+
+    Args:
+        market_slug: Market identifier
+        side: "UP" or "DOWN" - which side needed rescue
+        needed_size: Shares needed to balance
+        success: Whether rescue succeeded
+        dry_run: Whether in dry-run mode
+
+    Returns:
+        True if sent successfully
+    """
+    if dry_run:
+        return False  # Don't spam alerts in dry run
+
+    # Truncate long slugs
+    if len(market_slug) > 50:
+        market_slug = market_slug[:47] + "..."
+
+    emoji = "✅" if success else "⚠️"
+    status = "Success" if success else "Failed"
+
+    message = f"{emoji} <b>Gabagool Rescue {status}</b>\n\n"
+    message += f"<b>Market:</b> {market_slug}\n"
+    message += f"<b>Side:</b> {side}\n"
+    message += f"<b>Size:</b> {needed_size:.2f} shares"
+
+    return send_alert(message)
+
+
+def send_gabagool_summary_alert(
+    scans_performed: int,
+    opportunities_found: int,
+    executions_successful: int,
+    total_profit: float,
+    duration_minutes: float
+) -> bool:
+    """
+    Send session summary alert when Gabagool bot stops.
+
+    Args:
+        scans_performed: Total scans during session
+        opportunities_found: Opportunities detected
+        executions_successful: Successful executions
+        total_profit: Total profit realized
+        duration_minutes: Session duration in minutes
+
+    Returns:
+        True if sent successfully
+    """
+    profit_emoji = "📈" if total_profit >= 0 else "📉"
+
+    message = f"🍖 <b>Gabagool Session Summary</b>\n\n"
+    message += f"<b>Duration:</b> {duration_minutes:.1f} minutes\n"
+    message += f"<b>Scans:</b> {scans_performed}\n"
+    message += f"<b>Opportunities:</b> {opportunities_found}\n"
+    message += f"<b>Executions:</b> {executions_successful}\n"
+    message += f"{profit_emoji} <b>Profit:</b> ${total_profit:.2f}"
+
+    return send_alert(message)

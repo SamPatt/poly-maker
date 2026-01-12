@@ -18,6 +18,11 @@ from .executor import GabagoolExecutor, ExecutionStrategy
 from .position_manager import PositionManager
 from .reconciler import PositionReconciler
 from . import config
+from alerts.telegram import (
+    send_gabagool_startup_alert,
+    send_gabagool_opportunity_alert,
+    send_gabagool_summary_alert,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +77,7 @@ class GabagoolMonitor:
         self.opportunities_detected = 0
         self.scans_performed = 0
         self.last_opportunity: Optional[Opportunity] = None
+        self.start_time: Optional[datetime] = None
 
     def _extract_tokens(self, market: Dict[str, Any]) -> tuple:
         """Extract UP and DOWN token IDs from market data."""
@@ -168,6 +174,17 @@ class GabagoolMonitor:
                     f"Profit: {opp.gross_profit_pct:.2f}% "
                     f"Expected: ${opp.expected_profit_usd:.2f}"
                 )
+
+                # Send Telegram alert
+                send_gabagool_opportunity_alert(
+                    market_slug=opp.market_slug,
+                    combined_cost=opp.combined_cost,
+                    up_price=opp.up_price,
+                    down_price=opp.down_price,
+                    expected_profit=opp.expected_profit_usd,
+                    max_size=opp.max_size,
+                    dry_run=config.DRY_RUN,
+                )
             else:
                 logger.debug(f"Opportunity filtered: {opp.market_slug} - {reason}")
 
@@ -185,12 +202,20 @@ class GabagoolMonitor:
             scan_interval = config.SCAN_INTERVAL
 
         self.running = True
+        self.start_time = datetime.now(timezone.utc)
         logger.info(f"Gabagool monitor starting (scan interval: {scan_interval}s)")
 
         if config.DRY_RUN:
             logger.info("DRY RUN MODE - orders will be simulated, not placed")
         elif not execute:
             logger.info("DETECTION ONLY MODE - opportunities will be logged but not executed")
+
+        # Send startup alert
+        send_gabagool_startup_alert(
+            dry_run=config.DRY_RUN,
+            trade_size=config.TRADE_SIZE,
+            profit_threshold=config.PROFIT_THRESHOLD,
+        )
 
         # Load any persisted positions
         loaded = self.position_manager.load_positions()
@@ -273,6 +298,23 @@ class GabagoolMonitor:
         """Stop the monitoring loop."""
         self.running = False
         logger.info("Gabagool monitor stopping")
+
+        # Calculate session duration
+        duration_minutes = 0.0
+        if self.start_time:
+            duration_seconds = (datetime.now(timezone.utc) - self.start_time).total_seconds()
+            duration_minutes = duration_seconds / 60.0
+
+        # Send summary alert
+        exec_status = self.executor.get_status()
+        pos_status = self.position_manager.get_summary()
+        send_gabagool_summary_alert(
+            scans_performed=self.scans_performed,
+            opportunities_found=self.opportunities_detected,
+            executions_successful=exec_status.get("executions_successful", 0),
+            total_profit=pos_status.get("total_profit", 0.0),
+            duration_minutes=duration_minutes,
+        )
 
     def _log_opportunity(self, opp: Opportunity):
         """Log detailed opportunity information."""

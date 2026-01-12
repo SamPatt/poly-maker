@@ -16,6 +16,7 @@ from enum import Enum
 from .scanner import Opportunity
 from .circuit_breaker import CircuitBreaker
 from . import config
+from alerts.telegram import send_gabagool_execution_alert, send_gabagool_merge_alert
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,17 @@ class GabagoolExecutor:
                 success=True,
             )
             self.executions_successful += 1
+
+        # Send Telegram alert
+        send_gabagool_execution_alert(
+            market_slug=opportunity.market_slug,
+            success=result.success,
+            up_filled=result.up_filled,
+            down_filled=result.down_filled,
+            expected_profit=result.expected_profit,
+            reason=result.reason if not result.success else None,
+            dry_run=self.dry_run,
+        )
 
         return result
 
@@ -605,6 +617,12 @@ class GabagoolExecutor:
             position.close_time = datetime.now(timezone.utc)
             position.realized_profit = position.min_filled * (1.0 - position.combined_cost)
             self.total_profit += position.realized_profit
+            send_gabagool_merge_alert(
+                market_slug=position.market_slug,
+                shares_merged=position.min_filled,
+                profit_realized=position.realized_profit,
+                dry_run=True,
+            )
             return True
 
         if self.client is None:
@@ -627,6 +645,13 @@ class GabagoolExecutor:
             # Move to completed
             self.active_positions.remove(position)
             self.completed_positions.append(position)
+
+            send_gabagool_merge_alert(
+                market_slug=position.market_slug,
+                shares_merged=position.min_filled,
+                profit_realized=position.realized_profit,
+                dry_run=False,
+            )
 
             return True
 

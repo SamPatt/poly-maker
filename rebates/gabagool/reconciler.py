@@ -15,6 +15,7 @@ from typing import Optional, List, Tuple
 
 from .executor import TrackedPosition
 from . import config
+from alerts.telegram import send_gabagool_rescue_alert
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,13 @@ class PositionReconciler:
                 # Check if now balanced
                 if abs(position.up_filled - position.down_filled) < 0.01:
                     position.is_balanced = True
+                    send_gabagool_rescue_alert(
+                        market_slug=position.market_slug,
+                        side=unfilled_side.upper(),
+                        needed_size=needed_size,
+                        success=True,
+                        dry_run=config.DRY_RUN,
+                    )
                     return ReconciliationResult(
                         success=True,
                         action_taken="rescue_taker",
@@ -209,6 +217,13 @@ class PositionReconciler:
             else:
                 error_msg = result.get("errorMsg", "Unknown error")
                 logger.error(f"Rescue order failed: {error_msg}")
+                send_gabagool_rescue_alert(
+                    market_slug=position.market_slug,
+                    side=unfilled_side.upper(),
+                    needed_size=needed_size,
+                    success=False,
+                    dry_run=config.DRY_RUN,
+                )
                 return ReconciliationResult(
                     success=False,
                     action_taken="rescue_failed",

@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
+from alerts.telegram import send_gabagool_circuit_breaker_alert
+
 logger = logging.getLogger(__name__)
 
 
@@ -220,6 +222,17 @@ class CircuitBreaker:
         self.state.halt_time = datetime.now(timezone.utc)
 
         logger.critical(f"CIRCUIT BREAKER HALTED: {reason}")
+
+        # Send Telegram alert
+        send_gabagool_circuit_breaker_alert(
+            reason=reason,
+            details={
+                "daily_pnl": f"${self.state.daily_pnl:.2f}",
+                "total_position": f"${self.state.total_position:.2f}",
+                "consecutive_errors": self.state.consecutive_errors,
+                "cooldown_seconds": self.config.cooldown_seconds,
+            }
+        )
 
     async def _reset(self):
         """Reset the circuit breaker after cooldown."""
