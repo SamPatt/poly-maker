@@ -244,11 +244,14 @@ def send_sell_order(order):
 
             # If error is "not enough balance / allowance", we likely don't own these shares
             # Clear the local position to stop retry loop
-            if 'not enough balance' in error_msg.lower() or 'allowance' in error_msg.lower():
-                token_str = str(order['token'])
-                if token_str in global_state.positions and global_state.positions[token_str].get('size', 0) > 0:
-                    print(f"[SELL ORDER FAILED] Clearing stale position for {token_str[:30]}... (sell failed due to balance)")
-                    global_state.positions[token_str] = {'size': 0, 'avgPrice': 0}
+            token_str = str(order['token'])
+            balance_error = 'not enough balance' in error_msg.lower() or 'allowance' in error_msg.lower()
+            has_position = token_str in global_state.positions and global_state.positions[token_str].get('size', 0) > 0
+            print(f"[DEBUG] balance_error={balance_error}, has_position={has_position}, token={token_str[:30]}...")
+
+            if balance_error and has_position:
+                print(f"[SELL ORDER FAILED] Clearing stale position for {token_str[:30]}... (sell failed due to balance)")
+                global_state.positions[token_str] = {'size': 0, 'avgPrice': 0}
 
                 # Also clear any performing entries for this token
                 for col in [f"{token_str}_buy", f"{token_str}_sell"]:
