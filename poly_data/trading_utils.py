@@ -216,7 +216,11 @@ def get_buy_sell_amount(position, bid_price, row, other_token_position=0):
             buy_amount = 0  # Don't place undersized orders
 
     if sell_amount > 0 and sell_amount < min_incentive_size:
-        sell_amount = min_incentive_size
+        # Only bump to min_incentive_size if we actually have enough inventory
+        # Otherwise keep sell_amount as-is (what we actually own)
+        if position >= min_incentive_size:
+            sell_amount = min_incentive_size
+        # else: keep sell_amount = position (from line 206)
 
     # Apply multiplier for low-priced assets (optional per-market setting)
     if bid_price < 0.1 and buy_amount > 0:
