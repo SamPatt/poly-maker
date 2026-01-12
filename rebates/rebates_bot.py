@@ -359,14 +359,15 @@ class RebatesBot:
         token_id: str
     ) -> None:
         """
-        Rescue unfilled side with aggressive maker order, taker only as last resort.
+        Rescue unfilled side with aggressive maker order during UPCOMING and LIVE.
 
         Strategy:
-        1. Place aggressive maker order (80% aggression toward ask)
-        2. Update every 15s to stay competitive (handled by update_upcoming_orders)
-        3. If <30s before market goes LIVE and still not filled → taker order
+        1. During UPCOMING: Place aggressive maker orders, taker if <30s to LIVE
+        2. During LIVE: Continue placing maker orders at ~50% (market swings through middle)
+        3. During LIVE final 2 min: Use taker as last resort
 
-        This maximizes chance of earning maker rebates on both sides.
+        The key insight: markets swing through 50% during LIVE trading, so we should
+        keep placing maker orders at reasonable prices rather than giving up.
 
         Args:
             tracked: The tracked market
@@ -376,58 +377,73 @@ class RebatesBot:
         current_price = tracked.up_price if side == "UP" else tracked.down_price
         now = datetime.now(timezone.utc)
         time_until_live = (tracked.event_start - now).total_seconds()
+        resolution_time = tracked.event_start + timedelta(minutes=15)
+        time_until_resolution = (resolution_time - now).total_seconds()
 
-        # Check if we need to use taker (last resort before market goes LIVE)
-        if time_until_live < 30:
+        # Determine if we're in LIVE phase
+        is_live = time_until_live < 0
+
+        # Use taker as last resort:
+        # - During UPCOMING: if <30s before LIVE
+        # - During LIVE: if <120s before resolution (final 2 minutes)
+        use_taker = (not is_live and time_until_live < 30) or (is_live and time_until_resolution < 120)
+
+        if use_taker:
             # Only attempt taker once per side
             if side == "UP" and tracked.up_taker_attempted:
-                return
-            if side == "DOWN" and tracked.down_taker_attempted:
-                return
-
-            self.log(f"  RESCUE {side}: <30s to LIVE, using taker order")
-
-            # Cancel existing order
-            try:
-                self.strategy.client.cancel_all_asset(token_id)
-            except Exception as e:
-                self.log(f"  RESCUE {side}: Cancel failed: {e}")
-
-            # Place taker order
-            success, result = self.strategy.place_taker_order(
-                token_id, self.strategy.trade_size, tracked.neg_risk
-            )
-
-            if success:
-                self.log(f"  RESCUE {side}: Taker order placed successfully")
-                if side == "UP":
-                    tracked.up_filled = True
-                    tracked.up_taker_attempted = True
-                else:
-                    tracked.down_filled = True
-                    tracked.down_taker_attempted = True
-
-                taker_price = self.strategy.get_taker_price(token_id) or 0.55
-                send_rebates_rescue_alert(
-                    question=tracked.question,
-                    side=side,
-                    old_price=current_price,
-                    new_price=taker_price,
-                    is_taker=True,
-                    dry_run=DRY_RUN
-                )
+                # During LIVE, fall through to maker order logic instead of returning
+                if not is_live:
+                    return
+            elif side == "DOWN" and tracked.down_taker_attempted:
+                if not is_live:
+                    return
             else:
-                self.log(f"  RESCUE {side}: Taker order failed: {result}")
-                if side == "UP":
-                    tracked.up_taker_attempted = True
-                else:
-                    tracked.down_taker_attempted = True
-            return
+                phase = "LIVE final 2min" if is_live else "<30s to LIVE"
+                self.log(f"  RESCUE {side}: {phase}, using taker order")
 
-        # Use aggressive maker order (80% aggression toward ask)
-        # This runs every 15s via the main loop, continuously updating
+                # Cancel existing order
+                try:
+                    self.strategy.client.cancel_all_asset(token_id)
+                except Exception as e:
+                    self.log(f"  RESCUE {side}: Cancel failed: {e}")
+
+                # Place taker order
+                success, result = self.strategy.place_taker_order(
+                    token_id, self.strategy.trade_size, tracked.neg_risk
+                )
+
+                if success:
+                    self.log(f"  RESCUE {side}: Taker order placed successfully")
+                    if side == "UP":
+                        tracked.up_filled = True
+                        tracked.up_taker_attempted = True
+                    else:
+                        tracked.down_filled = True
+                        tracked.down_taker_attempted = True
+
+                    taker_price = self.strategy.get_taker_price(token_id) or 0.55
+                    send_rebates_rescue_alert(
+                        question=tracked.question,
+                        side=side,
+                        old_price=current_price,
+                        new_price=taker_price,
+                        is_taker=True,
+                        dry_run=DRY_RUN
+                    )
+                    return
+                else:
+                    self.log(f"  RESCUE {side}: Taker order failed: {result}")
+                    if side == "UP":
+                        tracked.up_taker_attempted = True
+                    else:
+                        tracked.down_taker_attempted = True
+                    # Fall through to try maker order
+
+        # Use aggressive maker order - works during both UPCOMING and LIVE
+        # During LIVE, we want to catch the market swinging through ~50%
         RESCUE_AGGRESSION = 0.80
-        RESCUE_MAX_PRICE = 0.55  # Cap at 55% to avoid overpaying
+        # Cap at 52% during LIVE (tighter than 55%) to avoid losses
+        RESCUE_MAX_PRICE = 0.52 if is_live else 0.55
 
         new_price = self.strategy.get_best_maker_price(
             token_id,
@@ -444,7 +460,12 @@ class RebatesBot:
         if abs(new_price - current_price) < tracked.tick_size:
             return  # Price unchanged, no need to update
 
-        self.log(f"  RESCUE {side}: Aggressive maker {current_price:.2f} -> {new_price:.2f} (80% agg, {time_until_live:.0f}s to LIVE)")
+        # Log with appropriate timing info
+        if is_live:
+            phase_info = f"LIVE, {time_until_resolution:.0f}s to resolution"
+        else:
+            phase_info = f"{time_until_live:.0f}s to LIVE"
+        self.log(f"  RESCUE {side}: Aggressive maker {current_price:.2f} -> {new_price:.2f} (80% agg, {phase_info})")
 
         # Cancel and re-place with aggressive price
         success, new_order_id = self.strategy.update_single_order(
