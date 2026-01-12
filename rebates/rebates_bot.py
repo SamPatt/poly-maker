@@ -673,6 +673,119 @@ class RebatesBot:
 
         tracked.last_update = now
 
+    def rebalance_across_markets(self) -> None:
+        """
+        Actively rebalance positions by placing orders on the underweight side.
+
+        When total Up vs Down positions are imbalanced beyond MAX_POSITION_IMBALANCE,
+        this method places additional orders on LIVE markets to catch up.
+
+        Unlike rescue (which only handles per-market unfilled orders), this handles
+        cross-market imbalance where individual markets show "both filled" but
+        totals are skewed (e.g., 31 Up vs 15 Down across all markets).
+        """
+        if DRY_RUN:
+            return
+
+        # Check current imbalance
+        up_total, down_total, imbalance = self.get_position_imbalance()
+
+        # Only rebalance if significantly imbalanced
+        if abs(imbalance) <= MAX_POSITION_IMBALANCE:
+            return
+
+        # Determine which side needs more orders
+        need_more_down = imbalance > 0  # Long Up, need more Down
+        need_more_up = imbalance < 0    # Long Down, need more Up
+
+        # Find LIVE markets where we can place rebalancing orders
+        # Look for markets where we already have one side filled
+        for slug, tracked in self.tracked_markets.items():
+            if tracked.status != "LIVE":
+                continue
+
+            # Skip if market is about to resolve (< 2 min left)
+            now = datetime.now(timezone.utc)
+            resolution_time = tracked.event_start + timedelta(minutes=15)
+            time_until_resolution = (resolution_time - now).total_seconds()
+            if time_until_resolution < 120:
+                continue
+
+            # Check if we can place an order on the needed side
+            token_to_buy = None
+            side_name = None
+
+            if need_more_down and tracked.up_filled and not self._has_open_order(tracked.down_token):
+                # We're long Up overall, this market has Up filled, place Down order
+                token_to_buy = tracked.down_token
+                side_name = "DOWN"
+            elif need_more_up and tracked.down_filled and not self._has_open_order(tracked.up_token):
+                # We're long Down overall, this market has Down filled, place Up order
+                token_to_buy = tracked.up_token
+                side_name = "UP"
+
+            if token_to_buy and side_name:
+                self._place_rebalance_order(tracked, side_name, token_to_buy, imbalance)
+
+    def _has_open_order(self, token_id: str) -> bool:
+        """Check if we have an open order for this token."""
+        try:
+            all_orders = self.client.get_all_orders()
+            if all_orders.empty:
+                return False
+            return not all_orders[all_orders["asset_id"] == token_id].empty
+        except Exception:
+            return False
+
+    def _place_rebalance_order(
+        self,
+        tracked: TrackedMarket,
+        side: str,
+        token_id: str,
+        imbalance: float
+    ) -> None:
+        """
+        Place a rebalancing order on the underweight side.
+
+        Uses aggressive maker pricing capped at 52% to avoid losses.
+        """
+        REBALANCE_AGGRESSION = 0.80
+        REBALANCE_MAX_PRICE = 0.52  # Cap to avoid losses
+
+        new_price = self.strategy.get_best_maker_price(
+            token_id,
+            tracked.tick_size,
+            max_price=REBALANCE_MAX_PRICE,
+            aggression=REBALANCE_AGGRESSION
+        )
+
+        if new_price is None:
+            return
+
+        # Don't place if price is too high (would lose money)
+        if new_price > REBALANCE_MAX_PRICE:
+            return
+
+        self.log(f"  REBALANCE {side}: Placing order @ {new_price:.2f} on {tracked.question[:40]}... (imbalance={imbalance:+.1f})")
+
+        try:
+            resp = self.client.create_order(
+                marketId=token_id,
+                action="BUY",
+                price=new_price,
+                size=TRADE_SIZE,
+                neg_risk=tracked.neg_risk,
+                post_only=True
+            )
+
+            if resp and resp.get("success"):
+                self.log(f"  REBALANCE {side}: Order placed successfully")
+            else:
+                error_msg = resp.get("errorMsg", "") if resp else "Empty response"
+                self.log(f"  REBALANCE {side}: Order failed: {error_msg}")
+        except Exception as e:
+            self.log(f"  REBALANCE {side}: Error: {e}")
+
     def monitor_tracked_markets(self) -> None:
         """Monitor all tracked markets for status changes, fills, and order updates."""
         for slug, tracked in list(self.tracked_markets.items()):
@@ -693,6 +806,9 @@ class RebatesBot:
             # Attempt redemption for RESOLVED markets
             if tracked.status == "RESOLVED":
                 self.attempt_redemption(tracked)
+
+        # Active rebalancing across all LIVE markets when position is imbalanced
+        self.rebalance_across_markets()
 
         # Cleanup old redeemed markets (keep last 50)
         redeemed = [s for s, t in self.tracked_markets.items() if t.status == "REDEEMED"]
