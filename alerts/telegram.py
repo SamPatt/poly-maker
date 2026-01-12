@@ -50,15 +50,16 @@ async def _send_telegram_message(message: str) -> bool:
         return False
 
 
-def send_alert(message: str) -> bool:
+def send_alert(message: str, wait: bool = False) -> bool:
     """
     Send a generic alert message.
 
     Args:
         message: Message to send
+        wait: If True and loop is running, create a new thread to send synchronously
 
     Returns:
-        True if sent successfully
+        True if sent successfully (or scheduled successfully if not waiting)
     """
     if not TELEGRAM_ENABLED:
         print(f"[ALERT - Telegram disabled] {message}")
@@ -67,8 +68,20 @@ def send_alert(message: str) -> bool:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            asyncio.create_task(_send_telegram_message(message))
-            return True
+            if wait:
+                # For critical messages like startup, run in a thread to ensure delivery
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(
+                        lambda: asyncio.run(_send_telegram_message(message))
+                    )
+                    result = future.result(timeout=10)
+                    if not result:
+                        print(f"[ALERT - Send failed] {message[:100]}...")
+                    return result
+            else:
+                asyncio.create_task(_send_telegram_message(message))
+                return True
         else:
             result = asyncio.run(_send_telegram_message(message))
             if not result:
@@ -82,6 +95,7 @@ def send_alert(message: str) -> bool:
             return result
         except Exception as e2:
             print(f"[ALERT - Exception] Failed to send: {e2}")
+            return False
 
 
 def send_trade_alert(
@@ -253,7 +267,8 @@ def send_startup_alert(dry_run: bool = False) -> bool:
 
     print(f"[STARTUP] Sending startup alert (mode={mode}, telegram_enabled={TELEGRAM_ENABLED})")
 
-    return send_alert(message)
+    # Use wait=True to ensure startup message is actually sent before continuing
+    return send_alert(message, wait=True)
 
 
 def send_shutdown_alert(reason: str = "Normal shutdown") -> bool:
@@ -270,7 +285,8 @@ def send_shutdown_alert(reason: str = "Normal shutdown") -> bool:
     message += f"<b>Reason:</b> {reason}\n"
     message += f"<b>Time:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
 
-    return send_alert(message)
+    # Use wait=True to ensure shutdown message is delivered before exit
+    return send_alert(message, wait=True)
 
 
 # ============================================
