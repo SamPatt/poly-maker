@@ -703,7 +703,9 @@ class RebatesBot:
         need_more_up = imbalance < 0    # Long Down, need more Up
 
         # Find LIVE markets where we can place rebalancing orders
-        # Look for markets where we already have one side filled
+        # Only place ONE order per cycle to avoid over-ordering
+        order_placed = False
+
         for slug, tracked in self.tracked_markets.items():
             if tracked.status != "LIVE":
                 continue
@@ -732,6 +734,10 @@ class RebatesBot:
                 except Exception as e:
                     self.log(f"  REBALANCE: Cancel failed: {e}")
 
+            # Only place ONE rebalance order per cycle (avoid over-ordering)
+            if order_placed:
+                continue
+
             # Place order on the UNDERweight side if we don't already have one
             token_to_buy = None
             side_name = None
@@ -747,6 +753,7 @@ class RebatesBot:
 
             if token_to_buy and side_name:
                 self._place_rebalance_order(tracked, side_name, token_to_buy, imbalance)
+                order_placed = True
 
     def _has_open_order(self, token_id: str) -> bool:
         """Check if we have an open order for this token."""
@@ -769,9 +776,19 @@ class RebatesBot:
         Place a rebalancing order on the underweight side.
 
         Uses aggressive maker pricing capped at 52% to avoid losses.
+        Order size is the EXACT imbalance amount to achieve perfect balance.
         """
         REBALANCE_AGGRESSION = 0.80
         REBALANCE_MAX_PRICE = 0.52  # Cap to avoid losses
+        MIN_ORDER_SIZE = 0.1  # Minimum order size to place
+
+        # Order size should be the exact imbalance to achieve balance
+        # (imbalance is already the absolute difference we need to fill)
+        order_size = abs(imbalance)
+
+        # Skip if imbalance is too small to bother
+        if order_size < MIN_ORDER_SIZE:
+            return
 
         new_price = self.strategy.get_best_maker_price(
             token_id,
@@ -787,14 +804,14 @@ class RebatesBot:
         if new_price > REBALANCE_MAX_PRICE:
             return
 
-        self.log(f"  REBALANCE {side}: Placing order @ {new_price:.2f} on {tracked.question[:40]}... (imbalance={imbalance:+.1f})")
+        self.log(f"  REBALANCE {side}: Placing order for {order_size:.2f} @ {new_price:.2f} on {tracked.question[:40]}... (imbalance={imbalance:+.1f})")
 
         try:
             resp = self.client.create_order(
                 marketId=token_id,
                 action="BUY",
                 price=new_price,
-                size=TRADE_SIZE,
+                size=order_size,
                 neg_risk=tracked.neg_risk,
                 post_only=True
             )
