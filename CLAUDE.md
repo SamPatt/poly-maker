@@ -397,18 +397,27 @@ ssh trading "tail -30 /tmp/rebates.log"
 
 **Position Imbalance Protection:**
 
-The rebates bot places maker orders on both Up and Down sides, but takers may fill one side more frequently than the other. This creates directional risk (e.g., holding 30 Up vs 15 Down).
+The rebates bot places maker orders on both Up and Down sides, but takers may fill one side more frequently than the other. This creates directional risk (e.g., holding 31 Up vs 15 Down). The goal is always to match quantities - any imbalance is risk.
 
-To prevent excessive imbalance:
-1. Before placing orders, the bot calculates total Up vs Down positions across all tracked markets
-2. If `abs(up_total - down_total) > MAX_POSITION_IMBALANCE`:
-   - **Long Up**: Skip placing Up orders, only place Down orders
-   - **Long Down**: Skip placing Down orders, only place Up orders
-3. This allows the underweight side to catch up naturally
+**Three layers of protection:**
 
-Logs will show: `IMBALANCE: Up=66.3 Down=50.0 (imbalance=+16.3) - skipping Up order to rebalance`
+| Mechanism | Threshold | Purpose |
+|-----------|-----------|---------|
+| **Prevention** | > MAX_IMBALANCE (10) | Skip overweight side on NEW markets |
+| **Rebalance** | >= 1 share | Always try to match on LIVE markets |
+| **Rescue** | Per-market | Fill unfilled side within same market |
 
-The status summary (every 5 cycles) also shows: `Positions: Up=66.3 Down=50.0 Imbalance=+16.3 [REBALANCING]`
+1. **Prevention** (new markets): If imbalance exceeds `MAX_POSITION_IMBALANCE`, skip placing orders on the overweight side for new markets. This prevents making imbalance worse.
+
+2. **Rebalance** (cross-market): On ANY imbalance >= 1 share, actively place orders on the underweight side across all LIVE markets. Markets swing through 50% during trading, so maker orders at ~50% (capped at 52%) can fill.
+
+3. **Rescue** (per-market): When one side of a specific market fills but the other doesn't, aggressively try to fill the unfilled side with maker orders (or taker as last resort in final 2 minutes).
+
+**Log messages:**
+- Prevention: `IMBALANCE: Up=66.3 Down=50.0 (imbalance=+16.3) - skipping Up order to rebalance`
+- Rebalance: `REBALANCE DOWN: Placing order @ 0.50 on Bitcoin Up or Down... (imbalance=+16.3)`
+- Rescue: `RESCUE DOWN: Aggressive maker 0.49 -> 0.50 (80% agg, LIVE, 540s to resolution)`
+- Status: `Positions: Up=66.3 Down=50.0 Imbalance=+16.3 [REBALANCING]`
 
 **Testing:**
 ```bash
