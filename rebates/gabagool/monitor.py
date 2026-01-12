@@ -130,8 +130,8 @@ class GabagoolMonitor:
         if not scan_markets:
             return []
 
-        # Scan for opportunities
-        opportunities = self.scanner.scan_markets(scan_markets)
+        # Scan for opportunities (using async parallel fetching)
+        opportunities = await self.scanner.scan_markets_async(scan_markets)
 
         # Filter opportunities that pass should_execute
         executable_opportunities = []

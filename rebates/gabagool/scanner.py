@@ -5,7 +5,9 @@ Continuously monitors orderbooks for YES+NO pairs where the combined cost
 is below $1.00, indicating a guaranteed profit opportunity.
 """
 
+import asyncio
 import logging
+import aiohttp
 import requests
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -97,7 +99,7 @@ class GabagoolScanner:
 
     def _fetch_orderbook(self, token_id: str) -> Optional[dict]:
         """
-        Fetch orderbook for a token.
+        Fetch orderbook for a token (sync version for backwards compatibility).
 
         Returns:
             Dict with 'bids' and 'asks' lists, or None on error
@@ -112,6 +114,51 @@ class GabagoolScanner:
         except Exception as e:
             logger.error(f"Error fetching orderbook for {token_id[:20]}...: {e}")
             return None
+
+    async def _fetch_orderbook_async(
+        self,
+        session: aiohttp.ClientSession,
+        token_id: str,
+    ) -> Tuple[str, Optional[dict]]:
+        """
+        Fetch orderbook for a token asynchronously.
+
+        Returns:
+            Tuple of (token_id, orderbook_dict or None)
+        """
+        try:
+            url = f"{CLOB_API_BASE}/book?token_id={token_id}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Orderbook fetch failed for {token_id[:20]}...: {resp.status}")
+                    return token_id, None
+                data = await resp.json()
+                return token_id, data
+        except Exception as e:
+            logger.error(f"Error fetching orderbook for {token_id[:20]}...: {e}")
+            return token_id, None
+
+    async def _fetch_all_orderbooks(
+        self,
+        token_ids: List[str],
+    ) -> dict:
+        """
+        Fetch multiple orderbooks in parallel.
+
+        Args:
+            token_ids: List of token IDs to fetch
+
+        Returns:
+            Dict mapping token_id -> orderbook data
+        """
+        async with aiohttp.ClientSession() as session:
+            tasks = [
+                self._fetch_orderbook_async(session, token_id)
+                for token_id in token_ids
+            ]
+            results = await asyncio.gather(*tasks)
+
+        return {token_id: data for token_id, data in results}
 
     def _calculate_vwap(
         self,
@@ -330,6 +377,130 @@ class GabagoolScanner:
                     opportunities.append(opportunity)
             except Exception as e:
                 logger.error(f"Error scanning market {market.get('slug', 'unknown')}: {e}")
+
+        # Sort by expected profit (highest first)
+        opportunities.sort(key=lambda o: o.expected_profit_usd, reverse=True)
+
+        return opportunities
+
+    async def scan_markets_async(
+        self,
+        markets: List[dict],
+    ) -> List[Opportunity]:
+        """
+        Scan multiple markets for opportunities with parallel orderbook fetching.
+
+        This is much faster than scan_markets() as it fetches all orderbooks
+        in parallel using aiohttp.
+
+        Args:
+            markets: List of market dicts with tokens and metadata
+
+        Returns:
+            List of detected opportunities, sorted by profit potential
+        """
+        if not markets:
+            return []
+
+        # Collect all token IDs to fetch
+        token_ids = []
+        for market in markets:
+            up_token = market.get("up_token", "")
+            down_token = market.get("down_token", "")
+            if up_token and down_token:
+                token_ids.extend([up_token, down_token])
+
+        if not token_ids:
+            return []
+
+        # Fetch all orderbooks in parallel
+        orderbooks = await self._fetch_all_orderbooks(token_ids)
+
+        # Process each market with the fetched orderbooks
+        opportunities = []
+        now = datetime.now(timezone.utc)
+
+        for market in markets:
+            try:
+                up_token = market.get("up_token", "")
+                down_token = market.get("down_token", "")
+
+                up_book = orderbooks.get(up_token)
+                down_book = orderbooks.get(down_token)
+
+                if up_book is None or down_book is None:
+                    continue
+
+                # Get best ask prices
+                up_price, up_size = self._get_best_ask(up_book, self.trade_size)
+                down_price, down_size = self._get_best_ask(down_book, self.trade_size)
+
+                if up_price is None or down_price is None:
+                    continue
+
+                # Calculate combined cost
+                combined_cost = up_price + down_price
+
+                # Check profitability threshold
+                if combined_cost >= self.profit_threshold:
+                    continue
+
+                # Check liquidity
+                max_size = min(up_size, down_size)
+                if max_size < self.min_liquidity:
+                    continue
+
+                # Calculate profits
+                gross_profit_pct = (1.00 - combined_cost) * 100
+                net_profit = 1.00 - combined_cost - (self.gas_cost_usd / self.trade_size)
+                net_profit_pct = net_profit * 100
+
+                # Check minimum profit
+                if net_profit_pct < self.min_net_profit_pct:
+                    continue
+
+                # Calculate timing
+                market_start_time = market.get("start_time")
+                seconds_to_start = None
+                if market_start_time:
+                    seconds_to_start = (market_start_time - now).total_seconds()
+
+                # Calculate expected profit in USD
+                expected_profit_usd = self.trade_size * (1.00 - combined_cost) - self.gas_cost_usd
+
+                opportunity = Opportunity(
+                    market_slug=market.get("slug", "unknown"),
+                    condition_id=market.get("conditionId", ""),
+                    up_token=up_token,
+                    down_token=down_token,
+                    neg_risk=market.get("neg_risk", False),
+                    up_price=up_price,
+                    down_price=down_price,
+                    combined_cost=combined_cost,
+                    up_size=up_size,
+                    down_size=down_size,
+                    max_size=max_size,
+                    gross_profit_pct=gross_profit_pct,
+                    net_profit_pct=net_profit_pct,
+                    expected_profit_usd=expected_profit_usd,
+                    detected_at=now,
+                    market_start_time=market_start_time,
+                    seconds_to_start=seconds_to_start,
+                )
+
+                logger.info(
+                    f"OPPORTUNITY: {opportunity.market_slug} - "
+                    f"Combined: {combined_cost:.4f} "
+                    f"({up_price:.2f} + {down_price:.2f}) "
+                    f"Profit: {gross_profit_pct:.2f}% "
+                    f"Size: {max_size:.0f} "
+                    f"Expected: ${expected_profit_usd:.2f}"
+                )
+
+                opportunities.append(opportunity)
+
+            except Exception as e:
+                logger.error(f"Error processing market {market.get('slug', 'unknown')}: {e}")
 
         # Sort by expected profit (highest first)
         opportunities.sort(key=lambda o: o.expected_profit_usd, reverse=True)

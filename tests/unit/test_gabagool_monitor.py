@@ -10,7 +10,7 @@ Tests:
 
 import asyncio
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone, timedelta
 import json
 
@@ -204,8 +204,7 @@ class TestScanOnce:
 
         assert opportunities == []
 
-    @patch("rebates.gabagool.scanner.requests.get")
-    def test_scan_detects_opportunities(self, mock_get):
+    def test_scan_detects_opportunities(self):
         """Should detect and return opportunities."""
         mock_finder = MagicMock()
         start_time = datetime.now(timezone.utc) + timedelta(minutes=10)
@@ -219,19 +218,16 @@ class TestScanOnce:
             }
         ]
 
-        # Mock orderbook responses
-        def mock_response(url, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            if "token_up" in url:
-                resp.json.return_value = {"asks": [{"price": "0.47", "size": "200"}]}
-            else:
-                resp.json.return_value = {"asks": [{"price": "0.48", "size": "200"}]}
-            return resp
-
-        mock_get.side_effect = mock_response
-
         monitor = GabagoolMonitor(market_finder=mock_finder)
+
+        # Mock the scanner's _fetch_all_orderbooks to return test data
+        async def mock_fetch_all(token_ids):
+            return {
+                "token_up": {"asks": [{"price": "0.47", "size": "200"}]},
+                "token_down": {"asks": [{"price": "0.48", "size": "200"}]},
+            }
+
+        monitor.scanner._fetch_all_orderbooks = mock_fetch_all
 
         opportunities = run_async(monitor.scan_once())
 
