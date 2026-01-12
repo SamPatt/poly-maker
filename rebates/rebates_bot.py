@@ -789,6 +789,7 @@ class RebatesBot:
         """
         REBALANCE_AGGRESSION = 0.80
         REBALANCE_MAX_PRICE = 0.52  # Cap to avoid losses
+        REBALANCE_MIN_PRICE = 0.30  # Allow lower bids when underweight side is cheap
         MIN_ORDER_SIZE = 0.1  # Minimum order size to place
 
         # Order size should be the exact imbalance to achieve balance
@@ -803,6 +804,7 @@ class RebatesBot:
             token_id,
             tracked.tick_size,
             max_price=REBALANCE_MAX_PRICE,
+            min_price=REBALANCE_MIN_PRICE,
             aggression=REBALANCE_AGGRESSION
         )
 
