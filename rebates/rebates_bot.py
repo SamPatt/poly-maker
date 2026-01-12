@@ -677,12 +677,16 @@ class RebatesBot:
         """
         Actively rebalance positions by placing orders on the underweight side.
 
-        When total Up vs Down positions are imbalanced beyond MAX_POSITION_IMBALANCE,
-        this method places additional orders on LIVE markets to catch up.
+        Any imbalance is risk - the goal is always to match Up and Down positions.
+        This method places orders on LIVE markets to catch up whenever there's
+        any imbalance at all.
 
         Unlike rescue (which only handles per-market unfilled orders), this handles
         cross-market imbalance where individual markets show "both filled" but
         totals are skewed (e.g., 31 Up vs 15 Down across all markets).
+
+        Note: Rescue and rebalance won't conflict - if rescue already placed an
+        order, _has_open_order() will detect it and rebalance will skip that market.
         """
         if DRY_RUN:
             return
@@ -690,8 +694,8 @@ class RebatesBot:
         # Check current imbalance
         up_total, down_total, imbalance = self.get_position_imbalance()
 
-        # Only rebalance if significantly imbalanced
-        if abs(imbalance) <= MAX_POSITION_IMBALANCE:
+        # Any imbalance is risk - always try to match (use small threshold for float precision)
+        if abs(imbalance) < 1.0:
             return
 
         # Determine which side needs more orders
