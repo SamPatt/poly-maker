@@ -43,6 +43,7 @@ from .config import (
     CHECK_INTERVAL_SECONDS,
     SAFETY_BUFFER_SECONDS,
     ASSETS,
+    MAX_POSITION_IMBALANCE,
 )
 from alerts.telegram import (
     send_rebates_startup_alert,
@@ -143,6 +144,59 @@ class RebatesBot:
 
         # Send startup alert
         send_rebates_startup_alert(DRY_RUN, TRADE_SIZE)
+
+    def get_position_imbalance(self) -> Tuple[float, float, float]:
+        """
+        Calculate total Up and Down positions across all tracked 15-min markets.
+
+        Returns:
+            Tuple of (up_total, down_total, imbalance) where:
+            - up_total: Total shares of Up positions
+            - down_total: Total shares of Down positions
+            - imbalance: up_total - down_total (positive = long Up, negative = long Down)
+        """
+        up_total = 0.0
+        down_total = 0.0
+
+        if DRY_RUN:
+            return 0.0, 0.0, 0.0
+
+        try:
+            # Get all positions from the API
+            positions_df = self.client.get_all_positions()
+
+            if positions_df.empty:
+                return 0.0, 0.0, 0.0
+
+            # Build a set of all Up and Down tokens we're tracking
+            up_tokens = set()
+            down_tokens = set()
+
+            for tracked in self.tracked_markets.values():
+                if tracked.up_token:
+                    up_tokens.add(tracked.up_token)
+                if tracked.down_token:
+                    down_tokens.add(tracked.down_token)
+
+            # Sum up positions
+            for _, row in positions_df.iterrows():
+                asset_id = str(row.get("asset", ""))
+                size = float(row.get("size", 0))
+
+                if size <= 0:
+                    continue
+
+                if asset_id in up_tokens:
+                    up_total += size
+                elif asset_id in down_tokens:
+                    down_total += size
+
+            imbalance = up_total - down_total
+            return up_total, down_total, imbalance
+
+        except Exception as e:
+            self.log(f"Error getting position imbalance: {e}")
+            return 0.0, 0.0, 0.0
 
     def _load_pending_markets(self) -> None:
         """Load markets from database that need continued tracking."""
@@ -655,8 +709,25 @@ class RebatesBot:
         else:
             self.log(f"Processing: {question}")
 
-        # Place mirror orders
-        result = self.strategy.place_mirror_orders(market)
+        # Check position imbalance to decide which sides to place
+        up_total, down_total, imbalance = self.get_position_imbalance()
+        skip_up = False
+        skip_down = False
+
+        if abs(imbalance) > MAX_POSITION_IMBALANCE:
+            if imbalance > 0:
+                # Long Up - skip placing more Up orders
+                skip_up = True
+                self.log(f"  IMBALANCE: Up={up_total:.1f} Down={down_total:.1f} (imbalance={imbalance:+.1f}) - skipping Up order to rebalance")
+            else:
+                # Long Down - skip placing more Down orders
+                skip_down = True
+                self.log(f"  IMBALANCE: Up={up_total:.1f} Down={down_total:.1f} (imbalance={imbalance:+.1f}) - skipping Down order to rebalance")
+        elif abs(imbalance) > 0:
+            self.log(f"  Position: Up={up_total:.1f} Down={down_total:.1f} (imbalance={imbalance:+.1f}, within threshold)")
+
+        # Place orders (potentially skipping one side)
+        result = self.strategy.place_mirror_orders(market, skip_up=skip_up, skip_down=skip_down)
 
         if result.success:
             # Track this market
@@ -757,6 +828,12 @@ class RebatesBot:
 
         if upcoming or live or resolved:
             self.log(f"Tracking: {upcoming} UPCOMING, {live} LIVE, {resolved} RESOLVED, {redeemed} REDEEMED")
+
+        # Also log position imbalance
+        up_total, down_total, imbalance = self.get_position_imbalance()
+        if up_total > 0 or down_total > 0:
+            status = "BALANCED" if abs(imbalance) <= MAX_POSITION_IMBALANCE else "REBALANCING"
+            self.log(f"Positions: Up={up_total:.1f} Down={down_total:.1f} Imbalance={imbalance:+.1f} [{status}]")
 
     def run(self):
         """

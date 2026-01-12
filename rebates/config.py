@@ -26,6 +26,11 @@ ASSETS = ["btc", "eth", "sol"]
 # Dry run mode - set to false to execute real trades
 DRY_RUN = os.getenv("REBATES_DRY_RUN", "true").lower() == "true"
 
+# Position imbalance settings
+# Maximum allowed imbalance between Up and Down positions (in shares)
+# If abs(up_position - down_position) > MAX_POSITION_IMBALANCE, skip orders on the overweight side
+MAX_POSITION_IMBALANCE = float(os.getenv("REBATES_MAX_IMBALANCE", "10"))  # Default: 10 shares (2x trade size)
+
 # API endpoints
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 

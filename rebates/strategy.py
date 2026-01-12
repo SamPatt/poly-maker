@@ -306,7 +306,12 @@ class DeltaNeutralStrategy:
         except Exception as e:
             return False, f"Error: {e}"
 
-    def place_mirror_orders(self, market: Dict[str, Any]) -> OrderResult:
+    def place_mirror_orders(
+        self,
+        market: Dict[str, Any],
+        skip_up: bool = False,
+        skip_down: bool = False
+    ) -> OrderResult:
         """
         Place mirror Up and Down orders at optimal maker prices.
 
@@ -319,6 +324,8 @@ class DeltaNeutralStrategy:
 
         Args:
             market: Market data from the Gamma API
+            skip_up: If True, skip placing Up order (use when long Up)
+            skip_down: If True, skip placing Down order (use when long Down)
 
         Returns:
             OrderResult with success status, message, and order details
@@ -351,8 +358,8 @@ class DeltaNeutralStrategy:
                 print(f"  Market: {question}")
                 print(f"  Up token: {up_token[:20]}...")
                 print(f"  Down token: {down_token[:20]}...")
-                print(f"  Up price: {up_price} (from order book)")
-                print(f"  Down price: {down_price} (from order book)")
+                print(f"  Up price: {up_price} (from order book){' [SKIP]' if skip_up else ''}")
+                print(f"  Down price: {down_price} (from order book){' [SKIP]' if skip_down else ''}")
                 print(f"  Size: ${self.trade_size} per side")
                 print(f"  Neg risk: {neg_risk}")
                 print(f"  Post-only: True (maker-only, rejected if would immediately match)")
@@ -363,145 +370,168 @@ class DeltaNeutralStrategy:
                     down_price=down_price
                 )
 
-            # Place Up order (BUY on the Up outcome)
-            # Retry at same price 3 times before reducing price
-            up_success = False
-            up_resp = None
-            current_up_price = up_price
-            price_reductions = 0
-            max_price_reductions = 3
+            # Track which orders we placed
+            up_order_id = ""
+            down_order_id = ""
 
-            while not up_success and price_reductions < max_price_reductions:
-                # Try same price up to 3 times with small delay
-                for same_price_attempt in range(3):
-                    print(f"[{timestamp}] Placing Up order: {self.trade_size} @ {current_up_price} (post-only, attempt {same_price_attempt + 1})")
-                    try:
-                        up_resp = self.client.create_order(
-                            marketId=up_token,
-                            action="BUY",
-                            price=current_up_price,
-                            size=self.trade_size,
-                            neg_risk=neg_risk,
-                            post_only=True
-                        )
-                        up_success = up_resp and up_resp.get("success") == True
-                        if up_success:
-                            break
-                    except Exception as e:
-                        error_str = str(e).lower()
-                        print(f"[{timestamp}] Up order exception: {e}")
-                        if "crosses" not in error_str and "cross" not in error_str:
-                            # Non-crosses error, give up
-                            price_reductions = max_price_reductions
-                            break
+            # Place Up order (BUY on the Up outcome) - unless skipping
+            if skip_up:
+                print(f"[{timestamp}] SKIPPING Up order (position imbalance)")
+                up_success = True  # Consider skipped as "successful"
+            else:
+                # Retry at same price 3 times before reducing price
+                up_success = False
+                up_resp = None
+                current_up_price = up_price
+                price_reductions = 0
+                max_price_reductions = 3
 
-                    if not up_success:
-                        error_msg = str(up_resp.get("errorMsg", "")) if up_resp else ""
-                        if error_msg:
-                            print(f"[{timestamp}] Up order failed: {error_msg}")
-                        if "crosses" not in error_msg.lower() and "cross" not in error_msg.lower() and error_msg:
-                            # Non-crosses error, give up
-                            price_reductions = max_price_reductions
-                            break
+                while not up_success and price_reductions < max_price_reductions:
+                    # Try same price up to 3 times with small delay
+                    for same_price_attempt in range(3):
+                        print(f"[{timestamp}] Placing Up order: {self.trade_size} @ {current_up_price} (post-only, attempt {same_price_attempt + 1})")
+                        try:
+                            up_resp = self.client.create_order(
+                                marketId=up_token,
+                                action="BUY",
+                                price=current_up_price,
+                                size=self.trade_size,
+                                neg_risk=neg_risk,
+                                post_only=True
+                            )
+                            up_success = up_resp and up_resp.get("success") == True
+                            if up_success:
+                                break
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            print(f"[{timestamp}] Up order exception: {e}")
+                            if "crosses" not in error_str and "cross" not in error_str:
+                                # Non-crosses error, give up
+                                price_reductions = max_price_reductions
+                                break
 
-                    # Small delay before retry at same price
-                    if same_price_attempt < 2:
-                        time.sleep(0.15)
+                        if not up_success:
+                            error_msg = str(up_resp.get("errorMsg", "")) if up_resp else ""
+                            if error_msg:
+                                print(f"[{timestamp}] Up order failed: {error_msg}")
+                            if "crosses" not in error_msg.lower() and "cross" not in error_msg.lower() and error_msg:
+                                # Non-crosses error, give up
+                                price_reductions = max_price_reductions
+                                break
 
-                if up_success:
-                    break
+                        # Small delay before retry at same price
+                        if same_price_attempt < 2:
+                            time.sleep(0.15)
 
-                # All attempts at this price failed, reduce price
-                price_reductions += 1
-                current_up_price = round(current_up_price - tick_size, 2)
-                if current_up_price < 0.40:
-                    print(f"[{timestamp}] Up order price too low, giving up")
-                    break
-                print(f"[{timestamp}] Up order crossed book, reducing to {current_up_price}")
+                    if up_success:
+                        break
 
-            if not up_success:
-                error_msg = up_resp.get("errorMsg", "") if up_resp else "Empty response"
-                return OrderResult(success=False, message=f"Failed to place Up order: {error_msg}")
+                    # All attempts at this price failed, reduce price
+                    price_reductions += 1
+                    current_up_price = round(current_up_price - tick_size, 2)
+                    if current_up_price < 0.40:
+                        print(f"[{timestamp}] Up order price too low, giving up")
+                        break
+                    print(f"[{timestamp}] Up order crossed book, reducing to {current_up_price}")
 
-            up_price = current_up_price  # Update to actual price used
+                if not up_success:
+                    error_msg = up_resp.get("errorMsg", "") if up_resp else "Empty response"
+                    return OrderResult(success=False, message=f"Failed to place Up order: {error_msg}")
 
-            up_order_id = up_resp.get("orderID", "")
-            print(f"[{timestamp}] Up order placed: {up_order_id[:20]}...")
+                up_price = current_up_price  # Update to actual price used
 
-            # Place Down order (BUY on the Down outcome)
-            # Retry at same price 3 times before reducing price
-            down_success = False
-            down_resp = None
-            current_down_price = down_price
-            price_reductions = 0
-            max_price_reductions = 3
+                up_order_id = up_resp.get("orderID", "")
+                print(f"[{timestamp}] Up order placed: {up_order_id[:20]}...")
 
-            while not down_success and price_reductions < max_price_reductions:
-                # Try same price up to 3 times with small delay
-                for same_price_attempt in range(3):
-                    print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {current_down_price} (post-only, attempt {same_price_attempt + 1})")
-                    try:
-                        down_resp = self.client.create_order(
-                            marketId=down_token,
-                            action="BUY",
-                            price=current_down_price,
-                            size=self.trade_size,
-                            neg_risk=neg_risk,
-                            post_only=True
-                        )
-                        down_success = down_resp and down_resp.get("success") == True
-                        if down_success:
-                            break
-                    except Exception as e:
-                        error_str = str(e).lower()
-                        print(f"[{timestamp}] Down order exception: {e}")
-                        if "crosses" not in error_str and "cross" not in error_str:
-                            # Non-crosses error, give up
-                            price_reductions = max_price_reductions
-                            break
+            # Place Down order (BUY on the Down outcome) - unless skipping
+            if skip_down:
+                print(f"[{timestamp}] SKIPPING Down order (position imbalance)")
+                down_success = True  # Consider skipped as "successful"
+            else:
+                # Retry at same price 3 times before reducing price
+                down_success = False
+                down_resp = None
+                current_down_price = down_price
+                price_reductions = 0
+                max_price_reductions = 3
 
-                    if not down_success:
-                        error_msg = str(down_resp.get("errorMsg", "")) if down_resp else ""
-                        if error_msg:
-                            print(f"[{timestamp}] Down order failed: {error_msg}")
-                        if "crosses" not in error_msg.lower() and "cross" not in error_msg.lower() and error_msg:
-                            # Non-crosses error, give up
-                            price_reductions = max_price_reductions
-                            break
+                while not down_success and price_reductions < max_price_reductions:
+                    # Try same price up to 3 times with small delay
+                    for same_price_attempt in range(3):
+                        print(f"[{timestamp}] Placing Down order: {self.trade_size} @ {current_down_price} (post-only, attempt {same_price_attempt + 1})")
+                        try:
+                            down_resp = self.client.create_order(
+                                marketId=down_token,
+                                action="BUY",
+                                price=current_down_price,
+                                size=self.trade_size,
+                                neg_risk=neg_risk,
+                                post_only=True
+                            )
+                            down_success = down_resp and down_resp.get("success") == True
+                            if down_success:
+                                break
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            print(f"[{timestamp}] Down order exception: {e}")
+                            if "crosses" not in error_str and "cross" not in error_str:
+                                # Non-crosses error, give up
+                                price_reductions = max_price_reductions
+                                break
 
-                    # Small delay before retry at same price
-                    if same_price_attempt < 2:
-                        time.sleep(0.15)
+                        if not down_success:
+                            error_msg = str(down_resp.get("errorMsg", "")) if down_resp else ""
+                            if error_msg:
+                                print(f"[{timestamp}] Down order failed: {error_msg}")
+                            if "crosses" not in error_msg.lower() and "cross" not in error_msg.lower() and error_msg:
+                                # Non-crosses error, give up
+                                price_reductions = max_price_reductions
+                                break
 
-                if down_success:
-                    break
+                        # Small delay before retry at same price
+                        if same_price_attempt < 2:
+                            time.sleep(0.15)
 
-                # All attempts at this price failed, reduce price
-                price_reductions += 1
-                current_down_price = round(current_down_price - tick_size, 2)
-                if current_down_price < 0.40:
-                    print(f"[{timestamp}] Down order price too low, giving up")
-                    break
-                print(f"[{timestamp}] Down order crossed book, reducing to {current_down_price}")
+                    if down_success:
+                        break
 
-            if not down_success:
-                # Try to cancel the Up order if Down failed
-                print(f"[{timestamp}] Down order failed after retries, cancelling Up order")
-                try:
-                    self.client.cancel_all_asset(up_token)
-                except Exception:
-                    pass
-                error_msg = down_resp.get("errorMsg", "") if down_resp else "Empty response"
-                return OrderResult(success=False, message=f"Failed to place Down order: {error_msg}")
+                    # All attempts at this price failed, reduce price
+                    price_reductions += 1
+                    current_down_price = round(current_down_price - tick_size, 2)
+                    if current_down_price < 0.40:
+                        print(f"[{timestamp}] Down order price too low, giving up")
+                        break
+                    print(f"[{timestamp}] Down order crossed book, reducing to {current_down_price}")
 
-            down_price = current_down_price  # Update to actual price used
+                if not down_success:
+                    # Try to cancel the Up order if Down failed (only if we placed an Up order)
+                    if not skip_up:
+                        print(f"[{timestamp}] Down order failed after retries, cancelling Up order")
+                        try:
+                            self.client.cancel_all_asset(up_token)
+                        except Exception:
+                            pass
+                    error_msg = down_resp.get("errorMsg", "") if down_resp else "Empty response"
+                    return OrderResult(success=False, message=f"Failed to place Down order: {error_msg}")
 
-            down_order_id = down_resp.get("orderID", "")
-            print(f"[{timestamp}] Down order placed: {down_order_id[:20]}...")
+                down_price = current_down_price  # Update to actual price used
+
+                down_order_id = down_resp.get("orderID", "")
+                print(f"[{timestamp}] Down order placed: {down_order_id[:20]}...")
+
+            # Build message based on what was placed
+            if skip_up and skip_down:
+                msg = f"Both orders skipped (imbalance) on {slug}"
+            elif skip_up:
+                msg = f"Placed Down only @ {down_price} on {slug} (Up skipped - rebalancing)"
+            elif skip_down:
+                msg = f"Placed Up only @ {up_price} on {slug} (Down skipped - rebalancing)"
+            else:
+                msg = f"Placed mirror orders @ Up:{up_price}/Down:{down_price} on {slug}"
 
             return OrderResult(
                 success=True,
-                message=f"Placed mirror orders @ Up:{up_price}/Down:{down_price} on {slug}",
+                message=msg,
                 up_order_id=up_order_id,
                 down_order_id=down_order_id,
                 up_price=up_price,
