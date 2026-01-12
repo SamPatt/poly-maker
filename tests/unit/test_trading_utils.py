@@ -311,8 +311,8 @@ class TestRoundFunctions:
 class TestGetBuySellAmount:
     """Tests for get_buy_sell_amount()."""
 
-    def test_initial_position_only_buys(self):
-        """With no position, should only quote buy orders."""
+    def test_initial_position_quotes_both_sides(self):
+        """With no position, should quote both sides for two-sided liquidity rewards."""
         from poly_data.trading_utils import get_buy_sell_amount
 
         row = create_market_row(trade_size=100.0, max_size=500.0, min_size=10.0)
@@ -325,10 +325,11 @@ class TestGetBuySellAmount:
         )
 
         assert buy_amount == 100.0  # trade_size
-        assert sell_amount == 0  # No position to sell
+        # Two-sided market making: always quote sells for liquidity rewards
+        assert sell_amount == 100.0  # order_size for two-sided quoting
 
-    def test_small_position_buys_no_sells(self):
-        """With position < trade_size, should buy but not sell."""
+    def test_small_position_quotes_both_sides(self):
+        """With position < trade_size, should still quote both sides for rewards."""
         from poly_data.trading_utils import get_buy_sell_amount
 
         row = create_market_row(trade_size=100.0, max_size=500.0, min_size=10.0)
@@ -341,7 +342,8 @@ class TestGetBuySellAmount:
         )
 
         assert buy_amount == 100.0  # trade_size
-        assert sell_amount == 0  # Position too small
+        # Two-sided market making: always quote sells for liquidity rewards
+        assert sell_amount == 100.0  # order_size for two-sided quoting
 
     def test_position_at_trade_size_buys_and_sells(self):
         """With position >= trade_size, should quote both sides."""
@@ -475,4 +477,5 @@ class TestIntegration:
         )
 
         assert buy_amount == row["trade_size"]
-        assert sell_amount == 0  # No position
+        # Two-sided market making: always quote sells for liquidity rewards
+        assert sell_amount == row["trade_size"]  # order_size for two-sided quoting
