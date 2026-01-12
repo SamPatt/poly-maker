@@ -126,13 +126,18 @@ def send_buy_order(order):
                 print(f"[DRY RUN] Would create BUY order: {order['token']} @ {order['price']} x {order['size']}")
             else:
                 try:
-                    client.create_order(
+                    result = client.create_order(
                         order['token'],
                         'BUY',
                         order['price'],
                         order['size'],
                         True if order['neg_risk'] == 'TRUE' else False
                     )
+                    # Check if order creation failed (create_order returns dict with success=False on error)
+                    if isinstance(result, dict) and result.get('success') == False:
+                        global_state.committed_buy_orders -= order_cost
+                        print(f"[BUY ORDER FAILED] Released ${order_cost:.2f}. Error: {result.get('errorMsg', 'Unknown')}")
+                        return
                 except Exception as e:
                     # Order failed - release the reserved funds
                     global_state.committed_buy_orders -= order_cost
@@ -224,13 +229,18 @@ def send_sell_order(order):
     if DRY_RUN:
         print(f"[DRY RUN] Would create SELL order: {order['token']} @ {order['price']} x {order['size']}")
     else:
-        client.create_order(
+        result = client.create_order(
             order['token'],
             'SELL',
             order['price'],
             order['size'],
             True if order['neg_risk'] == 'TRUE' else False
         )
+
+        # Check if order creation failed
+        if isinstance(result, dict) and result.get('success') == False:
+            print(f"[SELL ORDER FAILED] {result.get('errorMsg', 'Unknown error')}")
+            return  # Don't update state or send alert for failed orders
 
         # CRITICAL: Update local order state immediately to prevent duplicate orders
         token_str = str(order['token'])
