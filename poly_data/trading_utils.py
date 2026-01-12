@@ -195,17 +195,18 @@ def get_buy_sell_amount(position, bid_price, row, other_token_position=0):
         if buy_amount < min_incentive_size and remaining_to_max >= min_incentive_size:
             buy_amount = min_incentive_size
 
-    # SELL SIDE: Always quote for two-sided liquidity rewards
-    # Even without inventory, we quote sells (they become short if filled)
-    # This is critical for Polymarket rewards - two-sided scores much higher
-    if position < max_size:
-        # Quote sell at order_size for two-sided liquidity
-        # If we have position, we're selling from inventory
-        # If we don't, this creates a short (offset by the other side's buy)
+    # SELL SIDE: Only quote sells when we have inventory
+    # Two-sided quoting without inventory requires collateral for shorting
+    # which can cause "not enough balance" errors
+    if position >= order_size:
+        # Have enough inventory to sell
         sell_amount = order_size
+    elif position > 0:
+        # Have some inventory but less than order_size
+        sell_amount = position
     else:
-        # At max_size, sell our full trade amount to reduce position
-        sell_amount = min(position, order_size)
+        # No inventory - don't quote sells (avoid shorting without collateral)
+        sell_amount = 0
 
     # Ensure minimum order size compliance for rewards
     if buy_amount > 0 and buy_amount < min_incentive_size:

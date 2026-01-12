@@ -311,8 +311,8 @@ class TestRoundFunctions:
 class TestGetBuySellAmount:
     """Tests for get_buy_sell_amount()."""
 
-    def test_initial_position_quotes_both_sides(self):
-        """With no position, should quote both sides for two-sided liquidity rewards."""
+    def test_initial_position_only_buys(self):
+        """With no position, should only quote buys (no inventory to sell)."""
         from poly_data.trading_utils import get_buy_sell_amount
 
         row = create_market_row(trade_size=100.0, max_size=500.0, min_size=10.0)
@@ -325,11 +325,11 @@ class TestGetBuySellAmount:
         )
 
         assert buy_amount == 100.0  # trade_size
-        # Two-sided market making: always quote sells for liquidity rewards
-        assert sell_amount == 100.0  # order_size for two-sided quoting
+        # No inventory to sell - avoid shorting without collateral
+        assert sell_amount == 0
 
-    def test_small_position_quotes_both_sides(self):
-        """With position < trade_size, should still quote both sides for rewards."""
+    def test_small_position_sells_inventory(self):
+        """With position < trade_size, should sell available inventory."""
         from poly_data.trading_utils import get_buy_sell_amount
 
         row = create_market_row(trade_size=100.0, max_size=500.0, min_size=10.0)
@@ -342,8 +342,8 @@ class TestGetBuySellAmount:
         )
 
         assert buy_amount == 100.0  # trade_size
-        # Two-sided market making: always quote sells for liquidity rewards
-        assert sell_amount == 100.0  # order_size for two-sided quoting
+        # Sell available inventory (less than order_size)
+        assert sell_amount == 50.0  # position amount
 
     def test_position_at_trade_size_buys_and_sells(self):
         """With position >= trade_size, should quote both sides."""
@@ -477,5 +477,5 @@ class TestIntegration:
         )
 
         assert buy_amount == row["trade_size"]
-        # Two-sided market making: always quote sells for liquidity rewards
-        assert sell_amount == row["trade_size"]  # order_size for two-sided quoting
+        # No inventory to sell - avoid shorting without collateral
+        assert sell_amount == 0
