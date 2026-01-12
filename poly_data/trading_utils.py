@@ -218,9 +218,12 @@ def get_buy_sell_amount(position, bid_price, row, other_token_position=0):
     if sell_amount > 0 and sell_amount < min_incentive_size:
         # Only bump to min_incentive_size if we actually have enough inventory
         # Otherwise keep sell_amount as-is (what we actually own)
+        print(f"[DEBUG SELL] sell_amount={sell_amount}, position={position}, min_incentive_size={min_incentive_size}")
         if position >= min_incentive_size:
             sell_amount = min_incentive_size
-        # else: keep sell_amount = position (from line 206)
+            print(f"[DEBUG SELL] Bumped to min_incentive_size: {sell_amount}")
+        else:
+            print(f"[DEBUG SELL] NOT bumping - position too small, keeping sell_amount={sell_amount}")
 
     # Apply multiplier for low-priced assets (optional per-market setting)
     if bid_price < 0.1 and buy_amount > 0:
