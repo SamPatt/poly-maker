@@ -976,7 +976,8 @@ def discover_markets(assets: List[str]) -> List[Dict[str, Any]]:
     all_markets = []
 
     for asset in assets:
-        markets = finder.get_upcoming_markets()
+        # Use get_live_and_upcoming_markets to include currently live markets
+        markets = finder.get_live_and_upcoming_markets()
         # Filter to this asset
         asset_markets = [m for m in markets if m.get("_asset", "").lower() == asset.lower()]
         all_markets.extend(asset_markets)

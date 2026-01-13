@@ -45,6 +45,28 @@ class CryptoMarketFinder:
 
         return timestamps
 
+    def _get_timestamps_including_current(self, count: int = 4) -> List[int]:
+        """
+        Generate timestamps including the current live slot.
+
+        Returns timestamps for:
+        - Current live market (if any)
+        - Next upcoming markets
+        """
+        now = datetime.now(timezone.utc)
+        current_ts = int(now.timestamp())
+
+        slot_duration = 15 * 60  # 15 minutes in seconds
+
+        # Get the END timestamp of the CURRENT slot (the live market)
+        current_slot_end = ((current_ts // slot_duration) + 1) * slot_duration
+
+        timestamps = []
+        for i in range(count):
+            timestamps.append(current_slot_end + (i * slot_duration))
+
+        return timestamps
+
     def _fetch_market(self, slug: str) -> Optional[Dict[str, Any]]:
         """Fetch a single market by slug."""
         try:
@@ -113,6 +135,43 @@ class CryptoMarketFinder:
 
         return True
 
+    def is_tradeable_for_active_quoting(self, market: Dict[str, Any]) -> bool:
+        """
+        Returns True if market is valid for active quoting.
+
+        For active quoting, we WANT to trade on:
+        - Currently live markets (started but not ended)
+        - Upcoming markets
+
+        We reject:
+        - Resolved/closed markets
+        - Markets not accepting orders
+        """
+        now = datetime.now(timezone.utc)
+
+        # Check 1: Parse end time to determine if market has resolved
+        end_date_str = market.get("endDate")
+        if end_date_str:
+            try:
+                if end_date_str.endswith("Z"):
+                    end_date_str = end_date_str[:-1] + "+00:00"
+                end_time = datetime.fromisoformat(end_date_str)
+                if now >= end_time:
+                    # Market has ended
+                    return False
+            except Exception:
+                pass
+
+        # Check 2: Market must be accepting orders
+        if not market.get("acceptingOrders", False):
+            return False
+
+        # Check 3: Market must not be closed
+        if market.get("closed", False):
+            return False
+
+        return True
+
     def get_upcoming_markets(self) -> List[Dict[str, Any]]:
         """
         Find all upcoming 15-minute markets for configured assets.
@@ -131,6 +190,36 @@ class CryptoMarketFinder:
                 market = self._fetch_market(slug)
 
                 if market and self.is_safe_to_trade(market):
+                    # Add parsed timing info
+                    market["_event_start"] = self._parse_event_start_time(market)
+                    market["_asset"] = asset.upper()
+                    markets.append(market)
+
+        # Sort by event start time (earliest first)
+        markets.sort(key=lambda m: m.get("_event_start") or datetime.max.replace(tzinfo=timezone.utc))
+
+        return markets
+
+    def get_live_and_upcoming_markets(self, count: int = 4) -> List[Dict[str, Any]]:
+        """
+        Find live and upcoming 15-minute markets for active quoting.
+
+        Unlike get_upcoming_markets, this INCLUDES currently live markets.
+
+        Returns markets that:
+        1. Are 15-minute crypto markets
+        2. Have not yet resolved (end time in future)
+        3. Are accepting orders and not closed
+        """
+        markets = []
+        timestamps = self._get_timestamps_including_current(count=count)
+
+        for timestamp in timestamps:
+            for asset in ASSETS:
+                slug = SLUG_PATTERN.format(asset=asset, timestamp=timestamp)
+                market = self._fetch_market(slug)
+
+                if market and self.is_tradeable_for_active_quoting(market):
                     # Add parsed timing info
                     market["_event_start"] = self._parse_event_start_time(market)
                     market["_asset"] = asset.upper()
