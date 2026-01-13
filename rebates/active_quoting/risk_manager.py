@@ -603,6 +603,12 @@ class RiskManager:
         if market_state.is_stale:
             return False, "Market feed is stale"
 
+        # Check if market has ended (can't trade on resolved markets)
+        if market_state.market_end_time is not None:
+            now = datetime.utcnow()
+            if now >= market_state.market_end_time:
+                return False, "Market has ended"
+
         return True, ""
 
     # --- Error Tracking ---
