@@ -347,9 +347,10 @@ class UserChannelManager:
         # Get token ID
         token_id = data.get("asset_id") or data.get("token_id")
 
-        # Only process MATCHED status (actual fills)
+        # Only process MATCHED/CONFIRMED status (actual fills)
+        # If status is not present, treat as valid fill (for simpler message formats)
         status = data.get("status", "").upper()
-        if status not in ("MATCHED", "CONFIRMED"):
+        if status and status not in ("MATCHED", "CONFIRMED"):
             logger.debug(f"Skipping trade event with status: {status}")
             return
 
@@ -370,6 +371,10 @@ class UserChannelManager:
         order_id = data.get("order_id") or data.get("maker_order_id")
         maker_orders = data.get("maker_orders", [])
         is_our_fill = False
+
+        # If side wasn't in the trade event, try to get it from the tracked order
+        if side_str == "" and order_id and order_id in self._orders:
+            side = self._orders[order_id].side
 
         if maker_orders:
             # Find our order in maker_orders by checking maker_address
