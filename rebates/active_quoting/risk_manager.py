@@ -41,11 +41,49 @@ class MarketRiskState:
     last_update_time: Optional[datetime] = None
     is_stale: bool = False
     halted: bool = False            # Market-specific halt
+    # Market time window for smart stale detection
+    market_start_time: Optional[datetime] = None  # When market goes live
+    market_end_time: Optional[datetime] = None    # When market resolves
 
     @property
     def total_pnl(self) -> float:
         """Total P&L (realized + unrealized)."""
         return self.realized_pnl + self.unrealized_pnl
+
+    def should_monitor_staleness(self, now: Optional[datetime] = None) -> bool:
+        """
+        Check if this market should be monitored for stale feeds.
+
+        Only monitor:
+        - Currently live markets (now is between start and end)
+        - Next upcoming market (starts within 15 minutes)
+
+        Don't monitor:
+        - Resolved markets (end time has passed)
+        - Future markets (more than 15 minutes until start)
+        """
+        if self.market_start_time is None or self.market_end_time is None:
+            # No time window set - monitor by default
+            return True
+
+        if now is None:
+            now = datetime.utcnow()
+
+        # Already resolved - don't monitor
+        if now >= self.market_end_time:
+            return False
+
+        # Currently live - monitor
+        if self.market_start_time <= now < self.market_end_time:
+            return True
+
+        # Check if next upcoming (within 15 minutes of start)
+        time_until_start = (self.market_start_time - now).total_seconds()
+        if 0 < time_until_start <= 900:  # 15 minutes = 900 seconds
+            return True
+
+        # Future market (more than 15 min away) - don't monitor
+        return False
 
     def update_pnl(self, realized: float, unrealized: float) -> None:
         """Update P&L and recalculate drawdown."""
@@ -160,6 +198,24 @@ class RiskManager:
             self._market_states[token_id] = MarketRiskState(token_id=token_id)
         return self._market_states[token_id]
 
+    def set_market_time_window(
+        self,
+        token_id: str,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime]
+    ) -> None:
+        """
+        Set the time window for a market (for smart stale detection).
+
+        Args:
+            token_id: Token ID
+            start_time: When the market goes live
+            end_time: When the market resolves
+        """
+        market_state = self.get_market_state(token_id)
+        market_state.market_start_time = start_time
+        market_state.market_end_time = end_time
+
     # --- P&L Tracking ---
 
     def update_market_pnl(
@@ -265,6 +321,9 @@ class RiskManager:
         """
         Check for stale market feeds.
 
+        Only checks markets that are currently live or coming up next.
+        Ignores resolved markets and far-future markets.
+
         Returns:
             List of token IDs with stale feeds
         """
@@ -273,6 +332,14 @@ class RiskManager:
         stale_tokens = []
 
         for token_id, market_state in self._market_states.items():
+            # Skip markets that shouldn't be monitored (resolved or far future)
+            if not market_state.should_monitor_staleness(now):
+                # Clear stale flag if market is no longer being monitored
+                if market_state.is_stale:
+                    market_state.is_stale = False
+                    self._stale_markets.discard(token_id)
+                continue
+
             if market_state.last_update_time is None:
                 # Never received an update
                 continue
@@ -282,9 +349,15 @@ class RiskManager:
                 if not market_state.is_stale:
                     market_state.is_stale = True
                     self._stale_markets.add(token_id)
+                    # Log with market time info for context
+                    time_context = ""
+                    if market_state.market_start_time and market_state.market_end_time:
+                        start_str = market_state.market_start_time.strftime("%H:%M")
+                        end_str = market_state.market_end_time.strftime("%H:%M")
+                        time_context = f" (market: {start_str}-{end_str} UTC)"
                     logger.warning(
-                        f"Market {token_id} feed stale: "
-                        f"no update for {age_seconds:.1f}s (threshold: {threshold_seconds}s)"
+                        f"Market {token_id[:20]}... feed stale: "
+                        f"no update for {age_seconds:.1f}s{time_context}"
                     )
                 stale_tokens.append(token_id)
 

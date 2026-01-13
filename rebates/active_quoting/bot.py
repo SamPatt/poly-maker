@@ -238,6 +238,7 @@ class ActiveQuotingBot:
         self,
         token_ids: List[str],
         market_names: Optional[Dict[str, str]] = None,
+        market_times: Optional[Dict[str, tuple[datetime, datetime]]] = None,
     ) -> None:
         """
         Start the bot for the given token IDs.
@@ -245,6 +246,7 @@ class ActiveQuotingBot:
         Args:
             token_ids: List of token IDs to quote on
             market_names: Optional mapping of token_id -> human-readable name
+            market_times: Optional mapping of token_id -> (start_time, end_time) in UTC
         """
         if self._running:
             logger.warning("Bot is already running")
@@ -301,6 +303,11 @@ class ActiveQuotingBot:
                 momentum=MomentumState(token_id=token_id),
                 position=position,
             )
+
+            # Register market time windows for smart stale detection
+            if market_times and token_id in market_times:
+                start_time, end_time = market_times[token_id]
+                self.risk_manager.set_market_time_window(token_id, start_time, end_time)
 
         try:
             # Start session in database (Phase 6)
@@ -986,17 +993,22 @@ def discover_markets(assets: List[str]) -> List[Dict[str, Any]]:
     return unique_markets
 
 
-def get_token_ids_from_markets(markets: List[Dict[str, Any]]) -> tuple[List[str], Dict[str, str]]:
+def get_token_ids_from_markets(
+    markets: List[Dict[str, Any]]
+) -> tuple[List[str], Dict[str, str], Dict[str, tuple[datetime, datetime]]]:
     """
-    Extract token IDs and market names from market data.
+    Extract token IDs, market names, and time windows from market data.
 
     Returns:
-        Tuple of (token_ids, market_names dict)
+        Tuple of (token_ids, market_names dict, market_times dict)
+        market_times maps token_id -> (start_time, end_time) in UTC
     """
     import json
+    from datetime import datetime, timedelta
 
     token_ids = []
     market_names = {}
+    market_times = {}  # token_id -> (start_time, end_time)
 
     for market in markets:
         # Get tokens from clobTokenIds (may be JSON string or list)
@@ -1013,12 +1025,29 @@ def get_token_ids_from_markets(markets: List[Dict[str, Any]]) -> tuple[List[str]
         if not isinstance(clob_tokens, list):
             continue
 
+        # Parse end date from market data (ISO format)
+        end_time = None
+        start_time = None
+        end_date_str = market.get("endDate")
+        if end_date_str:
+            try:
+                # Parse ISO format: 2026-01-13T06:15:00Z
+                end_time = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+                # Remove timezone info for comparison with UTC
+                end_time = end_time.replace(tzinfo=None)
+                # Start time is 15 minutes before end for 15-min markets
+                start_time = end_time - timedelta(minutes=15)
+            except (ValueError, AttributeError):
+                pass
+
         for token_id in clob_tokens:
             if token_id and isinstance(token_id, str):
                 token_ids.append(token_id)
                 market_names[token_id] = question
+                if start_time and end_time:
+                    market_times[token_id] = (start_time, end_time)
 
-    return token_ids, market_names
+    return token_ids, market_names, market_times
 
 
 async def run_bot(
@@ -1050,6 +1079,7 @@ async def run_bot(
         return
 
     market_names = {}
+    market_times = {}
 
     # Auto-discover markets if no tokens provided
     if not token_ids:
@@ -1060,7 +1090,7 @@ async def run_bot(
             logger.error("No upcoming markets found. Exiting.")
             return
 
-        token_ids, market_names = get_token_ids_from_markets(markets)
+        token_ids, market_names, market_times = get_token_ids_from_markets(markets)
 
         if not token_ids:
             logger.error("No token IDs found in discovered markets. Exiting.")
@@ -1080,7 +1110,7 @@ async def run_bot(
     )
 
     try:
-        await bot.start(token_ids, market_names=market_names)
+        await bot.start(token_ids, market_names=market_names, market_times=market_times)
 
         # Main loop - periodically check for new markets
         check_interval = 60  # Check for new markets every 60 seconds
@@ -1090,7 +1120,7 @@ async def run_bot(
 
             # Discover new markets
             new_markets = discover_markets(config.assets)
-            new_token_ids, new_names = get_token_ids_from_markets(new_markets)
+            new_token_ids, new_names, new_times = get_token_ids_from_markets(new_markets)
 
             # Find tokens we're not already tracking
             current_tokens = bot._active_tokens
@@ -1100,6 +1130,8 @@ async def run_bot(
                     added.append(tid)
                     if tid in new_names:
                         market_names[tid] = new_names[tid]
+                    if tid in new_times:
+                        market_times[tid] = new_times[tid]
 
             if added:
                 logger.info(f"Discovered {len(added)} new tokens, adding to bot")
