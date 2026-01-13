@@ -278,7 +278,10 @@ class OrderManager:
             )
 
         except Exception as e:
-            logger.error(f"Error placing order: {e}")
+            logger.error(
+                f"Error placing {side.value} order: {e} "
+                f"(token={token_id[:20]}... price={price:.4f} size={size:.2f})"
+            )
             return OrderResult(
                 success=False,
                 error_msg=str(e),
