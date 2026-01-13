@@ -40,6 +40,7 @@ class UserChannelManager:
         api_key: str,
         api_secret: str,
         api_passphrase: str,
+        wallet_address: Optional[str] = None,
         on_fill: Optional[Callable[[Fill], Awaitable[None]]] = None,
         on_order_update: Optional[Callable[[OrderState], Awaitable[None]]] = None,
         on_disconnect: Optional[Callable[[], Awaitable[None]]] = None,
@@ -52,6 +53,7 @@ class UserChannelManager:
             api_key: Polymarket API key
             api_secret: Polymarket API secret
             api_passphrase: Polymarket API passphrase
+            wallet_address: Our wallet address (to verify we're the maker in fills)
             on_fill: Callback when a fill occurs
             on_order_update: Callback when order status changes
             on_disconnect: Callback when WebSocket disconnects
@@ -60,6 +62,7 @@ class UserChannelManager:
         self._api_key = api_key
         self._api_secret = api_secret
         self._api_passphrase = api_passphrase
+        self._wallet_address = wallet_address.lower() if wallet_address else None
 
         self.on_fill = on_fill
         self.on_order_update = on_order_update
@@ -366,17 +369,33 @@ class UserChannelManager:
         # Try to find order_id from maker_orders if we're the maker
         order_id = data.get("order_id") or data.get("maker_order_id")
         maker_orders = data.get("maker_orders", [])
-        if not order_id and maker_orders:
-            # Find our order in maker_orders
+        is_our_fill = False
+
+        if maker_orders:
+            # Find our order in maker_orders by checking maker_address
             for maker_order in maker_orders:
-                # Check if this is our order by looking at maker_address
-                # Note: we'd need wallet address to verify, so just take first for now
-                if "order_id" in maker_order:
-                    order_id = maker_order["order_id"]
+                maker_address = maker_order.get("maker_address", "").lower()
+
+                # Check if this is our order
+                if self._wallet_address and maker_address == self._wallet_address:
+                    is_our_fill = True
+                    if "order_id" in maker_order:
+                        order_id = maker_order["order_id"]
                     # Get matched amount for this specific maker order
                     size = float(maker_order.get("matched_amount", size))
                     price = float(maker_order.get("price", price))
+                    logger.debug(f"Found our maker order: {order_id} size={size}")
                     break
+
+            # If we have wallet address configured and this isn't our fill, skip it
+            if self._wallet_address and not is_our_fill:
+                logger.debug(f"Skipping fill - not our maker order (trade_id={trade_id})")
+                return
+        else:
+            # No maker_orders in message - this might be a different format
+            # Check if it's an order we're tracking
+            if order_id and order_id in self._orders:
+                is_our_fill = True
 
         # Use trade_id as fallback for order_id if still not found
         if not order_id:

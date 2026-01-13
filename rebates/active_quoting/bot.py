@@ -171,11 +171,17 @@ class ActiveQuotingBot:
             on_disconnect=self._on_market_ws_disconnect,
         )
 
+        # Get wallet address from poly_client for fill verification
+        wallet_address = None
+        if self._poly_client:
+            wallet_address = getattr(self._poly_client, 'browser_wallet', None)
+
         self.user_channel_manager = UserChannelManager(
             config=self.config,
             api_key=self._api_key,
             api_secret=self._api_secret,
             api_passphrase=self._api_passphrase,
+            wallet_address=wallet_address,
             on_fill=self._on_fill,
             on_order_update=self._on_order_update,
             on_disconnect=self._on_user_ws_disconnect,
