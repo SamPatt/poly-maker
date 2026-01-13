@@ -229,17 +229,21 @@ class OrderbookManager:
 
     async def _handle_price_change_event(self, data: Dict) -> None:
         """Handle an incremental price change event."""
-        token_id = data.get("asset_id")
-        if not token_id or token_id not in self._subscribed_tokens:
-            return
+        # price_change events have asset_id inside price_changes array, not at top level
+        price_changes = data.get("price_changes", [])
 
-        orderbook = self._orderbooks.get(token_id)
-        if not orderbook:
-            return
+        # Track which tokens were updated so we can trigger callbacks
+        updated_tokens = set()
 
-        # Process changes - each change has price, size, side
-        changes = data.get("changes", [])
-        for change in changes:
+        for change in price_changes:
+            token_id = change.get("asset_id")
+            if not token_id or token_id not in self._subscribed_tokens:
+                continue
+
+            orderbook = self._orderbooks.get(token_id)
+            if not orderbook:
+                continue
+
             price = float(change.get("price", 0))
             size = float(change.get("size", 0))
             side = change.get("side", "").upper()
@@ -249,10 +253,15 @@ class OrderbookManager:
             elif side == "SELL":
                 self._update_level(orderbook.asks, price, size, descending=False)
 
-        orderbook.last_update_time = datetime.utcnow()
+            orderbook.last_update_time = datetime.utcnow()
+            updated_tokens.add(token_id)
 
+        # Trigger callbacks for all updated tokens
         if self.on_book_update:
-            await self.on_book_update(token_id, orderbook)
+            for token_id in updated_tokens:
+                orderbook = self._orderbooks.get(token_id)
+                if orderbook:
+                    await self.on_book_update(token_id, orderbook)
 
     async def _handle_best_bid_ask_event(self, data: Dict) -> None:
         """
