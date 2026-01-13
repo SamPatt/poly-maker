@@ -148,6 +148,7 @@ class CryptoMarketFinder:
         - Markets not accepting orders
         """
         now = datetime.now(timezone.utc)
+        slug = market.get("slug", "unknown")
 
         # Check 1: Parse end time to determine if market has resolved
         end_date_str = market.get("endDate")
@@ -157,17 +158,19 @@ class CryptoMarketFinder:
                     end_date_str = end_date_str[:-1] + "+00:00"
                 end_time = datetime.fromisoformat(end_date_str)
                 if now >= end_time:
-                    # Market has ended
+                    print(f"FILTERED {slug}: Market ended at {end_time}")
                     return False
             except Exception:
                 pass
 
         # Check 2: Market must be accepting orders
         if not market.get("acceptingOrders", False):
+            print(f"FILTERED {slug}: Not accepting orders")
             return False
 
         # Check 3: Market must not be closed
         if market.get("closed", False):
+            print(f"FILTERED {slug}: Market closed")
             return False
 
         return True

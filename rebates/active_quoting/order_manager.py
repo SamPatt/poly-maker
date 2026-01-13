@@ -248,9 +248,14 @@ class OrderManager:
             )
 
             if response.get("success") is False:
+                error_msg = response.get("errorMsg", "Unknown error")
+                logger.warning(
+                    f"Order rejected: {side.value} {size:.2f} @ {price:.4f} "
+                    f"for {token_id[:20]}... - {error_msg}"
+                )
                 return OrderResult(
                     success=False,
-                    error_msg=response.get("errorMsg", "Unknown error"),
+                    error_msg=error_msg,
                 )
 
             order_id = response.get("orderID") or response.get("id")
