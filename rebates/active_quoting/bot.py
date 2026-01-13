@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+import time
 import requests
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Set, Any
@@ -118,6 +119,10 @@ class ActiveQuotingBot:
         self._market_ws_task: Optional[asyncio.Task] = None
         self._user_ws_task: Optional[asyncio.Task] = None
 
+        # Position sync tracking (fallback for WebSocket fill issues)
+        self._last_position_sync: float = 0.0
+        self._position_sync_interval: float = 5.0  # Sync positions every 5 seconds
+
     def _init_components(self) -> None:
         """Initialize all sub-components."""
         # Persistence layer (Phase 6)
@@ -207,22 +212,45 @@ class ActiveQuotingBot:
             response.raise_for_status()
             positions_data = response.json()
 
-            synced_count = 0
+            # Build a dict of token_id -> (size, avg_price) from API
+            api_positions = {}
             for pos in positions_data:
                 token_id = str(pos.get('asset', ''))
                 size = float(pos.get('size', 0))
                 avg_price = float(pos.get('avgPrice', 0.5))
+                if token_id in token_ids:
+                    api_positions[token_id] = (size, avg_price)
 
-                # Only sync positions for tokens we're trading
-                if token_id in token_ids and size > 0:
+            synced_count = 0
+            for token_id in token_ids:
+                old_position = self.inventory_manager.get_position(token_id)
+                old_size = old_position.size
+
+                # Get position from API, default to 0 if not found
+                if token_id in api_positions:
+                    size, avg_price = api_positions[token_id]
+                else:
+                    size = 0.0
+                    avg_price = 0.5
+
+                # Only update if position changed
+                if abs(size - old_size) >= 0.01:
                     self.inventory_manager.set_position(token_id, size, avg_price)
-                    logger.info(
-                        f"Synced position from API for {token_id[:20]}...: "
-                        f"{size:.2f} shares @ {avg_price:.4f}"
-                    )
+
+                    # Clear pending buys since API position already reflects fills
+                    # This prevents double-counting filled orders as both position AND pending
+                    self.inventory_manager.clear_pending_buys(token_id)
+
+                    # Log significant changes
+                    if abs(size - old_size) >= 1.0:
+                        logger.info(
+                            f"Position synced from API for {token_id[:20]}...: "
+                            f"{old_size:.0f} -> {size:.0f} shares"
+                        )
                     synced_count += 1
 
-            logger.info(f"Synced {synced_count} positions from Polymarket API")
+            if synced_count > 0:
+                logger.debug(f"Synced {synced_count} position updates from Polymarket API")
             return synced_count
 
         except requests.RequestException as e:
@@ -504,6 +532,13 @@ class ActiveQuotingBot:
 
         while self._running:
             try:
+                # Periodic position sync from REST API (fallback for WebSocket fill issues)
+                # This ensures we have accurate position data even if fills aren't received
+                now = time.time()
+                if now - self._last_position_sync >= self._position_sync_interval:
+                    self._sync_positions_from_api(self._active_tokens)
+                    self._last_position_sync = now
+
                 # Check stale feeds
                 stale = self.risk_manager.check_stale_feeds()
                 if stale:

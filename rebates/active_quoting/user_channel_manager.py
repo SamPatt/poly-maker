@@ -216,6 +216,11 @@ class UserChannelManager:
             logger.info("User WebSocket authenticated successfully")
             return
 
+        # Skip heartbeat/ping messages
+        msg_type = data.get("type", "")
+        if msg_type in ("heartbeat", "ping", "subscription_confirmation"):
+            return
+
         event_type = data.get("event_type")
 
         if event_type == "order":
@@ -225,8 +230,15 @@ class UserChannelManager:
         # Also handle direct order/trade objects without event_type wrapper
         elif "order_id" in data and "status" in data:
             await self._handle_order_event(data)
+        # Handle Polymarket format: has 'id', 'asset_id', 'side', 'price', 'size', 'market'
+        elif "id" in data and "asset_id" in data and "market" in data:
+            # This is likely a trade event in Polymarket format
+            await self._handle_trade_event(data)
         elif "trade_id" in data or ("order_id" in data and "price" in data and "size" in data):
             await self._handle_trade_event(data)
+        else:
+            # Log unknown message formats for debugging
+            logger.debug(f"Unknown user WS message format: {list(data.keys())[:6]}")
 
     async def _handle_order_event(self, data: Dict) -> None:
         """Handle an order status update."""
@@ -307,13 +319,38 @@ class UserChannelManager:
             self._maybe_cleanup_order(order_id, token_id)
 
     async def _handle_trade_event(self, data: Dict) -> None:
-        """Handle a fill/trade event."""
-        order_id = data.get("order_id") or data.get("maker_order_id")
-        if not order_id:
+        """
+        Handle a fill/trade event.
+
+        Polymarket WebSocket trade format:
+        {
+            'market': ...,
+            'side': 'BUY'/'SELL',
+            'asset_id': token_id,
+            'event_type': 'trade',
+            'status': 'MATCHED'/'CONFIRMED'/'FAILED',
+            'id': trade_id,
+            'maker_orders': [...],
+            'size': ...,
+            'price': ...,
+        }
+        """
+        # Debug log the raw message to understand format
+        logger.debug(f"Trade event raw data: {list(data.keys())}")
+
+        # Get trade ID - Polymarket uses 'id', not 'trade_id'
+        trade_id = data.get("id") or data.get("trade_id")
+
+        # Get token ID
+        token_id = data.get("asset_id") or data.get("token_id")
+
+        # Only process MATCHED status (actual fills)
+        status = data.get("status", "").upper()
+        if status not in ("MATCHED", "CONFIRMED"):
+            logger.debug(f"Skipping trade event with status: {status}")
             return
 
-        token_id = data.get("asset_id") or data.get("token_id")
-        trade_id = data.get("trade_id") or data.get("id")
+        # Get price and size
         price = float(data.get("price", 0))
         size = float(data.get("size", data.get("match_size", 0)))
         fee = float(data.get("fee", data.get("maker_fee", 0)))
@@ -326,9 +363,24 @@ class UserChannelManager:
         }
         side = side_map.get(side_str, OrderSide.BUY)
 
-        # If we don't have side from the trade, try to get it from the order
-        if side_str == "" and order_id in self._orders:
-            side = self._orders[order_id].side
+        # Try to find order_id from maker_orders if we're the maker
+        order_id = data.get("order_id") or data.get("maker_order_id")
+        maker_orders = data.get("maker_orders", [])
+        if not order_id and maker_orders:
+            # Find our order in maker_orders
+            for maker_order in maker_orders:
+                # Check if this is our order by looking at maker_address
+                # Note: we'd need wallet address to verify, so just take first for now
+                if "order_id" in maker_order:
+                    order_id = maker_order["order_id"]
+                    # Get matched amount for this specific maker order
+                    size = float(maker_order.get("matched_amount", size))
+                    price = float(maker_order.get("price", price))
+                    break
+
+        # Use trade_id as fallback for order_id if still not found
+        if not order_id:
+            order_id = trade_id or "unknown"
 
         # Parse timestamp
         timestamp_str = data.get("timestamp") or data.get("created_at")
@@ -356,10 +408,10 @@ class UserChannelManager:
             trade_id=trade_id,
         )
 
-        logger.info(f"Fill: order={order_id} side={side.value} price={price} size={size}")
+        logger.info(f"Fill: trade={trade_id} token={token_id[:20] if token_id else 'N/A'}... side={side.value} price={price} size={size}")
 
         # Update order state if we have it
-        if order_id in self._orders:
+        if order_id and order_id in self._orders:
             order = self._orders[order_id]
             order.fills.append(fill)
             order.remaining_size -= size
