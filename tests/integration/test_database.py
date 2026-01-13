@@ -35,7 +35,7 @@ def db_available():
 
     # Try to import and verify connection works
     try:
-        from db.supabase_client import get_db_connection
+        from db.pg_client import get_db_connection
         with get_db_connection() as conn:
             # Connection successful
             pass
@@ -49,7 +49,7 @@ class TestDatabaseIntegration:
 
     def test_connection_works(self, db_available):
         """Verify database connection is established."""
-        from db.supabase_client import get_db_connection
+        from db.pg_client import get_db_connection
 
         with get_db_connection() as conn:
             assert conn is not None
@@ -58,7 +58,7 @@ class TestDatabaseIntegration:
 
     def test_can_query_markets(self, db_available):
         """Test querying all_markets table."""
-        from db.supabase_client import get_db_cursor
+        from db.pg_client import get_db_cursor
 
         with get_db_cursor(commit=False) as cursor:
             cursor.execute("SELECT COUNT(*) as count FROM all_markets")
@@ -69,7 +69,7 @@ class TestDatabaseIntegration:
 
     def test_can_query_selected_markets(self, db_available):
         """Test querying selected_markets table."""
-        from db.supabase_client import get_db_cursor
+        from db.pg_client import get_db_cursor
 
         with get_db_cursor(commit=False) as cursor:
             cursor.execute("SELECT COUNT(*) as count FROM selected_markets")
@@ -80,7 +80,7 @@ class TestDatabaseIntegration:
 
     def test_can_query_hyperparameters(self, db_available):
         """Test querying hyperparameters table."""
-        from db.supabase_client import get_db_cursor
+        from db.pg_client import get_db_cursor
 
         with get_db_cursor(commit=False) as cursor:
             cursor.execute("SELECT * FROM hyperparameters LIMIT 5")
@@ -95,7 +95,7 @@ class TestDatabaseCursor:
 
     def test_cursor_context_manager(self, db_available):
         """Test get_db_cursor context manager."""
-        from db.supabase_client import get_db_cursor
+        from db.pg_client import get_db_cursor
 
         with get_db_cursor(commit=False) as cursor:
             cursor.execute("SELECT 1 as value")
@@ -105,7 +105,7 @@ class TestDatabaseCursor:
 
     def test_cursor_returns_dict_rows(self, db_available):
         """Verify cursor returns RealDictCursor rows."""
-        from db.supabase_client import get_db_cursor
+        from db.pg_client import get_db_cursor
 
         with get_db_cursor(commit=False) as cursor:
             cursor.execute("SELECT 1 as col_a, 2 as col_b")
@@ -121,7 +121,7 @@ class TestDatabaseHelperFunctions:
 
     def test_get_all_markets(self, db_available):
         """Test get_all_markets function."""
-        from db.supabase_client import get_all_markets
+        from db.pg_client import get_all_markets
 
         df = get_all_markets()
 
@@ -131,7 +131,7 @@ class TestDatabaseHelperFunctions:
 
     def test_get_hyperparameters(self, db_available):
         """Test get_hyperparameters function."""
-        from db.supabase_client import get_hyperparameters
+        from db.pg_client import get_hyperparameters
 
         params = get_hyperparameters()
 
@@ -140,7 +140,7 @@ class TestDatabaseHelperFunctions:
 
     def test_get_selected_markets(self, db_available):
         """Test get_selected_markets function."""
-        from db.supabase_client import get_selected_markets
+        from db.pg_client import get_selected_markets
 
         df = get_selected_markets()
 
@@ -149,7 +149,7 @@ class TestDatabaseHelperFunctions:
 
     def test_get_recent_trades(self, db_available):
         """Test get_recent_trades function."""
-        from db.supabase_client import get_recent_trades
+        from db.pg_client import get_recent_trades
 
         df = get_recent_trades(limit=10)
 

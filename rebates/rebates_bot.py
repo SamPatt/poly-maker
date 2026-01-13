@@ -47,7 +47,7 @@ from alerts.telegram import (
     send_rebates_redemption_alert,
     send_rebates_fill_alert,
 )
-from db.supabase_client import (
+from db.pg_client import (
     save_rebates_market,
     update_rebates_market_status,
     update_rebates_market_fills,

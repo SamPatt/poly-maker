@@ -38,7 +38,7 @@ if static_dir.exists():
 def get_db_status() -> dict:
     """Check database connection status."""
     try:
-        from db.supabase_client import get_db_cursor
+        from db.pg_client import get_db_cursor
         with get_db_cursor(commit=False) as cursor:
             cursor.execute("SELECT 1")
         return {"connected": True, "error": None}
@@ -110,7 +110,7 @@ async def dashboard(request: Request):
 
     if db_status["connected"]:
         try:
-            from db.supabase_client import get_recent_trades, get_daily_pnl, get_db_cursor
+            from db.pg_client import get_recent_trades, get_daily_pnl, get_db_cursor
 
             # Get recent trades
             trades_df = get_recent_trades(limit=10)
@@ -193,7 +193,7 @@ async def markets_list(
 
     if db_status["connected"]:
         try:
-            from db.supabase_client import get_db_cursor
+            from db.pg_client import get_db_cursor
 
             # Get selected markets with event settings
             with get_db_cursor(commit=False) as cursor:
@@ -286,7 +286,7 @@ async def toggle_market(
 ):
     """Enable or disable a market for trading."""
     try:
-        from db.supabase_client import add_selected_market, remove_selected_market, update_market_event_settings
+        from db.pg_client import add_selected_market, remove_selected_market, update_market_event_settings
 
         if action == "enable":
             add_selected_market(question)
@@ -329,7 +329,7 @@ async def update_event_settings(
 ):
     """Update event date and exit settings for a market."""
     try:
-        from db.supabase_client import update_market_event_settings
+        from db.pg_client import update_market_event_settings
 
         # Convert checkbox value to boolean
         exit_enabled = exit_before_event == "on" or exit_before_event == "true"
@@ -361,7 +361,7 @@ async def parameters_list(request: Request):
 
     if db_status["connected"]:
         try:
-            from db.supabase_client import get_hyperparameters
+            from db.pg_client import get_hyperparameters
             params_by_type = get_hyperparameters()
         except Exception as e:
             print(f"Error fetching parameters: {e}")
@@ -383,7 +383,7 @@ async def update_parameter(
 ):
     """Update a hyperparameter value."""
     try:
-        from db.supabase_client import update_hyperparameter
+        from db.pg_client import update_hyperparameter
         update_hyperparameter(param_type, param_name, param_value)
         return RedirectResponse(url="/parameters", status_code=303)
     except Exception as e:
@@ -398,7 +398,7 @@ async def add_parameter(
 ):
     """Add a new hyperparameter."""
     try:
-        from db.supabase_client import update_hyperparameter
+        from db.pg_client import update_hyperparameter
         update_hyperparameter(param_type, param_name, param_value)
         return RedirectResponse(url="/parameters", status_code=303)
     except Exception as e:
@@ -418,7 +418,7 @@ async def trades_list(request: Request, limit: int = 50):
 
     if db_status["connected"]:
         try:
-            from db.supabase_client import get_recent_trades, get_daily_pnl
+            from db.pg_client import get_recent_trades, get_daily_pnl
 
             trades_df = get_recent_trades(limit=limit)
             if not trades_df.empty:
@@ -536,7 +536,7 @@ async def stop_bot():
 async def api_markets(limit: int = 100):
     """Get markets as JSON."""
     try:
-        from db.supabase_client import get_all_markets
+        from db.pg_client import get_all_markets
         df = get_all_markets()
         if not df.empty:
             return df.head(limit).to_dict(orient="records")
@@ -549,7 +549,7 @@ async def api_markets(limit: int = 100):
 async def api_selected_markets():
     """Get selected markets as JSON."""
     try:
-        from db.supabase_client import get_selected_markets
+        from db.pg_client import get_selected_markets
         df = get_selected_markets()
         if not df.empty:
             return df.to_dict(orient="records")
@@ -562,7 +562,7 @@ async def api_selected_markets():
 async def api_parameters():
     """Get hyperparameters as JSON."""
     try:
-        from db.supabase_client import get_hyperparameters
+        from db.pg_client import get_hyperparameters
         return get_hyperparameters()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

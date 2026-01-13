@@ -36,7 +36,7 @@ def get_sheet_df(read_only=None):
 def _get_sheet_df_postgres():
     """Get market data from PostgreSQL database."""
     try:
-        from db.supabase_client import get_sheet_df as postgres_get_sheet_df
+        from db.pg_client import get_sheet_df as postgres_get_sheet_df
         return postgres_get_sheet_df()
     except ImportError as e:
         print(f"PostgreSQL module not available: {e}")

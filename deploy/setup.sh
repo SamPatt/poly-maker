@@ -155,7 +155,7 @@ fi
 echo ""
 echo "5. Initialize the database (trading VPS only):"
 if [ "$SERVICE_TYPE" = "trading" ]; then
-    echo "   uv run python -c 'from db.supabase_client import init_database; init_database()'"
+    echo "   uv run python -c 'from db.pg_client import init_database; init_database()'"
 fi
 echo ""
 echo "6. Install and enable the service:"

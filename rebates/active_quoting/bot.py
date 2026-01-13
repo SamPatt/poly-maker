@@ -1,0 +1,1083 @@
+"""
+ActiveQuotingBot - Main orchestration for active two-sided quoting strategy.
+
+Implements:
+- Main ActiveQuotingBot class that wires all components together
+- Market discovery using market_finder.py
+- Startup sequence: connect WebSockets -> fetch initial state -> start quoting
+- Main loop: process orderbook updates -> calculate quotes -> place/update orders
+- Graceful shutdown with order cancellation
+- Integration with RiskManager for circuit breaker
+- Multi-market support with batch order management
+- Telegram alerts for key events (Phase 6)
+- Database persistence for state recovery (Phase 6)
+"""
+import asyncio
+import logging
+import os
+import signal
+import sys
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional, Set, Any
+
+from .config import ActiveQuotingConfig
+from .models import (
+    OrderbookState,
+    Quote,
+    Fill,
+    MarketState,
+    Position,
+    OrderSide,
+    MomentumState,
+)
+from .orderbook_manager import OrderbookManager
+from .user_channel_manager import UserChannelManager
+from .quote_engine import QuoteEngine, QuoteAction
+from .order_manager import OrderManager
+from .inventory_manager import InventoryManager
+from .momentum_detector import MomentumDetector
+from .risk_manager import RiskManager, CircuitBreakerState
+from .fill_analytics import FillAnalytics
+from .persistence import ActiveQuotingPersistence, PersistenceConfig
+from .alerts import (
+    TELEGRAM_ENABLED,
+    send_active_quoting_startup_alert,
+    send_active_quoting_shutdown_alert,
+    send_active_quoting_fill_alert,
+    send_active_quoting_circuit_breaker_alert,
+    send_active_quoting_daily_summary,
+    send_active_quoting_market_halt_alert,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class ActiveQuotingBot:
+    """
+    Main orchestration class for active two-sided quoting.
+
+    This bot:
+    1. Discovers and tracks 15-minute crypto markets
+    2. Maintains real-time orderbook state via WebSocket
+    3. Calculates optimal quotes with inventory skew
+    4. Places/updates orders with proper fee handling
+    5. Tracks fills and calculates markout metrics
+    6. Implements circuit breaker for risk management
+    """
+
+    def __init__(
+        self,
+        config: ActiveQuotingConfig,
+        api_key: str,
+        api_secret: str,
+        api_passphrase: str,
+        poly_client: Any = None,
+        enable_persistence: bool = True,
+        enable_alerts: bool = True,
+    ):
+        """
+        Initialize the ActiveQuotingBot.
+
+        Args:
+            config: Active quoting configuration
+            api_key: Polymarket API key
+            api_secret: Polymarket API secret
+            api_passphrase: Polymarket API passphrase
+            poly_client: Optional PolymarketClient for order placement
+            enable_persistence: Enable database persistence (default: True)
+            enable_alerts: Enable Telegram alerts (default: True)
+        """
+        self.config = config
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._api_passphrase = api_passphrase
+        self._poly_client = poly_client
+
+        # Feature flags
+        self._enable_alerts = enable_alerts and TELEGRAM_ENABLED
+        self._enable_persistence = enable_persistence
+
+        # Initialize components
+        self._init_components()
+
+        # State
+        self._running: bool = False
+        self._markets: Dict[str, MarketState] = {}  # token_id -> MarketState
+        self._active_tokens: Set[str] = set()
+        self._last_quote_refresh: Dict[str, datetime] = {}
+        self._global_refresh_count: int = 0
+        self._global_refresh_window_start: float = 0.0
+        self._market_names: Dict[str, str] = {}  # token_id -> market name for alerts
+        self._start_time: Optional[datetime] = None
+
+        # Tasks
+        self._main_task: Optional[asyncio.Task] = None
+        self._markout_task: Optional[asyncio.Task] = None
+        self._daily_summary_task: Optional[asyncio.Task] = None
+        self._market_ws_task: Optional[asyncio.Task] = None
+        self._user_ws_task: Optional[asyncio.Task] = None
+
+    def _init_components(self) -> None:
+        """Initialize all sub-components."""
+        # Persistence layer (Phase 6)
+        self.persistence = ActiveQuotingPersistence(
+            PersistenceConfig(enabled=self._enable_persistence)
+        )
+
+        # Core managers
+        self.inventory_manager = InventoryManager(self.config)
+
+        self.quote_engine = QuoteEngine(
+            config=self.config,
+            inventory_manager=self.inventory_manager,
+        )
+
+        self.momentum_detector = MomentumDetector(
+            config=self.config,
+            on_momentum=self._on_momentum_detected,
+        )
+
+        self.risk_manager = RiskManager(
+            config=self.config,
+            on_state_change=self._on_circuit_breaker_state_change,
+            on_market_halt=self._on_market_halt,
+            on_kill_switch=self._on_kill_switch,
+        )
+
+        self.order_manager = OrderManager(
+            config=self.config,
+            api_key=self._api_key,
+            api_secret=self._api_secret,
+            api_passphrase=self._api_passphrase,
+            poly_client=self._poly_client,
+        )
+
+        self.fill_analytics = FillAnalytics(
+            on_markout_captured=self._on_markout_captured,
+        )
+
+        # WebSocket managers
+        self.orderbook_manager = OrderbookManager(
+            config=self.config,
+            on_book_update=self._on_book_update,
+            on_trade=self._on_trade,
+            on_tick_size_change=self._on_tick_size_change,
+            on_disconnect=self._on_market_ws_disconnect,
+        )
+
+        self.user_channel_manager = UserChannelManager(
+            config=self.config,
+            api_key=self._api_key,
+            api_secret=self._api_secret,
+            api_passphrase=self._api_passphrase,
+            on_fill=self._on_fill,
+            on_order_update=self._on_order_update,
+            on_disconnect=self._on_user_ws_disconnect,
+        )
+
+    # --- Startup/Shutdown ---
+
+    async def start(
+        self,
+        token_ids: List[str],
+        market_names: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """
+        Start the bot for the given token IDs.
+
+        Args:
+            token_ids: List of token IDs to quote on
+            market_names: Optional mapping of token_id -> human-readable name
+        """
+        if self._running:
+            logger.warning("Bot is already running")
+            return
+
+        if not token_ids:
+            logger.error("No token IDs provided")
+            return
+
+        logger.info(f"Starting ActiveQuotingBot for {len(token_ids)} tokens")
+        self._running = True
+        self._active_tokens = set(token_ids)
+        self._start_time = datetime.now(timezone.utc)
+
+        # Store market names for alerts
+        if market_names:
+            self._market_names = market_names.copy()
+
+        # Load positions from database (Phase 6)
+        if self.persistence.is_enabled:
+            saved_positions = self.persistence.load_positions()
+            for token_id, position in saved_positions.items():
+                if token_id in self._active_tokens:
+                    self.inventory_manager.set_position(token_id, position)
+                    logger.info(
+                        f"Restored position for {token_id[:20]}...: "
+                        f"{position.size:.2f} @ {position.avg_entry_price:.4f}"
+                    )
+
+            # Recover pending markout captures
+            pending = self.persistence.load_pending_markouts()
+            if pending:
+                logger.info(f"Recovered {len(pending)} pending markout captures")
+                # Note: actual recovery would require re-scheduling - simplified here
+
+        # Initialize market states
+        for token_id in token_ids:
+            # Use restored position if available
+            position = self.inventory_manager.get_position(token_id)
+            self._markets[token_id] = MarketState(
+                token_id=token_id,
+                reverse_token_id="",  # Will be set if available
+                asset="",
+                orderbook=OrderbookState(token_id=token_id),
+                momentum=MomentumState(token_id=token_id),
+                position=position,
+            )
+
+        try:
+            # Start session in database (Phase 6)
+            config_snapshot = {
+                "order_size": self.config.order_size_usdc,
+                "max_position": self.config.max_position_per_market,
+                "dry_run": self.config.dry_run,
+            }
+            self.persistence.start_session(token_ids, config_snapshot)
+
+            # Start WebSocket connections
+            await self._connect_websockets(token_ids)
+
+            # Start main loop and markout processing
+            self._main_task = asyncio.create_task(self._main_loop())
+            self._markout_task = asyncio.create_task(self._markout_loop())
+            self._daily_summary_task = asyncio.create_task(self._daily_summary_loop())
+
+            logger.info("Bot started successfully")
+
+            # Send startup alert (Phase 6)
+            if self._enable_alerts:
+                send_active_quoting_startup_alert(
+                    market_count=len(token_ids),
+                    dry_run=self.config.dry_run,
+                    config_summary={
+                        "order_size": self.config.order_size_usdc,
+                        "max_position": self.config.max_position_per_market,
+                    },
+                )
+
+        except Exception as e:
+            logger.error(f"Error starting bot: {e}")
+            await self.stop()
+            raise
+
+    async def _connect_websockets(self, token_ids: List[str]) -> None:
+        """Connect to WebSocket channels."""
+        # Start both WebSocket connections concurrently
+        # These tasks run forever (they contain the message loops)
+        self._market_ws_task = asyncio.create_task(
+            self.orderbook_manager.connect(token_ids)
+        )
+        self._user_ws_task = asyncio.create_task(
+            self.user_channel_manager.connect()
+        )
+
+        # Wait briefly for connections to establish
+        # Use asyncio.wait() instead of wait_for() because wait_for CANCELS
+        # the tasks on timeout, which would close our WebSocket connections
+        done, pending = await asyncio.wait(
+            [self._market_ws_task, self._user_ws_task],
+            timeout=5.0,
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+
+        # Check if any failed immediately
+        for task in done:
+            try:
+                exc = task.exception()
+                if exc:
+                    logger.error(f"WebSocket task failed on startup: {exc}")
+            except asyncio.CancelledError:
+                pass
+
+        # Give connections a moment to fully establish
+        await asyncio.sleep(1.0)
+
+        # Log connection status
+        if self.orderbook_manager.is_connected():
+            logger.info("Market WebSocket connected and ready")
+        else:
+            logger.warning("Market WebSocket not yet reporting as connected")
+
+        if self.user_channel_manager.is_connected():
+            logger.info("User WebSocket connected and ready")
+        else:
+            logger.warning("User WebSocket not yet reporting as connected")
+
+    async def stop(self, reason: str = "Normal shutdown") -> None:
+        """
+        Stop the bot gracefully.
+
+        Args:
+            reason: Reason for shutdown (for logging/alerts)
+        """
+        if not self._running:
+            return
+
+        logger.info(f"Stopping ActiveQuotingBot... (reason: {reason})")
+        self._running = False
+
+        # Collect final stats for alerts and persistence
+        stats = self.fill_analytics.get_summary()
+
+        # Cancel all orders
+        try:
+            cancelled = await self.order_manager.cancel_all()
+            logger.info(f"Cancelled {cancelled} orders on shutdown")
+        except Exception as e:
+            logger.error(f"Error cancelling orders on shutdown: {e}")
+
+        # Cancel tasks
+        if self._main_task:
+            self._main_task.cancel()
+            try:
+                await self._main_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._markout_task:
+            self._markout_task.cancel()
+            try:
+                await self._markout_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._daily_summary_task:
+            self._daily_summary_task.cancel()
+            try:
+                await self._daily_summary_task
+            except asyncio.CancelledError:
+                pass
+
+        # Cancel WebSocket tasks (disconnect will close the connections)
+        for ws_task in [self._market_ws_task, self._user_ws_task]:
+            if ws_task and not ws_task.done():
+                ws_task.cancel()
+                try:
+                    await ws_task
+                except asyncio.CancelledError:
+                    pass
+
+        # Disconnect WebSockets
+        await self.orderbook_manager.disconnect()
+        await self.user_channel_manager.disconnect()
+
+        # Close HTTP session
+        await self.order_manager.close()
+
+        # Shutdown analytics
+        await self.fill_analytics.shutdown()
+
+        # End session in database (Phase 6)
+        status = "CRASHED" if "error" in reason.lower() else "STOPPED"
+        self.persistence.end_session(
+            status=status,
+            stats={
+                "total_fills": stats.get("total_fills", 0),
+                "total_volume": stats.get("total_volume", 0.0),
+                "total_notional": stats.get("total_notional", 0.0),
+                "net_fees": stats.get("net_fees", 0.0),
+                "realized_pnl": stats.get("realized_pnl", 0.0),
+            },
+        )
+
+        # Send shutdown alert (Phase 6)
+        if self._enable_alerts:
+            send_active_quoting_shutdown_alert(
+                reason=reason,
+                stats={
+                    "total_fills": stats.get("total_fills", 0),
+                    "net_fees": stats.get("net_fees", 0.0),
+                    "realized_pnl": stats.get("realized_pnl", 0.0),
+                },
+            )
+
+        logger.info("Bot stopped")
+
+    async def run(self, token_ids: List[str]) -> None:
+        """
+        Run the bot until stopped.
+
+        Args:
+            token_ids: List of token IDs to quote on
+        """
+        await self.start(token_ids)
+
+        # Set up signal handlers
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
+
+        # Wait until stopped
+        while self._running:
+            await asyncio.sleep(1)
+
+    # --- Main Loop ---
+
+    async def _main_loop(self) -> None:
+        """Main quoting loop."""
+        logger.info("Starting main loop")
+
+        while self._running:
+            try:
+                # Check stale feeds
+                stale = self.risk_manager.check_stale_feeds()
+                if stale:
+                    logger.warning(f"Stale feeds detected: {len(stale)} markets")
+
+                # Check circuit breaker state
+                if self.risk_manager.state == CircuitBreakerState.HALTED:
+                    await asyncio.sleep(1)
+                    continue
+
+                # Check if recovering
+                if self.risk_manager.state == CircuitBreakerState.RECOVERING:
+                    await self.risk_manager.check_recovery_complete()
+
+                # Process each market
+                for token_id in self._active_tokens:
+                    await self._process_market(token_id)
+
+                # Small delay to prevent tight loop
+                await asyncio.sleep(0.1)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+                self.risk_manager.record_error()
+                await asyncio.sleep(1)
+
+    async def _process_market(self, token_id: str) -> None:
+        """Process a single market - calculate and update quotes."""
+        # Check if we can place orders for this market
+        can_place, reason = self.risk_manager.can_place_orders_for_market(token_id)
+        if not can_place:
+            logger.debug(f"Cannot place orders for {token_id[:20]}...: {reason}")
+            return
+
+        # Get market state
+        market = self._markets.get(token_id)
+        if not market:
+            return
+
+        # Get orderbook
+        orderbook = self.orderbook_manager.get_orderbook(token_id)
+        if not orderbook or not orderbook.is_valid():
+            return
+
+        # Update market state with latest orderbook
+        market.orderbook = orderbook
+
+        # Get momentum state
+        momentum = self.momentum_detector.get_state(token_id)
+
+        # Check cooldown expiry
+        self.momentum_detector.check_cooldown_expired(token_id)
+
+        # Calculate quote
+        decision = self.quote_engine.calculate_quote_with_manager(
+            orderbook=orderbook,
+            momentum_state=momentum,
+            current_quote=market.last_quote,
+        )
+
+        # Handle quote decision
+        if decision.action == QuoteAction.CANCEL_ALL:
+            if market.is_quoting:
+                await self._cancel_market_quotes(token_id)
+                market.is_quoting = False
+        elif decision.action == QuoteAction.PLACE_QUOTE:
+            await self._place_or_update_quote(token_id, decision.quote)
+        # KEEP_CURRENT - do nothing
+
+    async def _place_or_update_quote(self, token_id: str, quote: Quote) -> None:
+        """Place or update quote for a market."""
+        # Check rate limiting
+        if not self._check_refresh_rate(token_id):
+            return
+
+        # Get adjusted order sizes based on circuit breaker state
+        base_size = self.config.order_size_usdc
+
+        # Get inventory-adjusted sizes
+        buy_size, sell_size = self.quote_engine.get_inventory_adjusted_sizes(
+            token_id, base_size
+        )
+
+        # Apply circuit breaker multiplier
+        multiplier = self.risk_manager.get_position_limit_multiplier()
+        buy_size *= multiplier
+        sell_size *= multiplier
+
+        # Check if we have meaningful sizes
+        min_size = 5.0  # Polymarket minimum
+        if buy_size < min_size and sell_size < min_size:
+            return
+
+        # Adjust quote with new sizes
+        adjusted_quote = Quote(
+            token_id=quote.token_id,
+            bid_price=quote.bid_price,
+            ask_price=quote.ask_price,
+            bid_size=max(buy_size, min_size) if buy_size >= min_size else 0,
+            ask_size=max(sell_size, min_size) if sell_size >= min_size else 0,
+            timestamp=quote.timestamp,
+        )
+
+        market = self._markets.get(token_id)
+        if market and market.last_quote:
+            # Cancel existing and place new
+            await self.order_manager.cancel_all_for_token(token_id)
+
+        # Place orders
+        orders_to_place = []
+        if adjusted_quote.bid_size >= min_size:
+            orders_to_place.append((
+                token_id,
+                OrderSide.BUY,
+                adjusted_quote.bid_price,
+                adjusted_quote.bid_size,
+                False,  # neg_risk
+            ))
+        if adjusted_quote.ask_size >= min_size:
+            orders_to_place.append((
+                token_id,
+                OrderSide.SELL,
+                adjusted_quote.ask_price,
+                adjusted_quote.ask_size,
+                False,
+            ))
+
+        if orders_to_place:
+            result = await self.order_manager.place_orders_batch(orders_to_place)
+            if result.all_succeeded:
+                if market:
+                    market.last_quote = adjusted_quote
+                    market.is_quoting = True
+                self._last_quote_refresh[token_id] = datetime.utcnow()
+                self.risk_manager.clear_errors()
+            else:
+                self.risk_manager.record_error()
+
+    async def _cancel_market_quotes(self, token_id: str) -> None:
+        """Cancel all quotes for a market."""
+        cancelled = await self.order_manager.cancel_all_for_token(token_id)
+        logger.info(f"Cancelled {cancelled} orders for {token_id[:20]}...")
+
+        market = self._markets.get(token_id)
+        if market:
+            market.last_quote = None
+            market.is_quoting = False
+
+    def _check_refresh_rate(self, token_id: str) -> bool:
+        """Check if refresh is allowed based on rate limits."""
+        now = datetime.utcnow()
+
+        # Per-market rate limit
+        last_refresh = self._last_quote_refresh.get(token_id)
+        if last_refresh:
+            elapsed_ms = (now - last_refresh).total_seconds() * 1000
+            if elapsed_ms < self.config.min_refresh_interval_ms:
+                return False
+
+        # Global rate limit
+        now_ts = now.timestamp()
+        if now_ts - self._global_refresh_window_start >= 1.0:
+            # New window
+            self._global_refresh_window_start = now_ts
+            self._global_refresh_count = 0
+
+        if self._global_refresh_count >= self.config.global_refresh_cap_per_sec:
+            return False
+
+        self._global_refresh_count += 1
+        return True
+
+    # --- Markout Processing ---
+
+    async def _markout_loop(self) -> None:
+        """Background loop to capture markouts."""
+        while self._running:
+            try:
+                # Get mid price lookup function
+                def get_mid_price(token_id: str) -> Optional[float]:
+                    orderbook = self.orderbook_manager.get_orderbook(token_id)
+                    return orderbook.mid_price() if orderbook else None
+
+                # Process due markouts
+                captured = self.fill_analytics.process_markout_captures(get_mid_price)
+                if captured:
+                    logger.debug(f"Captured {len(captured)} markouts")
+
+                await asyncio.sleep(0.5)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in markout loop: {e}")
+                await asyncio.sleep(1)
+
+    # --- Event Callbacks ---
+
+    async def _on_book_update(self, token_id: str, orderbook: OrderbookState) -> None:
+        """Handle orderbook update from market WebSocket."""
+        self.risk_manager.update_feed_timestamp(token_id)
+
+        market = self._markets.get(token_id)
+        if market:
+            market.orderbook = orderbook
+
+        # Check for sweeps
+        await self.momentum_detector.on_orderbook_update(orderbook)
+
+    async def _on_trade(
+        self,
+        token_id: str,
+        price: float,
+        timestamp: datetime,
+    ) -> None:
+        """Handle trade event for momentum detection."""
+        orderbook = self.orderbook_manager.get_orderbook(token_id)
+        tick_size = orderbook.tick_size if orderbook else 0.01
+
+        await self.momentum_detector.on_trade(
+            token_id=token_id,
+            price=price,
+            tick_size=tick_size,
+            timestamp=timestamp,
+        )
+
+    async def _on_tick_size_change(self, token_id: str, new_tick_size: float) -> None:
+        """Handle tick size change event."""
+        logger.warning(f"Tick size changed for {token_id[:20]}...: {new_tick_size}")
+        # Orderbook manager already updates the state
+
+    async def _on_fill(self, fill: Fill) -> None:
+        """Handle fill event from user WebSocket."""
+        logger.info(
+            f"Fill received: {fill.side.value} {fill.size:.2f} @ {fill.price:.4f} "
+            f"on {fill.token_id[:20]}..."
+        )
+
+        # Update inventory
+        self.inventory_manager.update_from_fill(fill)
+
+        # Get mid price at fill time
+        orderbook = self.orderbook_manager.get_orderbook(fill.token_id)
+        mid_price = orderbook.mid_price() if orderbook else fill.price
+
+        # Record fill for markout tracking
+        record = self.fill_analytics.record_fill(
+            fill=fill,
+            mid_price_at_fill=mid_price,
+            schedule_markouts=True,
+        )
+
+        # Update risk manager with P&L
+        position = self.inventory_manager.get_position(fill.token_id)
+        self.risk_manager.update_from_position(
+            token_id=fill.token_id,
+            position=position,
+            current_price=mid_price,
+        )
+
+        # Get market name for alerts
+        market_name = self._market_names.get(fill.token_id, fill.token_id[:40])
+
+        # Persist fill and position to database (Phase 6)
+        if self.persistence.is_enabled:
+            self.persistence.save_fill_record(record, market_name=market_name)
+            self.persistence.save_position(position, market_name=market_name)
+
+        # Send fill alert with throttling (Phase 6)
+        if self._enable_alerts:
+            send_active_quoting_fill_alert(
+                market_name=market_name,
+                side=fill.side.value,
+                price=fill.price,
+                size=fill.size,
+            )
+
+    async def _on_order_update(self, order_state) -> None:
+        """Handle order status update from user WebSocket."""
+        logger.debug(f"Order update: {order_state.order_id} -> {order_state.status.value}")
+
+    async def _on_market_ws_disconnect(self) -> None:
+        """Handle market WebSocket disconnect."""
+        logger.warning("Market WebSocket disconnected")
+        await self.risk_manager.on_market_disconnect()
+
+    async def _on_user_ws_disconnect(self) -> None:
+        """Handle user WebSocket disconnect."""
+        logger.error("User WebSocket disconnected - CRITICAL")
+        await self.risk_manager.on_user_disconnect()
+
+    async def _on_momentum_detected(self, event) -> None:
+        """Handle momentum detection event."""
+        logger.warning(
+            f"Momentum detected on {event.token_id[:20]}...: "
+            f"{event.event_type} - {event.details}"
+        )
+
+        # Cancel quotes for this market if configured
+        if self.config.cancel_on_momentum:
+            await self._cancel_market_quotes(event.token_id)
+
+    async def _on_circuit_breaker_state_change(
+        self,
+        old_state: CircuitBreakerState,
+        new_state: CircuitBreakerState,
+        reason: str,
+    ) -> None:
+        """Handle circuit breaker state change."""
+        logger.warning(
+            f"Circuit breaker: {old_state.value} -> {new_state.value} ({reason})"
+        )
+
+        # Send circuit breaker alert (Phase 6)
+        if self._enable_alerts:
+            risk_summary = self.risk_manager.get_summary()
+            send_active_quoting_circuit_breaker_alert(
+                old_state=old_state.value,
+                new_state=new_state.value,
+                reason=reason,
+                details={
+                    "drawdown": risk_summary.get("global", {}).get("current_drawdown", 0),
+                    "consecutive_errors": risk_summary.get("global", {}).get("consecutive_errors", 0),
+                    "stale_markets": len(risk_summary.get("stale_markets", [])),
+                },
+            )
+
+    async def _on_market_halt(self, token_id: str, reason: str) -> None:
+        """Handle market-specific halt."""
+        logger.warning(f"Market halted: {token_id[:20]}... ({reason})")
+        await self._cancel_market_quotes(token_id)
+
+        # Send market halt alert (Phase 6)
+        if self._enable_alerts:
+            market_name = self._market_names.get(token_id, token_id[:40])
+            send_active_quoting_market_halt_alert(
+                market_name=market_name,
+                reason=reason,
+            )
+
+    async def _on_kill_switch(self) -> None:
+        """Handle kill switch - cancel all orders immediately."""
+        logger.error("KILL SWITCH TRIGGERED - Cancelling all orders")
+        await self.order_manager.cancel_all()
+
+    def _on_markout_captured(self, sample) -> None:
+        """Handle markout capture event."""
+        logger.debug(
+            f"Markout captured: {sample.fill_id} at {sample.horizon_seconds}s = "
+            f"{sample.markout_bps:.2f} bps"
+        )
+
+        # Persist markout to database (Phase 6)
+        if self.persistence.is_enabled:
+            self.persistence.save_markout(sample)
+
+    # --- Daily Summary Loop (Phase 6) ---
+
+    async def _daily_summary_loop(self) -> None:
+        """Background loop to send daily summary alerts."""
+        # Send summary every 24 hours
+        summary_interval_seconds = 24 * 60 * 60  # 24 hours
+
+        while self._running:
+            try:
+                # Wait for next summary time
+                await asyncio.sleep(summary_interval_seconds)
+
+                if not self._running:
+                    break
+
+                # Send daily summary
+                await self._send_daily_summary()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in daily summary loop: {e}")
+                await asyncio.sleep(60)  # Retry after 1 minute
+
+    async def _send_daily_summary(self) -> None:
+        """Send daily summary alert."""
+        if not self._enable_alerts:
+            return
+
+        # Calculate session duration
+        session_hours = 0.0
+        if self._start_time:
+            elapsed = datetime.now(timezone.utc) - self._start_time
+            session_hours = elapsed.total_seconds() / 3600.0
+
+        # Get analytics summary
+        analytics = self.fill_analytics.get_summary()
+
+        # Prepare markout stats
+        markout_stats = {}
+        markouts = analytics.get("markouts", {})
+        for horizon_key, data in markouts.items():
+            if isinstance(data, dict) and "avg" in data:
+                horizon = int(horizon_key.replace("s", ""))
+                avg_markout = data.get("avg")
+                if avg_markout is not None:
+                    # Convert to bps
+                    markout_stats[horizon] = avg_markout * 10000
+
+        send_active_quoting_daily_summary(
+            session_duration_hours=session_hours,
+            total_fills=analytics.get("total_fills", 0),
+            total_volume=analytics.get("total_volume", 0.0),
+            total_notional=analytics.get("total_notional", 0.0),
+            net_fees=analytics.get("net_fees", 0.0),
+            realized_pnl=analytics.get("realized_pnl", 0.0),
+            markout_stats=markout_stats if markout_stats else None,
+            market_count=len(self._active_tokens),
+        )
+
+        # Update session stats in database
+        if self.persistence.is_enabled:
+            self.persistence.update_session_stats(
+                total_fills=analytics.get("total_fills", 0),
+                total_volume=analytics.get("total_volume", 0.0),
+                total_notional=analytics.get("total_notional", 0.0),
+                net_fees=analytics.get("net_fees", 0.0),
+                realized_pnl=analytics.get("realized_pnl", 0.0),
+            )
+
+    # --- Status/Info ---
+
+    def get_status(self) -> dict:
+        """Get current bot status."""
+        return {
+            "running": self._running,
+            "active_markets": len(self._active_tokens),
+            "market_ws_connected": self.orderbook_manager.is_connected(),
+            "user_ws_connected": self.user_channel_manager.is_connected(),
+            "circuit_breaker_state": self.risk_manager.state.value,
+            "open_orders": self.order_manager.get_open_order_count(),
+            "positions": self.inventory_manager.get_summary(),
+            "risk": self.risk_manager.get_summary(),
+            "analytics": self.fill_analytics.get_summary(),
+        }
+
+    def is_running(self) -> bool:
+        """Check if bot is running."""
+        return self._running
+
+
+# --- CLI Entry Point ---
+
+def discover_markets(assets: List[str]) -> List[Dict[str, Any]]:
+    """
+    Discover upcoming 15-minute crypto markets for the given assets.
+
+    Args:
+        assets: List of asset symbols (e.g., ["btc", "eth", "sol"])
+
+    Returns:
+        List of market dicts with token info
+    """
+    from rebates.market_finder import CryptoMarketFinder
+
+    finder = CryptoMarketFinder()
+    all_markets = []
+
+    for asset in assets:
+        markets = finder.get_upcoming_markets()
+        # Filter to this asset
+        asset_markets = [m for m in markets if m.get("_asset", "").lower() == asset.lower()]
+        all_markets.extend(asset_markets)
+
+    # Deduplicate by condition_id
+    seen = set()
+    unique_markets = []
+    for m in all_markets:
+        cid = m.get("conditionId")
+        if cid and cid not in seen:
+            seen.add(cid)
+            unique_markets.append(m)
+
+    return unique_markets
+
+
+def get_token_ids_from_markets(markets: List[Dict[str, Any]]) -> tuple[List[str], Dict[str, str]]:
+    """
+    Extract token IDs and market names from market data.
+
+    Returns:
+        Tuple of (token_ids, market_names dict)
+    """
+    import json
+
+    token_ids = []
+    market_names = {}
+
+    for market in markets:
+        # Get tokens from clobTokenIds (may be JSON string or list)
+        clob_tokens = market.get("clobTokenIds", [])
+        question = market.get("question", "Unknown")
+
+        # Parse if it's a JSON string
+        if isinstance(clob_tokens, str):
+            try:
+                clob_tokens = json.loads(clob_tokens)
+            except json.JSONDecodeError:
+                clob_tokens = []
+
+        if not isinstance(clob_tokens, list):
+            continue
+
+        for token_id in clob_tokens:
+            if token_id and isinstance(token_id, str):
+                token_ids.append(token_id)
+                market_names[token_id] = question
+
+    return token_ids, market_names
+
+
+async def run_bot(
+    token_ids: Optional[List[str]] = None,
+    config: Optional[ActiveQuotingConfig] = None,
+) -> None:
+    """
+    Run the active quoting bot.
+
+    Args:
+        token_ids: Optional list of token IDs (auto-discovers if not provided)
+        config: Optional configuration (uses env vars if not provided)
+    """
+    # Load config
+    if config is None:
+        config = ActiveQuotingConfig.from_env()
+
+    # Get credentials using PolymarketClient (derives from PK env var)
+    try:
+        from poly_data.polymarket_client import PolymarketClient
+        poly_client = PolymarketClient()
+        creds = poly_client.client.creds
+        api_key = creds.api_key
+        api_secret = creds.api_secret
+        api_passphrase = creds.api_passphrase
+    except Exception as e:
+        logger.error(f"Failed to get API credentials: {e}")
+        logger.error("Make sure PK environment variable is set with your private key")
+        return
+
+    market_names = {}
+
+    # Auto-discover markets if no tokens provided
+    if not token_ids:
+        logger.info(f"Discovering markets for assets: {config.assets}")
+        markets = discover_markets(config.assets)
+
+        if not markets:
+            logger.error("No upcoming markets found. Exiting.")
+            return
+
+        token_ids, market_names = get_token_ids_from_markets(markets)
+
+        if not token_ids:
+            logger.error("No token IDs found in discovered markets. Exiting.")
+            return
+
+        logger.info(f"Discovered {len(token_ids)} tokens from {len(markets)} markets:")
+        for market in markets:
+            logger.info(f"  - {market.get('question', 'Unknown')}")
+
+    # Create and run bot
+    bot = ActiveQuotingBot(
+        config=config,
+        api_key=api_key,
+        api_secret=api_secret,
+        api_passphrase=api_passphrase,
+        poly_client=poly_client,
+    )
+
+    try:
+        await bot.start(token_ids, market_names=market_names)
+
+        # Main loop - periodically check for new markets
+        check_interval = 60  # Check for new markets every 60 seconds
+
+        while bot.is_running():
+            await asyncio.sleep(check_interval)
+
+            # Discover new markets
+            new_markets = discover_markets(config.assets)
+            new_token_ids, new_names = get_token_ids_from_markets(new_markets)
+
+            # Find tokens we're not already tracking
+            current_tokens = bot._active_tokens
+            added = []
+            for tid in new_token_ids:
+                if tid not in current_tokens:
+                    added.append(tid)
+                    if tid in new_names:
+                        market_names[tid] = new_names[tid]
+
+            if added:
+                logger.info(f"Discovered {len(added)} new tokens, adding to bot")
+                # TODO: Implement hot-add of new tokens
+                # For now, just log - would need bot.add_tokens() method
+
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    finally:
+        await bot.stop()
+
+
+def main() -> None:
+    """CLI entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Active Quoting Bot for Polymarket 15-minute crypto markets"
+    )
+    parser.add_argument(
+        "--tokens",
+        nargs="+",
+        help="Token IDs to quote on (optional - auto-discovers if not provided)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run in dry-run mode (no real orders)",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level",
+    )
+    args = parser.parse_args()
+
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    # Set dry run mode
+    if args.dry_run:
+        os.environ["AQ_DRY_RUN"] = "true"
+
+    # Run (tokens are optional now - will auto-discover)
+    asyncio.run(run_bot(args.tokens))
+
+
+if __name__ == "__main__":
+    main()

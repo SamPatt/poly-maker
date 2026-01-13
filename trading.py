@@ -35,7 +35,7 @@ except ImportError:
 
 # Try to import database for trade recording (optional)
 try:
-    from db.supabase_client import record_trade
+    from db.pg_client import record_trade
     DB_ENABLED = True
 except ImportError:
     DB_ENABLED = False

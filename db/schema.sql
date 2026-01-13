@@ -1,5 +1,5 @@
--- Poly-Maker Database Schema for Supabase
--- Run this in Supabase SQL Editor to set up tables
+-- Poly-Maker Database Schema for PostgreSQL
+-- Run this to set up tables: psql -U polymaker -d polymaker -f db/schema.sql
 
 -- User-configured: which markets to trade
 CREATE TABLE IF NOT EXISTS selected_markets (
@@ -147,3 +147,77 @@ INSERT INTO hyperparameters (param_type, param_name, param_value) VALUES
     ('default', 'spread_threshold', 0.03),
     ('default', 'sleep_period', 6.0)
 ON CONFLICT (param_type, param_name) DO NOTHING;
+
+-- ============================================
+-- Active Quoting Bot Tables (Phase 6)
+-- ============================================
+
+-- Active quoting positions - current positions per market
+-- Used to restore state on restart
+CREATE TABLE IF NOT EXISTS active_quoting_positions (
+    id SERIAL PRIMARY KEY,
+    token_id TEXT UNIQUE NOT NULL,
+    market_name TEXT,
+    size FLOAT NOT NULL DEFAULT 0,
+    avg_price FLOAT NOT NULL DEFAULT 0,
+    realized_pnl FLOAT DEFAULT 0,
+    total_fees FLOAT DEFAULT 0,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Active quoting fills - fill history for analytics
+CREATE TABLE IF NOT EXISTS active_quoting_fills (
+    id SERIAL PRIMARY KEY,
+    fill_id TEXT UNIQUE NOT NULL,
+    token_id TEXT NOT NULL,
+    market_name TEXT,
+    side TEXT NOT NULL,  -- 'BUY' or 'SELL'
+    price FLOAT NOT NULL,
+    size FLOAT NOT NULL,
+    notional FLOAT NOT NULL,  -- price * size
+    fee FLOAT DEFAULT 0,
+    mid_at_fill FLOAT,  -- Mid price at time of fill
+    order_id TEXT,
+    trade_id TEXT,
+    timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Active quoting markouts - markout samples for toxicity analysis
+CREATE TABLE IF NOT EXISTS active_quoting_markouts (
+    id SERIAL PRIMARY KEY,
+    fill_id TEXT NOT NULL REFERENCES active_quoting_fills(fill_id) ON DELETE CASCADE,
+    horizon_seconds INTEGER NOT NULL,
+    mid_at_fill FLOAT NOT NULL,
+    mid_at_horizon FLOAT,
+    markout FLOAT,  -- Price change in favor/against
+    markout_bps FLOAT,  -- Markout in basis points
+    captured_at TIMESTAMP WITH TIME ZONE,
+    UNIQUE(fill_id, horizon_seconds)
+);
+
+-- Active quoting sessions - session metadata for tracking bot runs
+CREATE TABLE IF NOT EXISTS active_quoting_sessions (
+    id SERIAL PRIMARY KEY,
+    session_id TEXT UNIQUE NOT NULL,
+    start_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    end_time TIMESTAMP WITH TIME ZONE,
+    markets TEXT[],  -- Array of token IDs
+    config_snapshot JSONB,  -- Snapshot of config at session start
+    status TEXT DEFAULT 'RUNNING',  -- RUNNING, STOPPED, CRASHED
+    total_fills INTEGER DEFAULT 0,
+    total_volume FLOAT DEFAULT 0,
+    total_notional FLOAT DEFAULT 0,
+    net_fees FLOAT DEFAULT 0,
+    realized_pnl FLOAT DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for active quoting tables
+CREATE INDEX IF NOT EXISTS idx_aq_positions_token ON active_quoting_positions(token_id);
+CREATE INDEX IF NOT EXISTS idx_aq_fills_token ON active_quoting_fills(token_id);
+CREATE INDEX IF NOT EXISTS idx_aq_fills_timestamp ON active_quoting_fills(timestamp);
+CREATE INDEX IF NOT EXISTS idx_aq_markouts_fill ON active_quoting_markouts(fill_id);
+CREATE INDEX IF NOT EXISTS idx_aq_markouts_captured ON active_quoting_markouts(captured_at);
+CREATE INDEX IF NOT EXISTS idx_aq_sessions_status ON active_quoting_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_aq_sessions_start ON active_quoting_sessions(start_time);

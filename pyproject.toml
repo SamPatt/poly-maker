@@ -52,3 +52,7 @@ packages = ["poly_data", "poly_stats", "poly_utils", "data_updater", "db", "aler
 [tool.black]
 line-length = 100
 target-version = ["py39"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

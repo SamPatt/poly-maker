@@ -57,7 +57,7 @@ def update_sheet(data, worksheet):
 def update_supabase(all_markets_df, volatility_df):
     """Update Supabase database with market data."""
     try:
-        from db.supabase_client import upsert_all_markets, upsert_volatility_markets
+        from db.pg_client import upsert_all_markets, upsert_volatility_markets
         upsert_all_markets(all_markets_df)
         upsert_volatility_markets(volatility_df)
         print(f"Updated Supabase with {len(all_markets_df)} markets and {len(volatility_df)} volatility markets")
@@ -126,7 +126,7 @@ def fetch_and_process_data():
         sel_df = get_sel_df(spreadsheet, "Selected Markets")
     else:
         # Load selected markets from database
-        from db.supabase_client import get_selected_markets
+        from db.pg_client import get_selected_markets
         sel_df = get_selected_markets()
         if sel_df.empty:
             # Create empty DataFrame with required column to avoid KeyError

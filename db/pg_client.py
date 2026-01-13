@@ -21,6 +21,9 @@ DB_NAME = os.getenv("DB_NAME", "polymaker")
 DB_USER = os.getenv("DB_USER", "polymaker")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
+# Database availability flag - set via env var to disable DB features
+DB_ENABLED = os.getenv("DB_ENABLED", "true").lower() in ("true", "1", "yes")
+
 # Connection pool
 _connection_pool = None
 
@@ -771,3 +774,479 @@ def cleanup_old_rebates_markets(days: int = 7) -> int:
     except Exception as e:
         print(f"Error cleaning up old rebates markets: {e}")
         return 0
+
+
+# ============================================
+# Active Quoting Bot Database Functions
+# ============================================
+
+
+def save_active_quoting_position(
+    token_id: str,
+    size: float,
+    avg_price: float,
+    realized_pnl: float = 0.0,
+    total_fees: float = 0.0,
+    market_name: Optional[str] = None,
+) -> bool:
+    """
+    Save or update an active quoting position.
+
+    Upserts position on fill - creates if not exists, updates if exists.
+
+    Args:
+        token_id: Token ID
+        size: Current position size
+        avg_price: Average entry price
+        realized_pnl: Realized P&L
+        total_fees: Total fees paid
+        market_name: Optional human-readable market name
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO active_quoting_positions (
+                    token_id, market_name, size, avg_price, realized_pnl, total_fees, updated_at
+                )
+                VALUES (
+                    %(token_id)s, %(market_name)s, %(size)s, %(avg_price)s,
+                    %(realized_pnl)s, %(total_fees)s, NOW()
+                )
+                ON CONFLICT (token_id) DO UPDATE SET
+                    market_name = COALESCE(EXCLUDED.market_name, active_quoting_positions.market_name),
+                    size = EXCLUDED.size,
+                    avg_price = EXCLUDED.avg_price,
+                    realized_pnl = EXCLUDED.realized_pnl,
+                    total_fees = EXCLUDED.total_fees,
+                    updated_at = NOW()
+            """, {
+                "token_id": token_id,
+                "market_name": market_name,
+                "size": float(size),
+                "avg_price": float(avg_price),
+                "realized_pnl": float(realized_pnl),
+                "total_fees": float(total_fees),
+            })
+        return True
+    except Exception as e:
+        print(f"Error saving active quoting position: {e}")
+        return False
+
+
+def get_active_quoting_positions() -> pd.DataFrame:
+    """
+    Load all active quoting positions.
+
+    Used on startup to restore position state.
+
+    Returns:
+        DataFrame with position data
+    """
+    try:
+        with get_db_cursor(commit=False) as cursor:
+            cursor.execute("""
+                SELECT token_id, market_name, size, avg_price, realized_pnl, total_fees, updated_at
+                FROM active_quoting_positions
+                WHERE size != 0
+                ORDER BY updated_at DESC
+            """)
+            rows = cursor.fetchall()
+        if rows:
+            return pd.DataFrame(rows)
+        return pd.DataFrame(columns=["token_id", "market_name", "size", "avg_price",
+                                      "realized_pnl", "total_fees", "updated_at"])
+    except Exception as e:
+        print(f"Error getting active quoting positions: {e}")
+        return pd.DataFrame()
+
+
+def save_active_quoting_fill(
+    fill_id: str,
+    token_id: str,
+    side: str,
+    price: float,
+    size: float,
+    fee: float = 0.0,
+    mid_at_fill: Optional[float] = None,
+    order_id: Optional[str] = None,
+    trade_id: Optional[str] = None,
+    market_name: Optional[str] = None,
+    timestamp: Optional[str] = None,
+) -> bool:
+    """
+    Record a fill for active quoting analytics.
+
+    Args:
+        fill_id: Unique fill identifier
+        token_id: Token ID
+        side: 'BUY' or 'SELL'
+        price: Fill price
+        size: Fill size in shares
+        fee: Fee paid (negative = rebate)
+        mid_at_fill: Mid price at time of fill
+        order_id: Optional order ID
+        trade_id: Optional trade ID
+        market_name: Optional market name
+        timestamp: Optional timestamp (ISO format)
+
+    Returns:
+        True if successful
+    """
+    try:
+        notional = price * size
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO active_quoting_fills (
+                    fill_id, token_id, market_name, side, price, size, notional,
+                    fee, mid_at_fill, order_id, trade_id, timestamp
+                )
+                VALUES (
+                    %(fill_id)s, %(token_id)s, %(market_name)s, %(side)s, %(price)s,
+                    %(size)s, %(notional)s, %(fee)s, %(mid_at_fill)s, %(order_id)s,
+                    %(trade_id)s, COALESCE(%(timestamp)s::timestamptz, NOW())
+                )
+                ON CONFLICT (fill_id) DO NOTHING
+            """, {
+                "fill_id": fill_id,
+                "token_id": token_id,
+                "market_name": market_name,
+                "side": side.upper(),
+                "price": float(price),
+                "size": float(size),
+                "notional": float(notional),
+                "fee": float(fee),
+                "mid_at_fill": float(mid_at_fill) if mid_at_fill else None,
+                "order_id": order_id,
+                "trade_id": trade_id,
+                "timestamp": timestamp,
+            })
+        return True
+    except Exception as e:
+        print(f"Error saving active quoting fill: {e}")
+        return False
+
+
+def save_active_quoting_markout(
+    fill_id: str,
+    horizon_seconds: int,
+    mid_at_fill: float,
+    mid_at_horizon: Optional[float] = None,
+    markout: Optional[float] = None,
+    markout_bps: Optional[float] = None,
+) -> bool:
+    """
+    Save a markout sample for a fill.
+
+    Args:
+        fill_id: Fill ID from active_quoting_fills
+        horizon_seconds: Markout horizon (e.g., 1, 5, 15, 30, 60)
+        mid_at_fill: Mid price at fill time
+        mid_at_horizon: Mid price at horizon time (None if not captured yet)
+        markout: Markout value in price terms
+        markout_bps: Markout in basis points
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO active_quoting_markouts (
+                    fill_id, horizon_seconds, mid_at_fill, mid_at_horizon,
+                    markout, markout_bps, captured_at
+                )
+                VALUES (
+                    %(fill_id)s, %(horizon_seconds)s, %(mid_at_fill)s, %(mid_at_horizon)s,
+                    %(markout)s, %(markout_bps)s,
+                    CASE WHEN %(mid_at_horizon)s IS NOT NULL THEN NOW() ELSE NULL END
+                )
+                ON CONFLICT (fill_id, horizon_seconds) DO UPDATE SET
+                    mid_at_horizon = COALESCE(EXCLUDED.mid_at_horizon, active_quoting_markouts.mid_at_horizon),
+                    markout = COALESCE(EXCLUDED.markout, active_quoting_markouts.markout),
+                    markout_bps = COALESCE(EXCLUDED.markout_bps, active_quoting_markouts.markout_bps),
+                    captured_at = CASE
+                        WHEN EXCLUDED.mid_at_horizon IS NOT NULL THEN NOW()
+                        ELSE active_quoting_markouts.captured_at
+                    END
+            """, {
+                "fill_id": fill_id,
+                "horizon_seconds": int(horizon_seconds),
+                "mid_at_fill": float(mid_at_fill),
+                "mid_at_horizon": float(mid_at_horizon) if mid_at_horizon else None,
+                "markout": float(markout) if markout else None,
+                "markout_bps": float(markout_bps) if markout_bps else None,
+            })
+        return True
+    except Exception as e:
+        print(f"Error saving active quoting markout: {e}")
+        return False
+
+
+def get_pending_markout_captures() -> pd.DataFrame:
+    """
+    Get fills that are awaiting markout capture.
+
+    Used on startup to recover pending markout captures.
+
+    Returns:
+        DataFrame with fill_id, token_id, horizon_seconds, mid_at_fill, timestamp
+    """
+    try:
+        with get_db_cursor(commit=False) as cursor:
+            cursor.execute("""
+                SELECT
+                    m.fill_id, f.token_id, m.horizon_seconds, m.mid_at_fill, f.timestamp,
+                    f.side, f.price, f.size
+                FROM active_quoting_markouts m
+                JOIN active_quoting_fills f ON m.fill_id = f.fill_id
+                WHERE m.captured_at IS NULL
+                ORDER BY f.timestamp ASC
+            """)
+            rows = cursor.fetchall()
+        if rows:
+            return pd.DataFrame(rows)
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"Error getting pending markout captures: {e}")
+        return pd.DataFrame()
+
+
+def save_active_quoting_session(
+    session_id: str,
+    markets: list,
+    config_snapshot: Optional[dict] = None,
+) -> bool:
+    """
+    Create a new active quoting session record.
+
+    Args:
+        session_id: Unique session identifier
+        markets: List of token IDs being quoted
+        config_snapshot: Optional config snapshot as dict
+
+    Returns:
+        True if successful
+    """
+    try:
+        import json
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO active_quoting_sessions (
+                    session_id, markets, config_snapshot, status, start_time
+                )
+                VALUES (
+                    %(session_id)s, %(markets)s, %(config_snapshot)s, 'RUNNING', NOW()
+                )
+                ON CONFLICT (session_id) DO UPDATE SET
+                    markets = EXCLUDED.markets,
+                    config_snapshot = EXCLUDED.config_snapshot,
+                    status = 'RUNNING',
+                    start_time = NOW()
+            """, {
+                "session_id": session_id,
+                "markets": markets,
+                "config_snapshot": json.dumps(config_snapshot) if config_snapshot else None,
+            })
+        return True
+    except Exception as e:
+        print(f"Error saving active quoting session: {e}")
+        return False
+
+
+def update_active_quoting_session(
+    session_id: str,
+    status: Optional[str] = None,
+    total_fills: Optional[int] = None,
+    total_volume: Optional[float] = None,
+    total_notional: Optional[float] = None,
+    net_fees: Optional[float] = None,
+    realized_pnl: Optional[float] = None,
+) -> bool:
+    """
+    Update an active quoting session's statistics.
+
+    Args:
+        session_id: Session ID
+        status: Optional new status (RUNNING, STOPPED, CRASHED)
+        total_fills: Optional total fills count
+        total_volume: Optional total volume
+        total_notional: Optional total notional
+        net_fees: Optional net fees
+        realized_pnl: Optional realized P&L
+
+    Returns:
+        True if successful
+    """
+    try:
+        updates = []
+        params = {"session_id": session_id}
+
+        if status is not None:
+            updates.append("status = %(status)s")
+            params["status"] = status
+            if status in ("STOPPED", "CRASHED"):
+                updates.append("end_time = NOW()")
+
+        if total_fills is not None:
+            updates.append("total_fills = %(total_fills)s")
+            params["total_fills"] = int(total_fills)
+
+        if total_volume is not None:
+            updates.append("total_volume = %(total_volume)s")
+            params["total_volume"] = float(total_volume)
+
+        if total_notional is not None:
+            updates.append("total_notional = %(total_notional)s")
+            params["total_notional"] = float(total_notional)
+
+        if net_fees is not None:
+            updates.append("net_fees = %(net_fees)s")
+            params["net_fees"] = float(net_fees)
+
+        if realized_pnl is not None:
+            updates.append("realized_pnl = %(realized_pnl)s")
+            params["realized_pnl"] = float(realized_pnl)
+
+        if not updates:
+            return True
+
+        with get_db_cursor() as cursor:
+            cursor.execute(f"""
+                UPDATE active_quoting_sessions
+                SET {", ".join(updates)}
+                WHERE session_id = %(session_id)s
+            """, params)
+        return True
+    except Exception as e:
+        print(f"Error updating active quoting session: {e}")
+        return False
+
+
+def get_active_quoting_fills(
+    token_id: Optional[str] = None,
+    limit: int = 100,
+    since: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Get recent active quoting fills.
+
+    Args:
+        token_id: Optional filter by token
+        limit: Maximum rows to return
+        since: Optional timestamp filter (ISO format)
+
+    Returns:
+        DataFrame with fill records
+    """
+    try:
+        params = {"limit": limit}
+        where_clauses = []
+
+        if token_id:
+            where_clauses.append("token_id = %(token_id)s")
+            params["token_id"] = token_id
+
+        if since:
+            where_clauses.append("timestamp >= %(since)s::timestamptz")
+            params["since"] = since
+
+        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+        with get_db_cursor(commit=False) as cursor:
+            cursor.execute(f"""
+                SELECT *
+                FROM active_quoting_fills
+                {where_sql}
+                ORDER BY timestamp DESC
+                LIMIT %(limit)s
+            """, params)
+            rows = cursor.fetchall()
+
+        if rows:
+            return pd.DataFrame(rows)
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"Error getting active quoting fills: {e}")
+        return pd.DataFrame()
+
+
+def get_active_quoting_markout_stats(
+    token_id: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Get aggregate markout statistics.
+
+    Args:
+        token_id: Optional filter by token
+
+    Returns:
+        DataFrame with horizon, count, avg_markout, avg_markout_bps
+    """
+    try:
+        params = {}
+        where_sql = ""
+
+        if token_id:
+            where_sql = "WHERE f.token_id = %(token_id)s"
+            params["token_id"] = token_id
+
+        with get_db_cursor(commit=False) as cursor:
+            cursor.execute(f"""
+                SELECT
+                    m.horizon_seconds,
+                    COUNT(*) as count,
+                    AVG(m.markout) as avg_markout,
+                    AVG(m.markout_bps) as avg_markout_bps
+                FROM active_quoting_markouts m
+                JOIN active_quoting_fills f ON m.fill_id = f.fill_id
+                {where_sql}
+                WHERE m.captured_at IS NOT NULL
+                GROUP BY m.horizon_seconds
+                ORDER BY m.horizon_seconds
+            """, params)
+            rows = cursor.fetchall()
+
+        if rows:
+            return pd.DataFrame(rows)
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"Error getting active quoting markout stats: {e}")
+        return pd.DataFrame()
+
+
+def cleanup_old_active_quoting_data(days: int = 30) -> dict:
+    """
+    Clean up old active quoting data.
+
+    Args:
+        days: Delete data older than this many days
+
+    Returns:
+        Dict with counts of deleted records
+    """
+    try:
+        deleted = {"fills": 0, "markouts": 0, "sessions": 0}
+
+        with get_db_cursor() as cursor:
+            # Delete old fills (markouts will cascade)
+            cursor.execute("""
+                DELETE FROM active_quoting_fills
+                WHERE timestamp < NOW() - INTERVAL '%s days'
+            """, (days,))
+            deleted["fills"] = cursor.rowcount
+
+            # Delete old sessions
+            cursor.execute("""
+                DELETE FROM active_quoting_sessions
+                WHERE start_time < NOW() - INTERVAL '%s days'
+                AND status != 'RUNNING'
+            """, (days,))
+            deleted["sessions"] = cursor.rowcount
+
+        return deleted
+    except Exception as e:
+        print(f"Error cleaning up active quoting data: {e}")
+        return {"fills": 0, "markouts": 0, "sessions": 0}

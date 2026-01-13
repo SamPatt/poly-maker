@@ -1,5 +1,5 @@
-from db.supabase_client import (
-    get_supabase_client,
+from db.pg_client import (
+    get_supabase_client,  # Legacy name, actually returns PostgreSQL connection
     get_selected_markets,
     get_hyperparameters,
     get_all_markets,
