@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+import requests
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Set, Any
 
@@ -175,6 +176,62 @@ class ActiveQuotingBot:
             on_disconnect=self._on_user_ws_disconnect,
         )
 
+    # --- Position Syncing ---
+
+    def _sync_positions_from_api(self, token_ids: Set[str]) -> int:
+        """
+        Sync positions from Polymarket API for the given tokens.
+
+        This fetches actual positions from the exchange and updates
+        the inventory manager to match reality.
+
+        Args:
+            token_ids: Set of token IDs to sync positions for
+
+        Returns:
+            Number of positions synced
+        """
+        if not self._poly_client:
+            logger.warning("No poly_client available, cannot sync positions from API")
+            return 0
+
+        try:
+            # Get wallet address from poly_client
+            wallet_address = self._poly_client.browser_wallet
+
+            # Fetch positions from Polymarket data API
+            response = requests.get(
+                f'https://data-api.polymarket.com/positions?user={wallet_address}',
+                timeout=10
+            )
+            response.raise_for_status()
+            positions_data = response.json()
+
+            synced_count = 0
+            for pos in positions_data:
+                token_id = str(pos.get('asset', ''))
+                size = float(pos.get('size', 0))
+                avg_price = float(pos.get('avgPrice', 0.5))
+
+                # Only sync positions for tokens we're trading
+                if token_id in token_ids and size > 0:
+                    self.inventory_manager.set_position(token_id, size, avg_price)
+                    logger.info(
+                        f"Synced position from API for {token_id[:20]}...: "
+                        f"{size:.2f} shares @ {avg_price:.4f}"
+                    )
+                    synced_count += 1
+
+            logger.info(f"Synced {synced_count} positions from Polymarket API")
+            return synced_count
+
+        except requests.RequestException as e:
+            logger.error(f"Failed to fetch positions from API: {e}")
+            return 0
+        except Exception as e:
+            logger.error(f"Error syncing positions from API: {e}")
+            return 0
+
     # --- Startup/Shutdown ---
 
     async def start(
@@ -206,16 +263,25 @@ class ActiveQuotingBot:
         if market_names:
             self._market_names = market_names.copy()
 
-        # Load positions from database (Phase 6)
+        # Sync positions from Polymarket API (authoritative source)
+        # This ensures we know about positions from previous sessions or manual trades
+        self._sync_positions_from_api(self._active_tokens)
+
+        # Also load from database for any additional state (realized PnL, etc.)
         if self.persistence.is_enabled:
             saved_positions = self.persistence.load_positions()
             for token_id, position in saved_positions.items():
                 if token_id in self._active_tokens:
-                    self.inventory_manager.set_position(token_id, position)
-                    logger.info(
-                        f"Restored position for {token_id[:20]}...: "
-                        f"{position.size:.2f} @ {position.avg_entry_price:.4f}"
-                    )
+                    # Only update if we don't already have this position from API
+                    current = self.inventory_manager.get_position(token_id)
+                    if current.size == 0 and position.size > 0:
+                        self.inventory_manager.set_position(
+                            token_id, position.size, position.avg_entry_price
+                        )
+                        logger.info(
+                            f"Restored position from DB for {token_id[:20]}...: "
+                            f"{position.size:.2f} @ {position.avg_entry_price:.4f}"
+                        )
 
             # Recover pending markout captures
             pending = self.persistence.load_pending_markouts()
