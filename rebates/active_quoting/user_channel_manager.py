@@ -376,9 +376,6 @@ class UserChannelManager:
             for maker_order in maker_orders:
                 maker_address = maker_order.get("maker_address", "").lower()
 
-                # Log for debugging
-                logger.info(f"Checking maker_order: maker_address={maker_address[:20] if maker_address else 'N/A'}... our_wallet={self._wallet_address[:20] if self._wallet_address else 'N/A'}...")
-
                 # Check if this is our order
                 if self._wallet_address and maker_address == self._wallet_address:
                     is_our_fill = True
@@ -387,12 +384,12 @@ class UserChannelManager:
                     # Get matched amount for this specific maker order
                     size = float(maker_order.get("matched_amount", size))
                     price = float(maker_order.get("price", price))
-                    logger.info(f"Found OUR maker order: {order_id} size={size}")
+                    logger.debug(f"Found our maker order: {order_id} size={size}")
                     break
 
             # If we have wallet address configured and this isn't our fill, skip it
             if self._wallet_address and not is_our_fill:
-                logger.info(f"SKIPPING fill - not our maker order (trade_id={trade_id})")
+                logger.debug(f"Skipping fill - not our maker order (trade_id={trade_id})")
                 return
         else:
             # No maker_orders in message - this might be a different format
