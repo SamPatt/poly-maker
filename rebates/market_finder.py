@@ -49,6 +49,8 @@ class CryptoMarketFinder:
         """
         Generate timestamps including the current live slot.
 
+        The slug uses the START time of the market window.
+
         Returns timestamps for:
         - Current live market (if any)
         - Next upcoming markets
@@ -58,12 +60,13 @@ class CryptoMarketFinder:
 
         slot_duration = 15 * 60  # 15 minutes in seconds
 
-        # Get the END timestamp of the CURRENT slot (the live market)
-        current_slot_end = ((current_ts // slot_duration) + 1) * slot_duration
+        # Get the START timestamp of the CURRENT slot (the live market)
+        # Slug format uses START time, not end time
+        current_slot_start = (current_ts // slot_duration) * slot_duration
 
         timestamps = []
         for i in range(count):
-            timestamps.append(current_slot_end + (i * slot_duration))
+            timestamps.append(current_slot_start + (i * slot_duration))
 
         return timestamps
 
