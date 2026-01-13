@@ -46,6 +46,7 @@ class InventoryManager:
         """
         self.config = config
         self._positions: Dict[str, Position] = {}  # token_id -> Position
+        self._pending_buys: Dict[str, float] = {}  # token_id -> pending buy size
 
     @property
     def positions(self) -> Dict[str, Position]:
@@ -97,6 +98,75 @@ class InventoryManager:
             f"{old_size:.2f} -> {position.size:.2f} "
             f"(fill: {fill.side.value} {fill.size:.2f} @ {fill.price:.4f})"
         )
+
+        # Release pending buy capacity when fill comes in
+        if fill.side == OrderSide.BUY:
+            self.release_pending_buy(fill.token_id, fill.size)
+
+    def reserve_pending_buy(self, token_id: str, size: float) -> None:
+        """
+        Reserve capacity for a pending buy order.
+
+        This prevents the race condition where multiple orders are placed
+        before fills come in to update the position.
+
+        Args:
+            token_id: Token ID
+            size: Order size to reserve
+        """
+        current = self._pending_buys.get(token_id, 0.0)
+        self._pending_buys[token_id] = current + size
+        logger.debug(f"Reserved {size:.2f} buy capacity for {token_id[:20]}... (total pending: {self._pending_buys[token_id]:.2f})")
+
+    def release_pending_buy(self, token_id: str, size: float) -> None:
+        """
+        Release reserved capacity (on fill or cancel).
+
+        Args:
+            token_id: Token ID
+            size: Order size to release
+        """
+        current = self._pending_buys.get(token_id, 0.0)
+        self._pending_buys[token_id] = max(0.0, current - size)
+        logger.debug(f"Released {size:.2f} buy capacity for {token_id[:20]}... (remaining pending: {self._pending_buys[token_id]:.2f})")
+
+    def clear_pending_buys(self, token_id: str) -> None:
+        """
+        Clear all pending buy reservations for a token.
+
+        Called when cancelling all orders for a token.
+
+        Args:
+            token_id: Token ID
+        """
+        if token_id in self._pending_buys:
+            released = self._pending_buys[token_id]
+            self._pending_buys[token_id] = 0.0
+            if released > 0:
+                logger.debug(f"Cleared {released:.2f} pending buy capacity for {token_id[:20]}...")
+
+    def clear_all_pending_buys(self) -> None:
+        """
+        Clear all pending buy reservations for all tokens.
+
+        Called when cancelling all orders (shutdown, kill switch).
+        """
+        total = sum(self._pending_buys.values())
+        self._pending_buys.clear()
+        if total > 0:
+            logger.info(f"Cleared {total:.2f} total pending buy capacity")
+
+    def get_pending_buy_size(self, token_id: str) -> float:
+        """
+        Get total pending buy size for a token.
+
+        Args:
+            token_id: Token ID
+
+        Returns:
+            Total pending buy order size
+        """
+        return self._pending_buys.get(token_id, 0.0)
 
     def calculate_liability(self, token_id: str) -> float:
         """
@@ -161,7 +231,7 @@ class InventoryManager:
         Check if position limits allow buying/selling.
 
         Limits checked:
-        - MAX_POSITION_PER_MARKET: Share count limit
+        - MAX_POSITION_PER_MARKET: Share count limit (including pending orders)
         - MAX_LIABILITY_PER_MARKET_USDC: Worst-case loss limit
         - MAX_TOTAL_LIABILITY_USDC: Total exposure limit
 
@@ -173,12 +243,14 @@ class InventoryManager:
         """
         limits = InventoryLimits()
         position = self.get_position(token_id)
+        pending = self.get_pending_buy_size(token_id)
+        effective_position = position.size + pending
 
-        # Check position size limit
-        if position.size >= self.config.max_position_per_market:
+        # Check position size limit (including pending orders)
+        if effective_position >= self.config.max_position_per_market:
             limits.can_buy = False
             limits.buy_limit_reason = (
-                f"Position {position.size:.0f} >= max {self.config.max_position_per_market}"
+                f"Position {position.size:.0f} + pending {pending:.0f} >= max {self.config.max_position_per_market}"
             )
 
         # Check liability per market
@@ -223,14 +295,15 @@ class InventoryManager:
             if not limits.can_buy:
                 return False, limits.buy_limit_reason
 
-            # Check if this buy would exceed limits
+            # Check if this buy would exceed limits (including pending orders)
             position = self.get_position(token_id)
-            projected_size = position.size + size
+            pending = self.get_pending_buy_size(token_id)
+            projected_size = position.size + pending + size
 
             if projected_size > self.config.max_position_per_market:
                 return False, (
                     f"Buy would exceed position limit: "
-                    f"{projected_size:.0f} > {self.config.max_position_per_market}"
+                    f"{projected_size:.0f} (pos={position.size:.0f} + pending={pending:.0f} + order={size:.0f}) > {self.config.max_position_per_market}"
                 )
         else:  # SELL
             if not limits.can_sell:
@@ -260,11 +333,18 @@ class InventoryManager:
             position = self.get_position(token_id)
             return min(target_size, max(0, position.size))
 
-        # For buys, respect position limits
+        # For buys, respect position limits INCLUDING pending orders
         position = self.get_position(token_id)
-        remaining_capacity = self.config.max_position_per_market - position.size
+        pending = self.get_pending_buy_size(token_id)
+        effective_position = position.size + pending
+        remaining_capacity = self.config.max_position_per_market - effective_position
 
         if remaining_capacity <= 0:
+            if pending > 0:
+                logger.debug(
+                    f"Buy blocked for {token_id[:20]}...: "
+                    f"position={position.size:.0f} + pending={pending:.0f} >= max={self.config.max_position_per_market}"
+                )
             return 0
 
         return min(target_size, remaining_capacity)

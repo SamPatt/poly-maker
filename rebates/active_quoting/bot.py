@@ -403,8 +403,9 @@ class ActiveQuotingBot:
         # Collect final stats for alerts and persistence
         stats = self.fill_analytics.get_summary()
 
-        # Cancel all orders
+        # Cancel all orders and clear pending reservations
         try:
+            self.inventory_manager.clear_all_pending_buys()
             cancelled = await self.order_manager.cancel_all()
             logger.info(f"Cancelled {cancelled} orders on shutdown")
         except Exception as e:
@@ -616,7 +617,8 @@ class ActiveQuotingBot:
 
         market = self._markets.get(token_id)
         if market and market.last_quote:
-            # Cancel existing and place new
+            # Cancel existing and place new - clear pending reservations
+            self.inventory_manager.clear_pending_buys(token_id)
             await self.order_manager.cancel_all_for_token(token_id)
 
         # Place orders
@@ -641,6 +643,11 @@ class ActiveQuotingBot:
         if orders_to_place:
             result = await self.order_manager.place_orders_batch(orders_to_place)
             if result.all_succeeded:
+                # Reserve capacity for buy orders to prevent race condition
+                for order in orders_to_place:
+                    _, side, _, size, _ = order
+                    if side == OrderSide.BUY:
+                        self.inventory_manager.reserve_pending_buy(token_id, size)
                 if market:
                     market.last_quote = adjusted_quote
                     market.is_quoting = True
@@ -651,6 +658,8 @@ class ActiveQuotingBot:
 
     async def _cancel_market_quotes(self, token_id: str) -> None:
         """Cancel all quotes for a market."""
+        # Clear pending buy reservations when cancelling
+        self.inventory_manager.clear_pending_buys(token_id)
         cancelled = await self.order_manager.cancel_all_for_token(token_id)
         logger.info(f"Cancelled {cancelled} orders for {token_id[:20]}...")
 
@@ -854,6 +863,7 @@ class ActiveQuotingBot:
     async def _on_kill_switch(self) -> None:
         """Handle kill switch - cancel all orders immediately."""
         logger.error("KILL SWITCH TRIGGERED - Cancelling all orders")
+        self.inventory_manager.clear_all_pending_buys()
         await self.order_manager.cancel_all()
 
     def _on_markout_captured(self, sample) -> None:
