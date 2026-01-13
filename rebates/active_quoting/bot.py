@@ -677,6 +677,8 @@ class ActiveQuotingBot:
             # Cancel existing and place new - clear pending reservations
             self.inventory_manager.clear_pending_buys(token_id)
             await self.order_manager.cancel_all_for_token(token_id)
+            # Wait for exchange to release locked shares from cancelled orders
+            await asyncio.sleep(0.2)
 
         # Place orders
         orders_to_place = []
