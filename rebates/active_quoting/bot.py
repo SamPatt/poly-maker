@@ -492,6 +492,12 @@ class ActiveQuotingBot:
             current_quote=market.last_quote,
         )
 
+        # Debug log for quote decisions (temporary)
+        if decision.action == QuoteAction.PLACE_QUOTE:
+            logger.info(f"Quote decision for {token_id[:20]}...: {decision.action.value} - {decision.reason}")
+        elif decision.action == QuoteAction.CANCEL_ALL:
+            logger.debug(f"Quote decision for {token_id[:20]}...: {decision.action.value} - {decision.reason}")
+
         # Handle quote decision
         if decision.action == QuoteAction.CANCEL_ALL:
             if market.is_quoting:
