@@ -247,6 +247,15 @@ class ActiveQuotingBot:
                     # This prevents double-counting filled orders as both position AND pending
                     self.inventory_manager.clear_pending_buys(token_id)
 
+                    # Persist to DB to prevent stale positions on restart
+                    if self.persistence.is_enabled:
+                        position = self.inventory_manager.get_position(token_id)
+                        if size > 0:
+                            self.persistence.save_position(position)
+                        else:
+                            # Clear position from DB if it's now 0
+                            self.persistence.clear_position(token_id)
+
                     # Log significant changes
                     if abs(size - old_size) >= 1.0:
                         logger.info(
@@ -303,21 +312,28 @@ class ActiveQuotingBot:
         # This ensures we know about positions from previous sessions or manual trades
         self._sync_positions_from_api(self._active_tokens)
 
-        # Also load from database for any additional state (realized PnL, etc.)
+        # Load from database for additional state (realized PnL, fees)
+        # NOTE: API is authoritative for position SIZE - DB is only for metadata
         if self.persistence.is_enabled:
             saved_positions = self.persistence.load_positions()
             for token_id, position in saved_positions.items():
                 if token_id in self._active_tokens:
-                    # Only update if we don't already have this position from API
                     current = self.inventory_manager.get_position(token_id)
-                    if current.size == 0 and position.size > 0:
-                        self.inventory_manager.set_position(
-                            token_id, position.size, position.avg_entry_price
+
+                    # Only restore realized PnL and fees from DB, NOT position size
+                    # Position size from API is authoritative
+                    if position.realized_pnl != 0:
+                        current.realized_pnl = position.realized_pnl
+                    if position.total_fees_paid != 0:
+                        current.total_fees_paid = position.total_fees_paid
+
+                    # If DB has a position but API says 0, clear the stale DB entry
+                    if position.size > 0 and current.size == 0:
+                        logger.warning(
+                            f"Clearing stale DB position for {token_id[:20]}...: "
+                            f"DB had {position.size:.2f} but API says 0"
                         )
-                        logger.info(
-                            f"Restored position from DB for {token_id[:20]}...: "
-                            f"{position.size:.2f} @ {position.avg_entry_price:.4f}"
-                        )
+                        self.persistence.clear_position(token_id)
 
             # Recover pending markout captures
             pending = self.persistence.load_pending_markouts()

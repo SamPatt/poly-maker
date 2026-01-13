@@ -863,6 +863,48 @@ def get_active_quoting_positions() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def delete_active_quoting_position(token_id: str) -> bool:
+    """
+    Delete an active quoting position from the database.
+
+    Used when a position goes to 0 to prevent stale data.
+
+    Args:
+        token_id: Token ID to delete
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM active_quoting_positions
+                WHERE token_id = %(token_id)s
+            """, {"token_id": token_id})
+        return True
+    except Exception as e:
+        print(f"Error deleting active quoting position: {e}")
+        return False
+
+
+def clear_all_active_quoting_positions() -> bool:
+    """
+    Delete all active quoting positions from the database.
+
+    Used for full reset/cleanup.
+
+    Returns:
+        True if successful
+    """
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("DELETE FROM active_quoting_positions")
+        return True
+    except Exception as e:
+        print(f"Error clearing all active quoting positions: {e}")
+        return False
+
+
 def save_active_quoting_fill(
     fill_id: str,
     token_id: str,

@@ -287,6 +287,51 @@ class ActiveQuotingPersistence:
             logger.error(f"Error loading positions: {e}")
             return {}
 
+    def clear_position(self, token_id: str) -> bool:
+        """
+        Clear/delete a position from the database.
+
+        Args:
+            token_id: Token ID to clear
+
+        Returns:
+            True if successful
+        """
+        if not self.is_enabled or not self.config.save_positions:
+            return True
+
+        try:
+            from db.pg_client import delete_active_quoting_position
+
+            success = delete_active_quoting_position(token_id=token_id)
+            if success:
+                logger.debug(f"Cleared position from DB for {token_id[:20]}...")
+            return success
+        except Exception as e:
+            logger.error(f"Error clearing position: {e}")
+            return False
+
+    def clear_all_positions(self) -> bool:
+        """
+        Clear all positions from the database.
+
+        Returns:
+            True if successful
+        """
+        if not self.is_enabled or not self.config.save_positions:
+            return True
+
+        try:
+            from db.pg_client import clear_all_active_quoting_positions
+
+            success = clear_all_active_quoting_positions()
+            if success:
+                logger.info("Cleared all positions from DB")
+            return success
+        except Exception as e:
+            logger.error(f"Error clearing all positions: {e}")
+            return False
+
     # --- Fill Persistence ---
 
     def save_fill(
