@@ -654,7 +654,17 @@ class ActiveQuotingBot:
                 self._last_quote_refresh[token_id] = datetime.utcnow()
                 self.risk_manager.clear_errors()
             else:
-                self.risk_manager.record_error()
+                # Check if failures are "soft" errors (state issues, not bot failures)
+                # Don't count these toward circuit breaker
+                soft_errors = {"not enough balance", "order crosses book", "allowance"}
+                has_hard_error = False
+                for failed in result.failed_orders:
+                    error_lower = failed.error_msg.lower()
+                    if not any(soft in error_lower for soft in soft_errors):
+                        has_hard_error = True
+                        break
+                if has_hard_error:
+                    self.risk_manager.record_error()
 
     async def _cancel_market_quotes(self, token_id: str) -> None:
         """Cancel all quotes for a market."""
