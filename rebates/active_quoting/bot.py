@@ -758,9 +758,9 @@ class ActiveQuotingBot:
         """
         await self.start(token_ids)
 
-        # Set up signal handlers
+        # Set up signal handlers (SIGHUP for screen -X quit, SIGINT/SIGTERM for manual)
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
 
         # Wait until stopped
@@ -1602,7 +1602,8 @@ async def run_bot(
         logger.info("Received shutdown signal")
         shutdown_event.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    # SIGHUP for screen -X quit, SIGINT/SIGTERM for manual stop
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         loop.add_signal_handler(sig, signal_handler)
 
     try:

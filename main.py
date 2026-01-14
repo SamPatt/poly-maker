@@ -41,9 +41,10 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 
-# Register signal handlers
+# Register signal handlers (SIGHUP for screen -X quit)
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGHUP, signal_handler)
 
 
 def update_wallet_balance():

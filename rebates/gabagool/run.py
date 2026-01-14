@@ -123,6 +123,7 @@ async def run(detect_only: bool = False, scan_interval: float = None):
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGHUP, signal_handler)  # For screen -X quit
 
     # Run the monitor
     try:
