@@ -8,6 +8,7 @@ Implements:
 - Circuit breaker states: NORMAL, WARNING, HALTED, RECOVERING
 - State transition logic with configurable thresholds
 - Recovery logic (gradual re-entry after halt)
+- WebSocket gap halt tracking (Phase 6)
 """
 import asyncio
 import logging
@@ -28,6 +29,16 @@ class CircuitBreakerState(Enum):
     WARNING = "WARNING"         # Reduced limits (50%)
     HALTED = "HALTED"          # All orders cancelled, no new orders
     RECOVERING = "RECOVERING"  # Gradual re-entry (25% limits)
+
+
+class HaltReason(Enum):
+    """Reasons for circuit breaker halt (Phase 6)."""
+    NONE = "NONE"
+    GLOBAL_DRAWDOWN = "GLOBAL_DRAWDOWN"
+    CONSECUTIVE_ERRORS = "CONSECUTIVE_ERRORS"
+    USER_WS_DISCONNECT = "USER_WS_DISCONNECT"
+    WS_GAP_UNRESOLVED = "WS_GAP_UNRESOLVED"  # WebSocket message gaps persist after reconciliation
+    MANUAL = "MANUAL"
 
 
 @dataclass
@@ -58,7 +69,7 @@ class MarketRiskState:
         - Currently live markets (now is between start and end)
         - Next upcoming market (starts within 15 minutes)
 
-        Don't monitor:
+        Do not monitor:
         - Resolved markets (end time has passed)
         - Future markets (more than 15 minutes until start)
         """
@@ -69,7 +80,7 @@ class MarketRiskState:
         if now is None:
             now = datetime.utcnow()
 
-        # Already resolved - don't monitor
+        # Already resolved - do not monitor
         if now >= self.market_end_time:
             return False
 
@@ -82,7 +93,7 @@ class MarketRiskState:
         if 0 < time_until_start <= 900:  # 15 minutes = 900 seconds
             return True
 
-        # Future market (more than 15 min away) - don't monitor
+        # Future market (more than 15 min away) - do not monitor
         return False
 
     def update_pnl(self, realized: float, unrealized: float) -> None:
@@ -113,6 +124,8 @@ class GlobalRiskState:
     warning_at: Optional[datetime] = None
     consecutive_errors: int = 0
     last_error_time: Optional[datetime] = None
+    # Halt reason tracking (Phase 6)
+    halt_reason: HaltReason = HaltReason.NONE
 
     @property
     def total_pnl(self) -> float:
@@ -141,6 +154,7 @@ class RiskManager:
     3. Implements circuit breaker state machine
     4. Provides position limit multipliers based on state
     5. Triggers callbacks on state changes
+    6. Tracks halt reasons for recovery logic (Phase 6)
     """
 
     def __init__(
@@ -183,6 +197,18 @@ class RiskManager:
     def global_state(self) -> GlobalRiskState:
         """Get global risk state."""
         return self._global_state
+
+    @property
+    def halt_reason(self) -> HaltReason:
+        """Get the current halt reason (Phase 6)."""
+        return self._global_state.halt_reason
+
+    def is_halted_due_to_ws_gaps(self) -> bool:
+        """Check if currently halted due to WebSocket gaps (Phase 6)."""
+        return (
+            self.state == CircuitBreakerState.HALTED
+            and self._global_state.halt_reason == HaltReason.WS_GAP_UNRESOLVED
+        )
 
     def get_market_state(self, token_id: str) -> MarketRiskState:
         """
@@ -298,7 +324,8 @@ class RiskManager:
         if self._global_state.current_drawdown >= self.config.max_drawdown_global_usdc:
             self._trigger_halt(
                 f"Global drawdown ${self._global_state.current_drawdown:.2f} "
-                f">= limit ${self.config.max_drawdown_global_usdc:.2f}"
+                f">= limit ${self.config.max_drawdown_global_usdc:.2f}",
+                HaltReason.GLOBAL_DRAWDOWN,
             )
 
     # --- Stale Feed Detection ---
@@ -332,7 +359,7 @@ class RiskManager:
         stale_tokens = []
 
         for token_id, market_state in self._market_states.items():
-            # Skip markets that shouldn't be monitored (resolved or far future)
+            # Skip markets that should not be monitored (resolved or far future)
             if not market_state.should_monitor_staleness(now):
                 # Clear stale flag if market is no longer being monitored
                 if market_state.is_stale:
@@ -380,14 +407,16 @@ class RiskManager:
     async def _transition_state(
         self,
         new_state: CircuitBreakerState,
-        reason: str
+        reason: str,
+        halt_reason: HaltReason = HaltReason.NONE,
     ) -> None:
         """
         Transition to a new circuit breaker state.
 
         Args:
             new_state: New state to transition to
-            reason: Reason for transition
+            reason: Reason for transition (human-readable)
+            halt_reason: Structured halt reason for recovery logic (Phase 6)
         """
         old_state = self._global_state.circuit_breaker_state
         if old_state == new_state:
@@ -396,22 +425,26 @@ class RiskManager:
         self._global_state.circuit_breaker_state = new_state
         now = datetime.utcnow()
 
-        # Update timestamps
+        # Update timestamps and halt reason
         if new_state == CircuitBreakerState.HALTED:
             self._global_state.halted_at = now
             self._global_state.recovering_since = None
             self._global_state.warning_at = None
+            self._global_state.halt_reason = halt_reason
         elif new_state == CircuitBreakerState.RECOVERING:
             self._global_state.recovering_since = now
             self._global_state.warning_at = None
+            # Keep halt_reason during recovery for debugging
         elif new_state == CircuitBreakerState.WARNING:
             self._global_state.warning_at = now
             self._global_state.halted_at = None
             self._global_state.recovering_since = None
+            self._global_state.halt_reason = HaltReason.NONE
         elif new_state == CircuitBreakerState.NORMAL:
             self._global_state.halted_at = None
             self._global_state.recovering_since = None
             self._global_state.warning_at = None
+            self._global_state.halt_reason = HaltReason.NONE
 
         logger.warning(
             f"Circuit breaker: {old_state.value} -> {new_state.value} "
@@ -441,22 +474,31 @@ class RiskManager:
                 self._global_state.warning_at = datetime.utcnow()
                 logger.warning(f"Circuit breaker: WARNING (reason: {reason})")
 
-    def _trigger_halt(self, reason: str) -> None:
+    def _trigger_halt(
+        self,
+        reason: str,
+        halt_reason: HaltReason = HaltReason.MANUAL,
+    ) -> None:
         """Trigger HALTED state."""
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(
-                self._transition_state(CircuitBreakerState.HALTED, reason)
+                self._transition_state(CircuitBreakerState.HALTED, reason, halt_reason)
             )
         except RuntimeError:
             # No running event loop - set state directly
             self._global_state.circuit_breaker_state = CircuitBreakerState.HALTED
             self._global_state.halted_at = datetime.utcnow()
+            self._global_state.halt_reason = halt_reason
             logger.warning(f"Circuit breaker: HALTED (reason: {reason})")
 
-    async def trigger_halt(self, reason: str) -> None:
+    async def trigger_halt(
+        self,
+        reason: str,
+        halt_reason: HaltReason = HaltReason.MANUAL,
+    ) -> None:
         """Public method to trigger HALTED state."""
-        await self._transition_state(CircuitBreakerState.HALTED, reason)
+        await self._transition_state(CircuitBreakerState.HALTED, reason, halt_reason)
 
     async def trigger_warning(self, reason: str) -> None:
         """Public method to trigger WARNING state."""
@@ -512,6 +554,23 @@ class RiskManager:
                 CircuitBreakerState.NORMAL,
                 "Warning condition cleared"
             )
+
+    async def recover_from_ws_gap_halt(self) -> None:
+        """
+        Recover from a WebSocket gap halt (Phase 6).
+        
+        Called when gaps have been resolved after reconciliation.
+        Bypasses the normal recovery period since the issue is resolved.
+        """
+        if not self.is_halted_due_to_ws_gaps():
+            logger.warning("Cannot recover: not halted due to WS gaps")
+            return
+        
+        logger.info("Recovering from WS gap halt - gaps resolved")
+        await self._transition_state(
+            CircuitBreakerState.NORMAL,
+            "WebSocket gaps resolved after reconciliation",
+        )
 
     # --- Position Limit Multipliers ---
 
@@ -603,7 +662,7 @@ class RiskManager:
         if market_state.is_stale:
             return False, "Market feed is stale"
 
-        # Check if market has ended (can't trade on resolved markets)
+        # Check if market has ended (cannot trade on resolved markets)
         if market_state.market_end_time is not None:
             now = datetime.utcnow()
             if now >= market_state.market_end_time:
@@ -630,7 +689,8 @@ class RiskManager:
         if self._global_state.consecutive_errors >= self.config.max_consecutive_errors:
             self._trigger_halt(
                 f"Max consecutive errors reached: "
-                f"{self._global_state.consecutive_errors}"
+                f"{self._global_state.consecutive_errors}",
+                HaltReason.CONSECUTIVE_ERRORS,
             )
 
     def clear_errors(self) -> None:
@@ -648,10 +708,13 @@ class RiskManager:
         """
         Handle user WebSocket disconnect.
 
-        This is critical - without user channel we can't track fills.
+        This is critical - without user channel we cannot track fills.
         """
         logger.error("User WebSocket disconnected - triggering HALT")
-        await self.trigger_halt("User WebSocket disconnected (cannot track fills)")
+        await self.trigger_halt(
+            "User WebSocket disconnected (cannot track fills)",
+            HaltReason.USER_WS_DISCONNECT,
+        )
 
     # --- State Summary ---
 
@@ -659,6 +722,7 @@ class RiskManager:
         """Get summary of risk state for logging/monitoring."""
         return {
             "state": self.state.value,
+            "halt_reason": self._global_state.halt_reason.value,
             "global": {
                 "total_pnl": self._global_state.total_pnl,
                 "realized_pnl": self._global_state.total_realized_pnl,
@@ -701,3 +765,4 @@ class RiskManager:
             "Forced reset"
         )
         self._global_state.consecutive_errors = 0
+        self._global_state.halt_reason = HaltReason.NONE

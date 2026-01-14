@@ -18,7 +18,7 @@ from .models import Fill, Position, OrderSide
 logger = logging.getLogger(__name__)
 
 # Don't allow API to reduce position if there was a fill within this window
-FILL_PROTECTION_SECONDS = 30.0
+FILL_PROTECTION_SECONDS = 60.0
 
 
 @dataclass

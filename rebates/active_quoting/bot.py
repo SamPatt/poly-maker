@@ -11,6 +11,7 @@ Implements:
 - Multi-market support with batch order management
 - Telegram alerts for key events (Phase 6)
 - Database persistence for state recovery (Phase 6)
+- WebSocket gap safety halts to prevent position limit violations (Phase 6)
 """
 import asyncio
 import logging
@@ -19,6 +20,7 @@ import signal
 import sys
 import time
 import requests
+import aiohttp
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Set, Any
 
@@ -30,6 +32,7 @@ from .models import (
     MarketState,
     Position,
     OrderSide,
+    OrderStatus,
     MomentumState,
 )
 from .orderbook_manager import OrderbookManager
@@ -38,9 +41,10 @@ from .quote_engine import QuoteEngine, QuoteAction
 from .order_manager import OrderManager
 from .inventory_manager import InventoryManager
 from .momentum_detector import MomentumDetector
-from .risk_manager import RiskManager, CircuitBreakerState
+from .risk_manager import RiskManager, CircuitBreakerState, HaltReason
 from .fill_analytics import FillAnalytics
 from .persistence import ActiveQuotingPersistence, PersistenceConfig
+from .event_ledger import EventLedger, EventType
 from .redemption_manager import RedemptionManager
 from .alerts import (
     TELEGRAM_ENABLED,
@@ -125,6 +129,14 @@ class ActiveQuotingBot:
         self._last_position_sync: float = 0.0
         self._position_sync_interval: float = 5.0  # Sync positions every 5 seconds
 
+        # Order reconciliation tracking (to catch missed WebSocket messages)
+        self._last_reconcile_time: float = 0.0
+        self._reconcile_interval: float = 60.0  # Reconcile orders every 60 seconds
+
+        # WebSocket gap safety halt tracking (Phase 6)
+        self._gap_reconcile_attempts: int = 0  # Counter for failed reconciliation attempts
+        self._last_gap_recovery_time: float = 0.0  # Last recovery attempt when halted due to gaps
+
     def _init_components(self) -> None:
         """Initialize all sub-components."""
         # Persistence layer (Phase 6)
@@ -132,6 +144,11 @@ class ActiveQuotingBot:
             PersistenceConfig(enabled=self._enable_persistence)
         )
 
+        # Event ledger for gap detection and audit trail (Phase 5)
+        self.event_ledger = EventLedger(
+            db_path="/home/polymaker/poly-maker/data/event_ledger.db" if self._enable_persistence else None,
+            enabled=self._enable_persistence,
+        )
         # Core managers
         self.inventory_manager = InventoryManager(self.config)
 
@@ -199,12 +216,14 @@ class ActiveQuotingBot:
 
     # --- Position Syncing ---
 
-    def _sync_positions_from_api(self, token_ids: Set[str]) -> int:
+    async def _sync_positions_from_api(self, token_ids: Set[str]) -> int:
         """
-        Sync positions from Polymarket API for the given tokens.
+        Sync positions from Polymarket API for the given tokens (async).
 
         This fetches actual positions from the exchange and updates
         the inventory manager to match reality.
+
+        IMPORTANT: Uses async HTTP to avoid blocking the event loop.
 
         Args:
             token_ids: Set of token IDs to sync positions for
@@ -220,20 +239,23 @@ class ActiveQuotingBot:
             # Get wallet address from poly_client
             wallet_address = self._poly_client.browser_wallet
 
-            # Fetch positions from Polymarket data API
-            response = requests.get(
-                f'https://data-api.polymarket.com/positions?user={wallet_address}',
-                timeout=10
-            )
-            response.raise_for_status()
-            positions_data = response.json()
+            # Fetch positions from Polymarket data API using async HTTP
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://data-api.polymarket.com/positions?user={wallet_address}",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status != 200:
+                        logger.error(f"API returned status {response.status}")
+                        return 0
+                    positions_data = await response.json()
 
             # Build a dict of token_id -> (size, avg_price) from API
             api_positions = {}
             for pos in positions_data:
-                token_id = str(pos.get('asset', ''))
-                size = float(pos.get('size', 0))
-                avg_price = float(pos.get('avgPrice', 0.5))
+                token_id = str(pos.get("asset", ""))
+                size = float(pos.get("size", 0))
+                avg_price = float(pos.get("avgPrice", 0.5))
                 if token_id in token_ids:
                     api_positions[token_id] = (size, avg_price)
 
@@ -251,14 +273,26 @@ class ActiveQuotingBot:
 
                 # Only update if position changed
                 if abs(size - old_size) >= 0.01:
-                    # CRITICAL: Don't let stale API data reduce our position if we have recent fills
-                    # The data API lags behind real-time fills, so we trust fills over API
-                    if size < old_size and self.inventory_manager.has_recent_fill(token_id):
-                        logger.warning(
-                            f"Ignoring API position reduction for {token_id[:20]}...: "
-                            f"API says {size:.0f} but we have {old_size:.0f} with recent fills"
-                        )
-                        continue
+                    # CRITICAL: Do not let stale API data reduce our position if:
+                    # 1. We have recent fills (API lags behind real-time fills)
+                    # 2. We have pending buy orders (fills may be in flight)
+                    if size < old_size:
+                        has_recent_fill = self.inventory_manager.has_recent_fill(token_id)
+                        pending_buys = self.inventory_manager.get_pending_buy_size(token_id)
+                        
+                        if has_recent_fill:
+                            logger.warning(
+                                f"Ignoring API position reduction for {token_id[:20]}...: "
+                                f"API says {size:.0f} but we have {old_size:.0f} with recent fills"
+                            )
+                            continue
+                        
+                        if pending_buys > 0:
+                            logger.warning(
+                                f"Ignoring API position reduction for {token_id[:20]}...: "
+                                f"API says {size:.0f} but we have {old_size:.0f} with {pending_buys:.0f} pending buys"
+                            )
+                            continue
 
                     self.inventory_manager.set_position(token_id, size, avg_price)
 
@@ -272,7 +306,7 @@ class ActiveQuotingBot:
                         if size > 0:
                             self.persistence.save_position(position)
                         else:
-                            # Clear position from DB if it's now 0
+                            # Clear position from DB if it is now 0
                             self.persistence.clear_position(token_id)
 
                     # Log significant changes
@@ -287,12 +321,138 @@ class ActiveQuotingBot:
                 logger.debug(f"Synced {synced_count} position updates from Polymarket API")
             return synced_count
 
-        except requests.RequestException as e:
+        except aiohttp.ClientError as e:
             logger.error(f"Failed to fetch positions from API: {e}")
             return 0
         except Exception as e:
             logger.error(f"Error syncing positions from API: {e}")
             return 0
+
+
+    async def _reconcile_orders(self) -> None:
+        """
+        Reconcile internal order state with orders fetched from REST API.
+
+        This catches any missed WebSocket messages by:
+        1. Fetching open orders from the CLOB API
+        2. Calling user_channel_manager.reconcile_with_api_orders()
+        3. Reconciling pending buy reservations based on actual open orders
+        4. Checking for unresolved WebSocket gaps and triggering safety halt if needed (Phase 6)
+
+        Should be called:
+        - On startup after WebSocket connects
+        - Periodically (every 60 seconds) in the main loop
+        - Immediately when WebSocket gaps are detected
+        """
+        if not self._poly_client:
+            logger.warning("No poly_client available, cannot reconcile orders")
+            return
+
+        try:
+            # Fetch open orders from CLOB API
+            open_orders = self._poly_client.client.get_orders()
+
+            if open_orders:
+                logger.debug(f"Reconciling with {len(open_orders)} open orders from API")
+            else:
+                logger.debug("No open orders from API to reconcile")
+
+            # Reconcile user channel manager state with API orders
+            self.user_channel_manager.reconcile_with_api_orders(open_orders)
+
+            # Reconcile pending buy reservations
+            # Build set of token_ids with open BUY orders and their sizes
+            api_buy_sizes: Dict[str, float] = {}
+            for order in open_orders:
+                side = order.get("side", "").upper()
+                if side == "BUY":
+                    token_id = order.get("asset_id") or order.get("token_id", "")
+                    remaining = float(order.get("size_matched", 0))
+                    original = float(order.get("original_size", order.get("size", 0)))
+                    order_remaining = original - remaining
+                    if token_id:
+                        api_buy_sizes[token_id] = api_buy_sizes.get(token_id, 0) + order_remaining
+
+            # For each active token, reconcile pending buys
+            for token_id in self._active_tokens:
+                expected_pending = api_buy_sizes.get(token_id, 0.0)
+                current_pending = self.inventory_manager.get_pending_buy_size(token_id)
+
+                # If we think we have more pending than API shows, correct it
+                if current_pending > expected_pending + 0.01:
+                    excess = current_pending - expected_pending
+                    logger.warning(
+                        f"Reconcile: Reducing pending buys for {token_id[:20]}... "
+                        f"from {current_pending:.2f} to {expected_pending:.2f} (excess: {excess:.2f})"
+                    )
+                    self.inventory_manager.release_pending_buy(token_id, excess)
+
+            logger.debug("Order reconciliation complete")
+
+            # Log reconciliation to event ledger (Phase 5)
+            pending_buys_adjusted = {}
+            for token_id in self._active_tokens:
+                expected = api_buy_sizes.get(token_id, 0.0)
+                current = self.inventory_manager.get_pending_buy_size(token_id)
+                if abs(current - expected) > 0.01:
+                    pending_buys_adjusted[token_id] = expected - current
+            self.event_ledger.log_reconciliation(
+                open_orders_count=len(open_orders) if open_orders else 0,
+                pending_buys_adjusted=pending_buys_adjusted,
+                source="api",
+            )
+
+            # Phase 6: Check if gaps persist after reconciliation
+            if self.event_ledger.has_unresolved_gaps():
+                gaps = self.event_ledger.get_unresolved_gaps()
+                self._gap_reconcile_attempts += 1
+                
+                # Check if we should trigger safety halt
+                if self.config.halt_on_ws_gaps:
+                    if self._gap_reconcile_attempts >= self.config.ws_gap_reconcile_attempts:
+                        # Gaps persist after max attempts - trigger safety halt
+                        gap_details = ", ".join(
+                            f"seq {g.expected_start}-{g.expected_end}"
+                            for g in gaps[:3]  # Show first 3 gaps
+                        )
+                        logger.error(
+                            f"WebSocket gaps persist after {self._gap_reconcile_attempts} "
+                            f"reconciliation attempts - triggering safety halt. "
+                            f"Gaps: {gap_details}"
+                        )
+                        await self.risk_manager.trigger_halt(
+                            f"WebSocket message gaps unresolved after {self._gap_reconcile_attempts} attempts",
+                            HaltReason.WS_GAP_UNRESOLVED,
+                        )
+                        # Reset attempt counter after halt
+                        self._gap_reconcile_attempts = 0
+                    else:
+                        logger.warning(
+                            f"WebSocket gaps persist after reconciliation "
+                            f"(attempt {self._gap_reconcile_attempts}/{self.config.ws_gap_reconcile_attempts})"
+                        )
+                else:
+                    # Safety halt disabled - just clear gaps and warn
+                    logger.warning(
+                        f"WebSocket gaps detected but halt_on_ws_gaps=False, clearing gaps"
+                    )
+                    self.event_ledger.clear_gaps()
+                    self._gap_reconcile_attempts = 0
+            else:
+                # Gaps resolved - reset attempt counter
+                if self._gap_reconcile_attempts > 0:
+                    logger.info(
+                        f"WebSocket gaps resolved after {self._gap_reconcile_attempts} attempt(s)"
+                    )
+                self._gap_reconcile_attempts = 0
+                
+                # If we were halted due to WS gaps and gaps are now resolved, recover
+                if self.risk_manager.is_halted_due_to_ws_gaps():
+                    logger.info("Gaps resolved - initiating recovery from WS gap halt")
+                    await self.risk_manager.recover_from_ws_gap_halt()
+
+        except Exception as e:
+            logger.error(f"Error reconciling orders: {e}")
 
     # --- Startup/Shutdown ---
 
@@ -331,7 +491,7 @@ class ActiveQuotingBot:
 
         # Sync positions from Polymarket API (authoritative source)
         # This ensures we know about positions from previous sessions or manual trades
-        self._sync_positions_from_api(self._active_tokens)
+        await self._sync_positions_from_api(self._active_tokens)
 
         # Load from database for additional state (realized PnL, fees)
         # NOTE: API is authoritative for position SIZE - DB is only for metadata
@@ -469,6 +629,9 @@ class ActiveQuotingBot:
         else:
             logger.warning("User WebSocket not yet reporting as connected")
 
+        # Initial order reconciliation to catch any state from previous session
+        await self._reconcile_orders()
+
     async def stop(self, reason: str = "Normal shutdown") -> None:
         """
         Stop the bot gracefully.
@@ -534,6 +697,9 @@ class ActiveQuotingBot:
         # Shutdown analytics
         await self.fill_analytics.shutdown()
 
+        # Close event ledger (Phase 5)
+        self.event_ledger.close()
+
         # End session in database (Phase 6)
         status = "CRASHED" if "error" in reason.lower() else "STOPPED"
         self.persistence.end_session(
@@ -590,8 +756,20 @@ class ActiveQuotingBot:
                 # This ensures we have accurate position data even if fills aren't received
                 now = time.time()
                 if now - self._last_position_sync >= self._position_sync_interval:
-                    self._sync_positions_from_api(self._active_tokens)
+                    await self._sync_positions_from_api(self._active_tokens)
                     self._last_position_sync = now
+
+                # Periodic order reconciliation to catch missed WebSocket messages
+                if now - self._last_reconcile_time >= self._reconcile_interval:
+                    await self._reconcile_orders()
+                    # Check for WebSocket gaps and trigger immediate reconciliation if found
+                elif self.event_ledger.has_unresolved_gaps():
+                    logger.warning(
+                        f"Detected {len(self.event_ledger.get_unresolved_gaps())} "
+                        f"unresolved gaps - triggering immediate reconciliation"
+                    )
+                    await self._reconcile_orders()
+                    self._last_reconcile_time = now
 
                 # Check stale feeds
                 stale = self.risk_manager.check_stale_feeds()
@@ -603,6 +781,15 @@ class ActiveQuotingBot:
 
                 # Check circuit breaker state
                 if self.risk_manager.state == CircuitBreakerState.HALTED:
+                    # Phase 6: If halted due to WS gaps, periodically attempt recovery
+                    if self.risk_manager.is_halted_due_to_ws_gaps():
+                        if now - self._last_gap_recovery_time >= self.config.ws_gap_recovery_interval_seconds:
+                            logger.info("Attempting recovery from WS gap halt via reconciliation")
+                            self._last_gap_recovery_time = now
+                            await self._reconcile_orders()
+                            # If recovery succeeded, don't skip the rest of the loop
+                            if self.risk_manager.state != CircuitBreakerState.HALTED:
+                                continue
                     await asyncio.sleep(1)
                     continue
 
@@ -709,10 +896,10 @@ class ActiveQuotingBot:
 
         market = self._markets.get(token_id)
         if market and market.last_quote:
-            # Cancel existing and place new - clear pending reservations
-            self.inventory_manager.clear_pending_buys(token_id)
+            # Cancel existing orders - pending buy reservations will be released
+            # when _on_order_update receives CANCELLED confirmation from exchange
             await self.order_manager.cancel_all_for_token(token_id)
-            # Wait for exchange to release locked shares from cancelled orders
+            # Wait for exchange to process cancellation
             await asyncio.sleep(0.2)
 
         # Place orders
@@ -762,8 +949,8 @@ class ActiveQuotingBot:
 
     async def _cancel_market_quotes(self, token_id: str) -> None:
         """Cancel all quotes for a market."""
-        # Clear pending buy reservations when cancelling
-        self.inventory_manager.clear_pending_buys(token_id)
+        # NOTE: Pending buy reservations will be released when _on_order_update
+        # receives CANCELLED confirmation from exchange (not cleared optimistically)
         cancelled = await self.order_manager.cancel_all_for_token(token_id)
         logger.info(f"Cancelled {cancelled} orders for {token_id[:20]}...")
 
@@ -862,6 +1049,17 @@ class ActiveQuotingBot:
             f"on {fill.token_id[:20]}..."
         )
 
+        # Log fill to event ledger (Phase 5)
+        self.event_ledger.log_fill(
+            order_id=fill.order_id,
+            token_id=fill.token_id,
+            side=fill.side.value,
+            price=fill.price,
+            size=fill.size,
+            fee=fill.fee,
+            trade_id=fill.trade_id,
+        )
+
         # Update inventory
         self.inventory_manager.update_from_fill(fill)
 
@@ -902,8 +1100,50 @@ class ActiveQuotingBot:
             )
 
     async def _on_order_update(self, order_state) -> None:
-        """Handle order status update from user WebSocket."""
+        """
+        Handle order status update from user WebSocket.
+        
+        This is called when the exchange confirms order state changes.
+        We use this to:
+        1. Sync order_manager's local state with authoritative user channel state
+        2. Release pending buy reservations on terminal states (confirmed by exchange)
+        """
         logger.debug(f"Order update: {order_state.order_id} -> {order_state.status.value}")
+
+        # Log order update to event ledger (Phase 5)
+        self.event_ledger.log_order_update(
+            order_id=order_state.order_id,
+            token_id=order_state.token_id,
+            side=order_state.side.value,
+            status=order_state.status.value,
+            original_size=order_state.original_size,
+            remaining_size=order_state.remaining_size,
+        )
+        
+        # Sync order_manager's state with authoritative user channel state
+        self.order_manager.update_order_state(order_state.order_id, order_state.status)
+        
+        # Handle terminal states - release pending buy reservations
+        # Only release when we have CONFIRMED terminal state from exchange
+        terminal_states = (OrderStatus.CANCELLED, OrderStatus.EXPIRED, OrderStatus.REJECTED)
+        if order_state.status in terminal_states:
+            # Only release if this was a BUY order (we only reserve for buys)
+            if order_state.side == OrderSide.BUY:
+                # Release the remaining (unfilled) size
+                size_to_release = order_state.remaining_size
+                if size_to_release > 0:
+                    self.inventory_manager.release_pending_buy(
+                        order_state.token_id, 
+                        size_to_release
+                    )
+                    logger.info(
+                        f"Released {size_to_release:.2f} pending buy for {order_state.token_id[:20]}... "
+                        f"(order {order_state.order_id[:12]}... {order_state.status.value})"
+                    )
+            else:
+                logger.debug(
+                    f"Order {order_state.order_id[:12]}... terminal: {order_state.status.value} (SELL, no reservation)"
+                )
 
     async def _on_market_ws_disconnect(self) -> None:
         """Handle market WebSocket disconnect."""
@@ -1162,6 +1402,7 @@ class ActiveQuotingBot:
             "risk": self.risk_manager.get_summary(),
             "analytics": self.fill_analytics.get_summary(),
             "redemptions": self.redemption_manager.get_summary(),
+            "event_ledger": self.event_ledger.get_summary(),
         }
 
     def is_running(self) -> bool:
