@@ -12,6 +12,7 @@ Implements:
 - Telegram alerts for key events (Phase 6)
 - Database persistence for state recovery (Phase 6)
 - WebSocket gap safety halts to prevent position limit violations (Phase 6)
+- End-of-market wind-down strategy (stop buys, sell excess at profit)
 """
 import asyncio
 import logging
@@ -21,8 +22,10 @@ import sys
 import time
 import requests
 import aiohttp
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Set, Any
+from enum import Enum
+from typing import Dict, List, Optional, Set, Any, Tuple
 
 from .config import ActiveQuotingConfig
 from .models import (
@@ -45,6 +48,7 @@ from .risk_manager import RiskManager, CircuitBreakerState, HaltReason
 from .fill_analytics import FillAnalytics
 from .persistence import ActiveQuotingPersistence, PersistenceConfig
 from .event_ledger import EventLedger, EventType
+from .pnl_tracker import PnLTracker
 from .redemption_manager import RedemptionManager
 from .alerts import (
     TELEGRAM_ENABLED,
@@ -55,9 +59,30 @@ from .alerts import (
     send_active_quoting_daily_summary,
     send_active_quoting_market_halt_alert,
     send_active_quoting_redemption_alert,
+    send_active_quoting_market_resolution_summary,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class WindDownPhase(Enum):
+    """Phases of end-of-market wind-down."""
+    NORMAL = "NORMAL"  # Normal quoting
+    WIND_DOWN = "WIND_DOWN"  # No buys, maker sells only (5min to 40sec)
+    TAKER_EXIT = "TAKER_EXIT"  # Taker sell excess if price < threshold (40sec to 0)
+    MARKET_ENDED = "MARKET_ENDED"  # Market has ended, no trading
+
+
+@dataclass
+class WindDownState:
+    """State of wind-down for a market."""
+    phase: WindDownPhase
+    seconds_remaining: float
+    excess_token_id: Optional[str] = None  # Token with excess position to sell
+    excess_size: float = 0.0  # Size of excess position
+    avg_entry_price: float = 0.0  # Entry price for profitable sell calculation
+    paired_token_id: Optional[str] = None  # The other token in the pair
+    current_price: Optional[float] = None  # Current best bid for excess token
 
 
 class ActiveQuotingBot:
@@ -116,7 +141,13 @@ class ActiveQuotingBot:
         self._global_refresh_count: int = 0
         self._global_refresh_window_start: float = 0.0
         self._market_names: Dict[str, str] = {}  # token_id -> market name for alerts
+        self._market_end_times: Dict[str, datetime] = {}  # token_id -> end_time for resolution summaries
+        self._markets_summarized: Set[str] = set()  # Markets that have already had summaries sent
         self._start_time: Optional[datetime] = None
+
+        # Wind-down state tracking
+        self._wind_down_taker_executed: Set[str] = set()  # condition_ids where taker exit was executed
+        self._wind_down_logged: Dict[str, float] = {}  # token_id -> last log time (avoid spam)
 
         # Tasks
         self._main_task: Optional[asyncio.Task] = None
@@ -187,6 +218,12 @@ class ActiveQuotingBot:
 
         self.fill_analytics = FillAnalytics(
             on_markout_captured=self._on_markout_captured,
+        )
+
+        # PnL tracker for real-time profit/loss visibility
+        self.pnl_tracker = PnLTracker(
+            log_interval_seconds=60,  # Log summary every 60 seconds
+            recent_trades_limit=100,
         )
 
         self.redemption_manager = RedemptionManager(
@@ -502,9 +539,17 @@ class ActiveQuotingBot:
         self._active_tokens = set(token_ids)
         self._start_time = datetime.now(timezone.utc)
 
-        # Store market names for alerts
+        # Store market names for alerts and P&L tracking
         if market_names:
             self._market_names = market_names.copy()
+            # Also set market names in PnL tracker for readable trade logs
+            for token_id, name in market_names.items():
+                self.pnl_tracker.set_market_name(token_id, name)
+
+        # Store market end times for resolution summaries
+        if market_times:
+            for token_id, (start_time, end_time) in market_times.items():
+                self._market_end_times[token_id] = end_time
 
         # Sync positions from Polymarket API (authoritative source)
         # This ensures we know about positions from previous sessions or manual trades
@@ -747,6 +792,9 @@ class ActiveQuotingBot:
                 },
             )
 
+        # Log final P&L summary
+        self.pnl_tracker.maybe_log_summary(force=True)
+
         logger.info("Bot stopped")
 
     async def run(self, token_ids: List[str]) -> None:
@@ -802,6 +850,9 @@ class ActiveQuotingBot:
                 # Check for resolved markets that need redemption
                 await self._check_redemptions()
 
+                # Check for ended markets and send resolution summaries
+                await self._check_market_resolutions()
+
                 # Check circuit breaker state
                 if self.risk_manager.state == CircuitBreakerState.HALTED:
                     # Phase 6: If halted due to WS gaps, periodically attempt recovery
@@ -824,6 +875,9 @@ class ActiveQuotingBot:
                 for token_id in self._active_tokens:
                     await self._process_market(token_id)
 
+                # Periodic P&L summary logging
+                self.pnl_tracker.maybe_log_summary()
+
                 # Small delay to prevent tight loop
                 await asyncio.sleep(0.1)
 
@@ -836,6 +890,16 @@ class ActiveQuotingBot:
 
     async def _process_market(self, token_id: str) -> None:
         """Process a single market - calculate and update quotes."""
+        # Check wind-down state first
+        wind_down = self._get_wind_down_state(token_id)
+        if wind_down.phase != WindDownPhase.NORMAL:
+            if wind_down.phase == WindDownPhase.MARKET_ENDED:
+                # Market has ended, skip processing
+                return
+            # Handle wind-down (returns True if it handled the market)
+            if await self._process_wind_down(token_id, wind_down):
+                return
+
         # Check if we can place orders for this market
         can_place, reason = self.risk_manager.can_place_orders_for_market(token_id)
         if not can_place:
@@ -1067,11 +1131,6 @@ class ActiveQuotingBot:
 
     async def _on_fill(self, fill: Fill) -> None:
         """Handle fill event from user WebSocket."""
-        logger.info(
-            f"Fill received: {fill.side.value} {fill.size:.2f} @ {fill.price:.4f} "
-            f"on {fill.token_id[:20]}..."
-        )
-
         # Log fill to event ledger (Phase 5)
         self.event_ledger.log_fill(
             order_id=fill.order_id,
@@ -1084,8 +1143,21 @@ class ActiveQuotingBot:
             ws_sequence=fill.ws_sequence,
         )
 
+        # Capture position BEFORE fill for P&L calculation
+        position_before = self.inventory_manager.get_position(fill.token_id)
+        position_size_before = position_before.size if position_before else 0.0
+        avg_entry_before = position_before.avg_entry_price if position_before else 0.0
+
         # Update inventory
         self.inventory_manager.update_from_fill(fill)
+
+        # Track P&L with the PnL tracker (logs buy/sell with profit info)
+        position_after = self.inventory_manager.get_position(fill.token_id)
+        trade_result = self.pnl_tracker.record_fill(
+            fill=fill,
+            position=position_after,
+            position_before_fill=position_size_before,
+        )
 
         # Get mid price at fill time
         orderbook = self.orderbook_manager.get_orderbook(fill.token_id)
@@ -1115,12 +1187,19 @@ class ActiveQuotingBot:
             self.persistence.save_position(position, market_name=market_name)
 
         # Send fill alert with throttling (Phase 6)
+        # Include P&L info for sells
         if self._enable_alerts:
+            pnl = trade_result.net_pnl if trade_result else None
+            entry_price = trade_result.avg_buy_price if trade_result else None
+            session_pnl = self.pnl_tracker.session.net_pnl
             send_active_quoting_fill_alert(
                 market_name=market_name,
                 side=fill.side.value,
                 price=fill.price,
                 size=fill.size,
+                pnl=pnl,
+                entry_price=entry_price,
+                session_pnl=session_pnl,
             )
 
     async def _on_order_update(self, order_state) -> None:
@@ -1246,6 +1325,395 @@ class ActiveQuotingBot:
         # Persist markout to database (Phase 6)
         if self.persistence.is_enabled:
             self.persistence.save_markout(sample)
+
+    # --- Market Resolution Summaries ---
+
+    async def _check_market_resolutions(self) -> None:
+        """
+        Check for markets that have ended and send resolution summaries.
+
+        This sends a Telegram summary of how we did on each 15-minute market
+        when the market's end_time passes.
+        """
+        if not self._enable_alerts:
+            return
+
+        now = datetime.now(timezone.utc)
+
+        for token_id, end_time in list(self._market_end_times.items()):
+            # Skip if already summarized
+            if token_id in self._markets_summarized:
+                continue
+
+            # Ensure end_time is timezone-aware for comparison
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=timezone.utc)
+
+            # Check if market has ended
+            if now < end_time:
+                continue
+
+            # Get market stats from PnL tracker
+            market_summary = self.pnl_tracker.get_market_summary(token_id)
+            if not market_summary:
+                # No trades on this market, skip
+                self._markets_summarized.add(token_id)
+                continue
+
+            # Get market name
+            market_name = self._market_names.get(token_id, token_id[:40])
+
+            # Get market-specific stats
+            stats = self.pnl_tracker._market_stats.get(token_id)
+            if not stats:
+                self._markets_summarized.add(token_id)
+                continue
+
+            # Send resolution summary
+            logger.info(f"Sending resolution summary for {market_name}")
+            send_active_quoting_market_resolution_summary(
+                market_name=market_name,
+                net_pnl=stats.net_pnl,
+                gross_pnl=stats.gross_pnl,
+                total_fees=stats.total_fees,
+                total_trades=stats.total_trades,
+                buy_count=stats.total_buys,
+                sell_count=stats.total_sells,
+                winning_trades=stats.winning_trades,
+                losing_trades=stats.losing_trades,
+                buy_volume=stats.buy_volume,
+                sell_volume=stats.sell_volume,
+                session_pnl=self.pnl_tracker.session.net_pnl,
+            )
+
+            # Mark as summarized
+            self._markets_summarized.add(token_id)
+
+    # --- Wind-Down Strategy ---
+
+    def _get_paired_token_id(self, token_id: str) -> Optional[str]:
+        """
+        Get the paired token ID (UP <-> DOWN) for a given token.
+
+        In binary markets, both UP and DOWN tokens share the same condition_id.
+        This method finds the other token in the pair.
+
+        Args:
+            token_id: Token ID to find pair for
+
+        Returns:
+            Paired token ID, or None if not found
+        """
+        condition_id = self.risk_manager._token_to_condition.get(token_id)
+        if not condition_id:
+            return None
+
+        pair_state = self.risk_manager._market_pair_states.get(condition_id)
+        if not pair_state:
+            return None
+
+        for tid in pair_state.token_ids:
+            if tid != token_id:
+                return tid
+        return None
+
+    def _get_wind_down_state(self, token_id: str) -> WindDownState:
+        """
+        Get the wind-down state for a market.
+
+        Determines what phase we're in and calculates excess positions.
+
+        Args:
+            token_id: Token ID to check
+
+        Returns:
+            WindDownState with phase and excess position info
+        """
+        # Default state - normal operation
+        default_state = WindDownState(
+            phase=WindDownPhase.NORMAL,
+            seconds_remaining=float("inf"),
+        )
+
+        # Get market end time
+        end_time = self._market_end_times.get(token_id)
+        if not end_time:
+            return default_state
+
+        # Ensure timezone awareness
+        if end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        seconds_remaining = (end_time - now).total_seconds()
+
+        # Market already ended
+        if seconds_remaining <= 0:
+            return WindDownState(
+                phase=WindDownPhase.MARKET_ENDED,
+                seconds_remaining=0,
+            )
+
+        # Not yet in wind-down period
+        if seconds_remaining > self.config.wind_down_start_seconds:
+            return WindDownState(
+                phase=WindDownPhase.NORMAL,
+                seconds_remaining=seconds_remaining,
+            )
+
+        # Get positions for this token and its pair
+        my_position = self.inventory_manager.get_position(token_id)
+        my_size = my_position.size
+
+        paired_token_id = self._get_paired_token_id(token_id)
+        paired_size = 0.0
+        if paired_token_id:
+            paired_position = self.inventory_manager.get_position(paired_token_id)
+            paired_size = paired_position.size
+
+        # Calculate excess: positive means this token has more, negative means pair has more
+        excess = my_size - paired_size
+
+        # Determine which side has excess
+        if excess > 0:
+            excess_token_id = token_id
+            excess_size = excess
+            avg_entry_price = my_position.avg_entry_price
+        elif excess < 0:
+            excess_token_id = paired_token_id
+            excess_size = -excess
+            # Get paired position's entry price
+            if paired_token_id:
+                paired_position = self.inventory_manager.get_position(paired_token_id)
+                avg_entry_price = paired_position.avg_entry_price
+            else:
+                avg_entry_price = 0.5
+        else:
+            # Positions are matched - no excess
+            excess_token_id = None
+            excess_size = 0.0
+            avg_entry_price = 0.0
+
+        # Get current price for excess token
+        current_price = None
+        if excess_token_id:
+            orderbook = self.orderbook_manager.get_orderbook(excess_token_id)
+            if orderbook and orderbook.best_bid is not None:
+                current_price = orderbook.best_bid
+
+        # Determine phase
+        if seconds_remaining <= self.config.wind_down_taker_threshold_seconds:
+            phase = WindDownPhase.TAKER_EXIT
+        else:
+            phase = WindDownPhase.WIND_DOWN
+
+        return WindDownState(
+            phase=phase,
+            seconds_remaining=seconds_remaining,
+            excess_token_id=excess_token_id,
+            excess_size=excess_size,
+            avg_entry_price=avg_entry_price,
+            paired_token_id=paired_token_id,
+            current_price=current_price,
+        )
+
+    async def _process_wind_down(self, token_id: str, wind_down: WindDownState) -> bool:
+        """
+        Process wind-down strategy for a market.
+
+        Phase 1 (WIND_DOWN): No buys, maker-only sells at profitable prices
+        Phase 2 (TAKER_EXIT): Taker sell excess if price < threshold
+
+        Args:
+            token_id: Token being processed
+            wind_down: Current wind-down state
+
+        Returns:
+            True if wind-down handled the market (skip normal processing),
+            False if normal processing should continue
+        """
+        # Log wind-down state periodically (every 30 seconds to avoid spam)
+        now = time.time()
+        last_log = self._wind_down_logged.get(token_id, 0)
+        if now - last_log > 30:
+            market_name = self._market_names.get(token_id, token_id[:20])
+            if wind_down.excess_size > 0:
+                logger.info(
+                    f"Wind-down [{wind_down.phase.value}] {market_name}: "
+                    f"{wind_down.seconds_remaining:.0f}s left, "
+                    f"excess={wind_down.excess_size:.0f} on {wind_down.excess_token_id[:20] if wind_down.excess_token_id else 'N/A'}..."
+                )
+            else:
+                logger.info(
+                    f"Wind-down [{wind_down.phase.value}] {market_name}: "
+                    f"{wind_down.seconds_remaining:.0f}s left, positions matched"
+                )
+            self._wind_down_logged[token_id] = now
+
+        # Phase 1: Wind-down - maker sells only
+        if wind_down.phase == WindDownPhase.WIND_DOWN:
+            # Cancel buy orders if any exist
+            market = self._markets.get(token_id)
+            if market and market.is_quoting:
+                await self._cancel_market_quotes(token_id)
+
+            # Place sell orders if we have excess and can sell profitably
+            if wind_down.excess_token_id == token_id and wind_down.excess_size > 0:
+                await self._place_wind_down_sell(token_id, wind_down)
+
+            return True  # Skip normal processing
+
+        # Phase 2: Taker exit
+        if wind_down.phase == WindDownPhase.TAKER_EXIT:
+            # Cancel any existing quotes
+            market = self._markets.get(token_id)
+            if market and market.is_quoting:
+                await self._cancel_market_quotes(token_id)
+
+            # Check if taker exit already executed for this market pair
+            condition_id = self.risk_manager._token_to_condition.get(token_id)
+            if condition_id and condition_id in self._wind_down_taker_executed:
+                return True  # Already handled
+
+            # Execute taker exit if conditions are met
+            if wind_down.excess_token_id and wind_down.excess_size > 0:
+                if wind_down.current_price is not None:
+                    if wind_down.current_price < self.config.wind_down_taker_price_threshold:
+                        await self._execute_taker_exit(wind_down)
+                        if condition_id:
+                            self._wind_down_taker_executed.add(condition_id)
+                    else:
+                        # Price too high - hold to resolution
+                        market_name = self._market_names.get(token_id, token_id[:20])
+                        if now - last_log > 30:
+                            logger.info(
+                                f"Wind-down HOLD {market_name}: "
+                                f"price ${wind_down.current_price:.4f} >= ${self.config.wind_down_taker_price_threshold:.2f} threshold, "
+                                f"holding {wind_down.excess_size:.0f} shares to resolution"
+                            )
+
+            return True  # Skip normal processing
+
+        # Normal phase or market ended - let normal processing handle it
+        return False
+
+    async def _place_wind_down_sell(self, token_id: str, wind_down: WindDownState) -> None:
+        """
+        Place maker sell orders during wind-down to reduce excess position.
+
+        Only places sells if the price would be profitable (price > avg_entry_price).
+
+        Args:
+            token_id: Token to sell
+            wind_down: Wind-down state with excess info
+        """
+        if wind_down.excess_size <= 0:
+            return
+
+        # Get orderbook
+        orderbook = self.orderbook_manager.get_orderbook(token_id)
+        if not orderbook or not orderbook.is_valid():
+            return
+
+        best_ask = orderbook.best_ask
+        if best_ask is None:
+            return
+
+        # Check if we can sell profitably
+        # To be a maker, we need to place at best_ask or higher
+        # For it to be profitable, best_ask must be > avg_entry_price
+        sell_price = best_ask
+
+        if sell_price <= wind_down.avg_entry_price:
+            # Can't sell profitably at maker price, skip
+            return
+
+        # Calculate sell size - sell enough to match positions, respecting minimums
+        min_size = 5.0
+        sell_size = min(wind_down.excess_size, self.config.order_size_usdc)
+        if sell_size < min_size:
+            sell_size = min(wind_down.excess_size, min_size)
+            if sell_size < min_size:
+                return  # Not enough to sell
+
+        # Place maker sell order
+        market_name = self._market_names.get(token_id, token_id[:20])
+        logger.info(
+            f"Wind-down SELL {market_name}: "
+            f"{sell_size:.0f} @ ${sell_price:.4f} (entry: ${wind_down.avg_entry_price:.4f})"
+        )
+
+        result = await self.order_manager.place_order(
+            token_id=token_id,
+            side=OrderSide.SELL,
+            price=sell_price,
+            size=sell_size,
+            neg_risk=False,
+        )
+
+        if result.success:
+            market = self._markets.get(token_id)
+            if market:
+                market.is_quoting = True
+            self.risk_manager.clear_errors()
+        else:
+            logger.warning(f"Wind-down sell failed: {result.error_msg}")
+
+    async def _execute_taker_exit(self, wind_down: WindDownState) -> None:
+        """
+        Execute a taker (market) sell to exit excess position.
+
+        Called when:
+        - Less than 40 seconds remaining
+        - Excess position price < $0.25 threshold
+
+        Args:
+            wind_down: Wind-down state with excess info
+        """
+        if not wind_down.excess_token_id or wind_down.excess_size <= 0:
+            return
+
+        token_id = wind_down.excess_token_id
+        market_name = self._market_names.get(token_id, token_id[:20])
+
+        # Get orderbook to find best bid (we're selling, so we hit the bid)
+        orderbook = self.orderbook_manager.get_orderbook(token_id)
+        if not orderbook or orderbook.best_bid is None:
+            logger.warning(f"Taker exit failed - no orderbook for {market_name}")
+            return
+
+        # Sell at best bid (taker)
+        sell_price = orderbook.best_bid
+        sell_size = wind_down.excess_size
+
+        # Ensure minimum order size
+        min_size = 5.0
+        if sell_size < min_size:
+            sell_size = min_size
+
+        logger.warning(
+            f"TAKER EXIT {market_name}: "
+            f"SELL {sell_size:.0f} @ ${sell_price:.4f} "
+            f"(price < ${self.config.wind_down_taker_price_threshold:.2f}, "
+            f"{wind_down.seconds_remaining:.0f}s remaining)"
+        )
+
+        # Place non-post-only sell (taker order)
+        # We need to temporarily disable post_only for this order
+        result = await self.order_manager.place_order(
+            token_id=token_id,
+            side=OrderSide.SELL,
+            price=sell_price,
+            size=sell_size,
+            neg_risk=False,
+            post_only=False,  # CRITICAL: This is a taker order
+        )
+
+        if result.success:
+            logger.info(f"Taker exit order placed for {market_name}")
+            self.risk_manager.clear_errors()
+        else:
+            logger.error(f"Taker exit failed for {market_name}: {result.error_msg}")
 
     # --- Redemption Handling ---
 

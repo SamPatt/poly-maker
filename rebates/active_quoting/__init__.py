@@ -45,6 +45,7 @@ from .alerts import (
     send_active_quoting_daily_summary,
     send_active_quoting_error_alert,
     send_active_quoting_market_halt_alert,
+    send_active_quoting_market_resolution_summary,
     FillAlertThrottler,
 )
 
@@ -102,5 +103,6 @@ __all__ = [
     "send_active_quoting_daily_summary",
     "send_active_quoting_error_alert",
     "send_active_quoting_market_halt_alert",
+    "send_active_quoting_market_resolution_summary",
     "FillAlertThrottler",
 ]

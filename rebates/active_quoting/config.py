@@ -41,6 +41,11 @@ class ActiveQuotingConfig:
     stale_feed_timeout_seconds: float = 30.0  # Max time without WS events
     circuit_breaker_recovery_seconds: float = 60.0  # Recovery period after halt
 
+    # --- End-of-Market Wind-Down ---
+    wind_down_start_seconds: float = 300.0  # Start wind-down 5 minutes (300s) before end
+    wind_down_taker_threshold_seconds: float = 40.0  # Switch to taker mode at 40 seconds
+    wind_down_taker_price_threshold: float = 0.25  # Only taker sell if price < $0.25
+
     # --- WebSocket Gap Safety (Phase 6) ---
     halt_on_ws_gaps: bool = True  # Halt quoting when WS gaps cannot be reconciled
     ws_gap_reconcile_attempts: int = 3  # Max reconciliation attempts before halting
@@ -95,6 +100,10 @@ class ActiveQuotingConfig:
             max_consecutive_errors=int(os.getenv("AQ_MAX_CONSECUTIVE_ERRORS", "5")),
             stale_feed_timeout_seconds=float(os.getenv("AQ_STALE_FEED_TIMEOUT_SECONDS", "30.0")),
             circuit_breaker_recovery_seconds=float(os.getenv("AQ_CIRCUIT_BREAKER_RECOVERY_SECONDS", "60.0")),
+            # End-of-Market Wind-Down
+            wind_down_start_seconds=float(os.getenv("AQ_WIND_DOWN_START_SECONDS", "300.0")),
+            wind_down_taker_threshold_seconds=float(os.getenv("AQ_WIND_DOWN_TAKER_THRESHOLD_SECONDS", "40.0")),
+            wind_down_taker_price_threshold=float(os.getenv("AQ_WIND_DOWN_TAKER_PRICE_THRESHOLD", "0.25")),
             # WebSocket Gap Safety (Phase 6)
             halt_on_ws_gaps=os.getenv("AQ_HALT_ON_WS_GAPS", "true").lower() == "true",
             ws_gap_reconcile_attempts=int(os.getenv("AQ_WS_GAP_RECONCILE_ATTEMPTS", "3")),

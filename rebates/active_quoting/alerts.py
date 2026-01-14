@@ -51,6 +51,9 @@ class FillAlertThrottler:
         price: float,
         size: float,
         markout_bps: Optional[float] = None,
+        pnl: Optional[float] = None,
+        entry_price: Optional[float] = None,
+        session_pnl: Optional[float] = None,
     ) -> Optional[dict]:
         """
         Record a fill and return batch if ready to send.
@@ -63,6 +66,9 @@ class FillAlertThrottler:
             "price": price,
             "size": size,
             "markout_bps": markout_bps,
+            "pnl": pnl,
+            "entry_price": entry_price,
+            "session_pnl": session_pnl,
             "timestamp": time.time(),
         })
         self.fill_count_since_summary += 1
@@ -172,6 +178,9 @@ def send_active_quoting_fill_alert(
     size: float,
     markout_bps: Optional[float] = None,
     force: bool = False,
+    pnl: Optional[float] = None,
+    entry_price: Optional[float] = None,
+    session_pnl: Optional[float] = None,
 ) -> bool:
     """
     Send alert on fill with throttling.
@@ -185,12 +194,15 @@ def send_active_quoting_fill_alert(
         size: Fill size in shares
         markout_bps: Optional markout in basis points (if available)
         force: If True, bypass throttling
+        pnl: Optional P&L for this trade (for sells)
+        entry_price: Optional entry price (for sells)
+        session_pnl: Optional running session P&L
 
     Returns:
         True if alert was sent (or queued)
     """
     if force:
-        return _send_single_fill_alert(market_name, side, price, size, markout_bps)
+        return _send_single_fill_alert(market_name, side, price, size, markout_bps, pnl, entry_price, session_pnl)
 
     batch = _fill_throttler.record_fill(
         market_name=market_name,
@@ -198,6 +210,9 @@ def send_active_quoting_fill_alert(
         price=price,
         size=size,
         markout_bps=markout_bps,
+        pnl=pnl,
+        entry_price=entry_price,
+        session_pnl=session_pnl,
     )
 
     if batch:
@@ -212,6 +227,9 @@ def _send_single_fill_alert(
     price: float,
     size: float,
     markout_bps: Optional[float] = None,
+    pnl: Optional[float] = None,
+    entry_price: Optional[float] = None,
+    session_pnl: Optional[float] = None,
 ) -> bool:
     """Send a single fill alert."""
     emoji = "🟢" if side.upper() == "BUY" else "🔴"
@@ -225,6 +243,20 @@ def _send_single_fill_alert(
     message += f"<b>Side:</b> {side.upper()}\n"
     message += f"<b>Price:</b> ${price:.4f}\n"
     message += f"<b>Size:</b> {size:.2f} shares"
+
+    # Add P&L info for sells
+    if side.upper() == "SELL" and pnl is not None:
+        pnl_emoji = "💰" if pnl >= 0 else "📉"
+        pnl_sign = "+" if pnl >= 0 else ""
+        message += f"\n{pnl_emoji} <b>P&L:</b> {pnl_sign}${pnl:.2f}"
+        if entry_price is not None:
+            message += f" (entry: ${entry_price:.4f})"
+
+    # Add session P&L if available
+    if session_pnl is not None:
+        session_emoji = "📈" if session_pnl >= 0 else "📉"
+        session_sign = "+" if session_pnl >= 0 else ""
+        message += f"\n{session_emoji} <b>Session:</b> {session_sign}${session_pnl:.2f}"
 
     if markout_bps is not None:
         mkout_emoji = "✅" if markout_bps >= 0 else "⚠️"
@@ -242,7 +274,8 @@ def _send_fill_batch_alert(batch: dict) -> bool:
         # Single fill - send as normal
         f = fills[0]
         return _send_single_fill_alert(
-            market_name, f["side"], f["price"], f["size"], f.get("markout_bps")
+            market_name, f["side"], f["price"], f["size"], f.get("markout_bps"),
+            f.get("pnl"), f.get("entry_price"), f.get("session_pnl")
         )
 
     # Multiple fills - send summary
@@ -250,6 +283,15 @@ def _send_fill_batch_alert(batch: dict) -> bool:
     sell_count = len(fills) - buy_count
     total_buy_size = sum(f["size"] for f in fills if f["side"].upper() == "BUY")
     total_sell_size = sum(f["size"] for f in fills if f["side"].upper() == "SELL")
+
+    # Calculate total P&L from sells in this batch
+    total_pnl = sum(f.get("pnl", 0) or 0 for f in fills if f["side"].upper() == "SELL")
+    # Get the latest session P&L from the most recent fill
+    session_pnl = None
+    for f in reversed(fills):
+        if f.get("session_pnl") is not None:
+            session_pnl = f["session_pnl"]
+            break
 
     # Truncate long market names
     if len(market_name) > 40:
@@ -263,6 +305,18 @@ def _send_fill_batch_alert(batch: dict) -> bool:
         message += f"<b>Buy Volume:</b> {total_buy_size:.2f} shares\n"
     if total_sell_size > 0:
         message += f"<b>Sell Volume:</b> {total_sell_size:.2f} shares\n"
+
+    # Add P&L for sells in batch
+    if sell_count > 0 and total_pnl != 0:
+        pnl_emoji = "💰" if total_pnl >= 0 else "📉"
+        pnl_sign = "+" if total_pnl >= 0 else ""
+        message += f"{pnl_emoji} <b>Batch P&L:</b> {pnl_sign}${total_pnl:.2f}\n"
+
+    # Add session P&L
+    if session_pnl is not None:
+        session_emoji = "📈" if session_pnl >= 0 else "📉"
+        session_sign = "+" if session_pnl >= 0 else ""
+        message += f"{session_emoji} <b>Session:</b> {session_sign}${session_pnl:.2f}\n"
 
     # Calculate average markout if available
     markouts = [f.get("markout_bps") for f in fills if f.get("markout_bps") is not None]
@@ -401,6 +455,88 @@ def send_active_quoting_error_alert(
     message += f"<code>{message_text}</code>"
 
     return send_alert(message)
+
+
+def send_active_quoting_market_resolution_summary(
+    market_name: str,
+    net_pnl: float,
+    gross_pnl: float,
+    total_fees: float,
+    total_trades: int,
+    buy_count: int,
+    sell_count: int,
+    winning_trades: int,
+    losing_trades: int,
+    buy_volume: float,
+    sell_volume: float,
+    session_pnl: Optional[float] = None,
+) -> bool:
+    """
+    Send summary alert when a 15-minute market resolves.
+
+    Args:
+        market_name: Market name
+        net_pnl: Net P&L for this market
+        gross_pnl: Gross P&L (before fees)
+        total_fees: Total fees paid
+        total_trades: Total number of trades
+        buy_count: Number of buys
+        sell_count: Number of sells
+        winning_trades: Number of profitable sells
+        losing_trades: Number of losing sells
+        buy_volume: Total shares bought
+        sell_volume: Total shares sold
+        session_pnl: Optional overall session P&L
+
+    Returns:
+        True if sent successfully
+    """
+    # Truncate long market names
+    if len(market_name) > 45:
+        market_name = market_name[:42] + "..."
+
+    # Choose emoji based on P&L
+    if net_pnl > 0.01:
+        emoji = "💰"
+        result = "WIN"
+    elif net_pnl < -0.01:
+        emoji = "📉"
+        result = "LOSS"
+    else:
+        emoji = "➡️"
+        result = "EVEN"
+
+    pnl_sign = "+" if net_pnl >= 0 else ""
+
+    message = f"{emoji} <b>Market Resolved - {result}</b>\n\n"
+    message += f"<b>Market:</b> {market_name}\n\n"
+
+    # P&L Summary
+    message += f"<b>Net P&L:</b> {pnl_sign}${net_pnl:.2f}\n"
+    message += f"<b>Gross P&L:</b> {'+' if gross_pnl >= 0 else ''}${gross_pnl:.2f}\n"
+    message += f"<b>Fees:</b> ${total_fees:.2f}\n\n"
+
+    # Trade Summary
+    message += f"<b>Trades:</b> {total_trades} ({buy_count} buys, {sell_count} sells)\n"
+
+    if sell_count > 0:
+        win_rate = (winning_trades / sell_count) * 100
+        message += f"<b>Win Rate:</b> {win_rate:.0f}% ({winning_trades}W / {losing_trades}L)\n"
+
+    # Volume
+    message += f"<b>Volume:</b> {buy_volume:.1f} bought, {sell_volume:.1f} sold\n"
+
+    # Position remaining
+    remaining = buy_volume - sell_volume
+    if remaining > 0.01:
+        message += f"<b>Position Remaining:</b> {remaining:.1f} shares\n"
+
+    # Session total
+    if session_pnl is not None:
+        session_sign = "+" if session_pnl >= 0 else ""
+        message += f"\n📊 <b>Session Total:</b> {session_sign}${session_pnl:.2f}"
+
+    return send_alert(message, wait=True)
 
 
 def send_active_quoting_market_halt_alert(

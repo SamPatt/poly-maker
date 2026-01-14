@@ -209,6 +209,7 @@ class OrderManager:
         price: float,
         size: float,
         neg_risk: bool = False,
+        post_only: Optional[bool] = None,
     ) -> OrderResult:
         """
         Place a single order with fee handling and post-only flag.
@@ -219,6 +220,7 @@ class OrderManager:
             price: Order price
             size: Order size in USDC
             neg_risk: Whether this is a negative risk market
+            post_only: Override post_only setting (defaults to config.post_only)
 
         Returns:
             OrderResult with success status and order details
@@ -236,6 +238,9 @@ class OrderManager:
             # Get fee rate
             fee_rate_bps = await self.get_fee_rate(token_id)
 
+            # Determine post_only setting (parameter overrides config)
+            use_post_only = post_only if post_only is not None else self.config.post_only
+
             # Create and place order using PolymarketClient
             # The PolymarketClient.create_order method handles signing
             response = self._poly_client.create_order(
@@ -244,7 +249,7 @@ class OrderManager:
                 price=price,
                 size=size,
                 neg_risk=neg_risk,
-                post_only=self.config.post_only,
+                post_only=use_post_only,
             )
 
             if response.get("success") is False:
@@ -269,7 +274,7 @@ class OrderManager:
                 original_size=size,
                 remaining_size=size,
                 status=OrderStatus.PENDING,
-                post_only=True,
+                post_only=use_post_only,
                 fee_rate_bps=fee_rate_bps,
             )
 
