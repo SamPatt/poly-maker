@@ -41,6 +41,11 @@ class ActiveQuotingConfig:
     stale_feed_timeout_seconds: float = 30.0  # Max time without WS events
     circuit_breaker_recovery_seconds: float = 60.0  # Recovery period after halt
 
+    # --- WebSocket Gap Safety (Phase 6) ---
+    halt_on_ws_gaps: bool = True  # Halt quoting when WS gaps cannot be reconciled
+    ws_gap_reconcile_attempts: int = 3  # Max reconciliation attempts before halting
+    ws_gap_recovery_interval_seconds: float = 30.0  # Interval for recovery attempts when halted
+
     # --- Order Management ---
     order_size_usdc: float = 10.0  # USDC per side
     batch_size: int = 15  # Max orders per batch request
@@ -90,6 +95,10 @@ class ActiveQuotingConfig:
             max_consecutive_errors=int(os.getenv("AQ_MAX_CONSECUTIVE_ERRORS", "5")),
             stale_feed_timeout_seconds=float(os.getenv("AQ_STALE_FEED_TIMEOUT_SECONDS", "30.0")),
             circuit_breaker_recovery_seconds=float(os.getenv("AQ_CIRCUIT_BREAKER_RECOVERY_SECONDS", "60.0")),
+            # WebSocket Gap Safety (Phase 6)
+            halt_on_ws_gaps=os.getenv("AQ_HALT_ON_WS_GAPS", "true").lower() == "true",
+            ws_gap_reconcile_attempts=int(os.getenv("AQ_WS_GAP_RECONCILE_ATTEMPTS", "3")),
+            ws_gap_recovery_interval_seconds=float(os.getenv("AQ_WS_GAP_RECOVERY_INTERVAL_SECONDS", "30.0")),
             # Order Management
             order_size_usdc=float(os.getenv("AQ_ORDER_SIZE_USDC", "10.0")),
             batch_size=int(os.getenv("AQ_BATCH_SIZE", "15")),
@@ -160,6 +169,12 @@ class ActiveQuotingConfig:
             errors.append("stale_feed_timeout_seconds must be > 0")
         if self.circuit_breaker_recovery_seconds <= 0:
             errors.append("circuit_breaker_recovery_seconds must be > 0")
+
+        # WebSocket Gap Safety validation (Phase 6)
+        if self.ws_gap_reconcile_attempts < 1:
+            errors.append("ws_gap_reconcile_attempts must be >= 1")
+        if self.ws_gap_recovery_interval_seconds <= 0:
+            errors.append("ws_gap_recovery_interval_seconds must be > 0")
 
         # Order validation (only enforce minimum in live mode)
         if not self.dry_run and self.order_size_usdc < 5:  # Polymarket minimum
