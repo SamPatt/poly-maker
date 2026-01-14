@@ -145,8 +145,16 @@ class ActiveQuotingBot:
         )
 
         # Event ledger for gap detection and audit trail (Phase 5)
+        # Use environment variable or default to local data directory
+        event_ledger_path = os.getenv("EVENT_LEDGER_PATH")
+        if event_ledger_path is None and self._enable_persistence:
+            # Default to data directory relative to project root
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            data_dir = os.path.join(project_root, "data")
+            os.makedirs(data_dir, exist_ok=True)
+            event_ledger_path = os.path.join(data_dir, "event_ledger.db")
         self.event_ledger = EventLedger(
-            db_path="/home/polymaker/poly-maker/data/event_ledger.db" if self._enable_persistence else None,
+            db_path=event_ledger_path,
             enabled=self._enable_persistence,
         )
         # Core managers
@@ -889,7 +897,7 @@ class ActiveQuotingBot:
         sell_size *= multiplier
 
         # Check if we have meaningful sizes
-        min_size = 5.0  # Polymarket minimum
+        min_size = 5.0  # Polymarket minimum is 5 shares
         if buy_size < min_size and sell_size < min_size:
             return
 

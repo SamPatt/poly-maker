@@ -47,7 +47,7 @@ class ActiveQuotingConfig:
     ws_gap_recovery_interval_seconds: float = 30.0  # Interval for recovery attempts when halted
 
     # --- Order Management ---
-    order_size_usdc: float = 10.0  # USDC per side
+    order_size_usdc: float = 10.0  # Shares per side (misleading name - actually shares, not USDC). Polymarket minimum is 5 shares.
     batch_size: int = 15  # Max orders per batch request
     cancel_on_momentum: bool = True
     post_only: bool = True  # Always
@@ -177,8 +177,9 @@ class ActiveQuotingConfig:
             errors.append("ws_gap_recovery_interval_seconds must be > 0")
 
         # Order validation (only enforce minimum in live mode)
-        if not self.dry_run and self.order_size_usdc < 5:  # Polymarket minimum
-            errors.append("order_size_usdc must be >= 5 (Polymarket minimum) for live trading")
+        # Note: order_size_usdc is actually SHARES despite the name. Polymarket minimum is 5 shares.
+        if not self.dry_run and self.order_size_usdc < 5:
+            errors.append("order_size_usdc must be >= 5 for live trading (Polymarket minimum is 5 shares)")
         if not 1 <= self.batch_size <= 15:
             errors.append("batch_size must be between 1 and 15")
 
