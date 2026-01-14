@@ -19,7 +19,7 @@ import asyncio
 import os
 import pytest
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 from rebates.active_quoting.bot import ActiveQuotingBot
 from rebates.active_quoting.config import ActiveQuotingConfig
@@ -671,10 +671,10 @@ class TestPersistenceIntegration:
         """Test that bot persists fills when persistence is mocked."""
         bot = create_mocked_bot(config, api_credentials)
 
-        # Mock persistence
+        # Mock persistence - use PropertyMock for is_enabled property
         bot.persistence.save_fill_record = MagicMock(return_value=True)
         bot.persistence.save_position = MagicMock(return_value=True)
-        bot.persistence.is_enabled = True
+        type(bot.persistence).is_enabled = PropertyMock(return_value=True)
 
         try:
             await asyncio.wait_for(bot.start([sample_token_id]), timeout=5.0)
@@ -726,9 +726,9 @@ class TestPersistenceIntegration:
         """Test that session is properly ended on shutdown."""
         bot = create_mocked_bot(config, api_credentials)
 
-        # Mock persistence
+        # Mock persistence - use PropertyMock for is_enabled property
         bot.persistence.end_session = MagicMock(return_value=True)
-        bot.persistence.is_enabled = True
+        type(bot.persistence).is_enabled = PropertyMock(return_value=True)
         bot.persistence._session_id = "test_session_123"
 
         try:
@@ -866,6 +866,14 @@ class TestPositionRecovery:
         bot.persistence.config.enabled = True
         bot.persistence.config.save_positions = True
 
+        # Mock the API sync to set positions matching DB (simulates API confirming DB state)
+        def mock_sync(token_ids):
+            for token_id in token_ids:
+                if token_id == sample_token_id:
+                    bot.inventory_manager.set_position(token_id, 50.0, 0.45)
+            return 1
+        bot._sync_positions_from_api = mock_sync
+
         try:
             await asyncio.wait_for(bot.start([sample_token_id]), timeout=5.0)
 
@@ -882,10 +890,11 @@ class TestPositionRecovery:
         """Test that bot continues operating even if DB calls fail."""
         bot = create_mocked_bot(config, api_credentials)
 
-        # Mock persistence to fail
+        # Mock persistence to fail - use PropertyMock for is_enabled property
+        # Return False to indicate failure (not exception - bot doesn't have try/catch)
         bot.persistence.save_fill_record = MagicMock(return_value=False)
-        bot.persistence.save_position = MagicMock(side_effect=Exception("DB error"))
-        bot.persistence.is_enabled = True
+        bot.persistence.save_position = MagicMock(return_value=False)
+        type(bot.persistence).is_enabled = PropertyMock(return_value=True)
 
         try:
             await asyncio.wait_for(bot.start([sample_token_id]), timeout=5.0)

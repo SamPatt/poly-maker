@@ -180,19 +180,6 @@ def skip_if_no_integration(integration_enabled):
         pytest.skip("Integration tests disabled (set POLY_TEST_INTEGRATION=true)")
 
 
-# --- Async Test Helpers ---
-
-
-@pytest.fixture
-def event_loop():
-    """Create event loop for async tests."""
-    import asyncio
-
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
 # --- Helper Functions ---
 
 

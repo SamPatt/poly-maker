@@ -142,7 +142,7 @@ class TestActiveQuotingConfigFromEnv:
 
     def test_from_env_dry_run_false(self):
         """Dry run should be settable to false."""
-        env_vars = {"AQ_DRY_RUN": "false"}
+        env_vars = {"AQ_DRY_RUN": "false", "AQ_ORDER_SIZE_USDC": "10.0"}
         with patch.dict(os.environ, env_vars, clear=False):
             config = ActiveQuotingConfig.from_env()
             assert config.dry_run is False
@@ -211,9 +211,9 @@ class TestActiveQuotingConfigValidation:
             ActiveQuotingConfig(max_liability_per_market_usdc=100.0, max_total_liability_usdc=50.0)
 
     def test_invalid_order_size_too_small(self):
-        """order_size_usdc < 5 should raise (Polymarket minimum)."""
+        """order_size_usdc < 5 should raise in live mode (Polymarket minimum)."""
         with pytest.raises(ValueError, match="order_size_usdc must be >= 5"):
-            ActiveQuotingConfig(order_size_usdc=4.0)
+            ActiveQuotingConfig(order_size_usdc=4.0, dry_run=False)
 
     def test_invalid_batch_size_out_of_range(self):
         """batch_size outside [1, 15] should raise."""
@@ -249,6 +249,7 @@ class TestActiveQuotingConfigValidation:
                 quote_offset_ticks=-1,
                 improve_when_spread_ticks=0,
                 order_size_usdc=1.0,
+                dry_run=False,  # order_size validation only applies in live mode
             )
         error_message = str(exc_info.value)
         assert "quote_offset_ticks" in error_message

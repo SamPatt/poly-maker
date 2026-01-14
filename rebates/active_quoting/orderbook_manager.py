@@ -228,13 +228,17 @@ class OrderbookManager:
                 await self.on_book_update(token_id, orderbook)
 
     async def _handle_price_change_event(self, data: Dict) -> None:
-        """Handle an incremental price change event."""
-        # price_change events have asset_id inside price_changes array, not at top level
-        price_changes = data.get("price_changes", [])
+        """Handle an incremental price change event.
 
+        Supports two formats:
+        1. price_changes array with asset_id inside each change
+        2. asset_id at top level with changes array
+        """
         # Track which tokens were updated so we can trigger callbacks
         updated_tokens = set()
 
+        # Format 1: price_changes array with asset_id inside each change
+        price_changes = data.get("price_changes", [])
         for change in price_changes:
             token_id = change.get("asset_id")
             if not token_id or token_id not in self._subscribed_tokens:
@@ -255,6 +259,25 @@ class OrderbookManager:
 
             orderbook.last_update_time = datetime.utcnow()
             updated_tokens.add(token_id)
+
+        # Format 2: asset_id at top level with changes array
+        top_level_token_id = data.get("asset_id")
+        changes = data.get("changes", [])
+        if top_level_token_id and top_level_token_id in self._subscribed_tokens and changes:
+            orderbook = self._orderbooks.get(top_level_token_id)
+            if orderbook:
+                for change in changes:
+                    price = float(change.get("price", 0))
+                    size = float(change.get("size", 0))
+                    side = change.get("side", "").upper()
+
+                    if side == "BUY":
+                        self._update_level(orderbook.bids, price, size, descending=True)
+                    elif side == "SELL":
+                        self._update_level(orderbook.asks, price, size, descending=False)
+
+                orderbook.last_update_time = datetime.utcnow()
+                updated_tokens.add(top_level_token_id)
 
         # Trigger callbacks for all updated tokens
         if self.on_book_update:
