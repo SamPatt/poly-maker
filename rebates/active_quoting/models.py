@@ -310,6 +310,7 @@ class MarketState:
     orderbook: OrderbookState
     momentum: MomentumState
     position: Position
+    condition_id: str = ""  # Market's condition ID for redemption
     open_orders: Dict[str, OrderState] = field(default_factory=dict)  # order_id -> OrderState
     is_quoting: bool = False  # Whether we have active quotes
     last_quote: Optional[Quote] = None

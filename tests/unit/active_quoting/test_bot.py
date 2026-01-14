@@ -674,3 +674,225 @@ class TestMarkoutLoop:
 
         # Should have captured some markouts
         assert len(captured) > 0
+
+
+# --- Redemption Integration Tests ---
+
+class TestRedemptionIntegration:
+    """Tests for redemption integration with the bot."""
+
+    def test_init_creates_redemption_manager(self, config):
+        """Test that redemption manager is created on init."""
+        bot = ActiveQuotingBot(
+            config=config,
+            api_key="test_key",
+            api_secret="test_secret",
+            api_passphrase="test_passphrase",
+        )
+
+        assert bot.redemption_manager is not None
+
+    @pytest.mark.asyncio
+    async def test_start_registers_markets_for_redemption(self, bot):
+        """Test that markets are registered with redemption manager on start."""
+        tokens = ["token_1", "token_2"]
+        market_times = {
+            "token_1": (datetime.utcnow(), datetime.utcnow() + timedelta(minutes=15)),
+            "token_2": (datetime.utcnow(), datetime.utcnow() + timedelta(minutes=30)),
+        }
+        condition_ids = {
+            "token_1": "0xcond1",
+            "token_2": "0xcond2",
+        }
+
+        await bot.start(
+            tokens,
+            market_times=market_times,
+            condition_ids=condition_ids,
+        )
+
+        # Check redemption manager has registered markets
+        state1 = bot.redemption_manager.get_state("token_1")
+        state2 = bot.redemption_manager.get_state("token_2")
+
+        assert state1 is not None
+        assert state1.condition_id == "0xcond1"
+        assert state2 is not None
+        assert state2.condition_id == "0xcond2"
+
+        # Cleanup
+        bot._running = False
+        if bot._main_task:
+            bot._main_task.cancel()
+        if bot._markout_task:
+            bot._markout_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_start_without_condition_ids(self, bot):
+        """Test that start works without condition_ids."""
+        tokens = ["token_1"]
+
+        await bot.start(tokens)
+
+        # Redemption manager should have no registered markets
+        state = bot.redemption_manager.get_state("token_1")
+        assert state is None
+
+        # Cleanup
+        bot._running = False
+        if bot._main_task:
+            bot._main_task.cancel()
+        if bot._markout_task:
+            bot._markout_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_market_state_includes_condition_id(self, bot):
+        """Test that MarketState includes condition_id."""
+        tokens = ["token_1"]
+        condition_ids = {"token_1": "0xcond1"}
+        market_times = {
+            "token_1": (datetime.utcnow(), datetime.utcnow() + timedelta(minutes=15)),
+        }
+
+        await bot.start(
+            tokens,
+            condition_ids=condition_ids,
+            market_times=market_times,
+        )
+
+        market_state = bot._markets.get("token_1")
+        assert market_state is not None
+        assert market_state.condition_id == "0xcond1"
+
+        # Cleanup
+        bot._running = False
+        if bot._main_task:
+            bot._main_task.cancel()
+        if bot._markout_task:
+            bot._markout_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_check_redemptions_with_no_ready_markets(self, bot):
+        """Test _check_redemptions with no markets ready."""
+        tokens = ["token_1"]
+        # Future end time - not ready
+        market_times = {
+            "token_1": (datetime.utcnow(), datetime.utcnow() + timedelta(minutes=15)),
+        }
+        condition_ids = {"token_1": "0xcond1"}
+
+        await bot.start(
+            tokens,
+            market_times=market_times,
+            condition_ids=condition_ids,
+        )
+
+        # Should not raise
+        await bot._check_redemptions()
+
+        # Cleanup
+        bot._running = False
+        if bot._main_task:
+            bot._main_task.cancel()
+        if bot._markout_task:
+            bot._markout_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_on_redemption_complete_clears_position(self, bot):
+        """Test that redemption complete handler clears position."""
+        tokens = ["token_1"]
+        await bot.start(tokens)
+
+        # Set up a position
+        bot.inventory_manager.set_position("token_1", 100.0, 0.50)
+
+        # Trigger redemption complete
+        await bot._on_redemption_complete(
+            token_id="token_1",
+            condition_id="0xcond1",
+            tx_hash="0xtxhash",
+            position_size=100.0,
+        )
+
+        # Position should be cleared
+        position = bot.inventory_manager.get_position("token_1")
+        assert position.size == 0.0
+
+        # Token should be removed from active tokens
+        assert "token_1" not in bot._active_tokens
+
+        # Cleanup
+        bot._running = False
+        if bot._main_task:
+            bot._main_task.cancel()
+        if bot._markout_task:
+            bot._markout_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_on_redemption_error_keeps_position(self, bot):
+        """Test that redemption error handler keeps position."""
+        tokens = ["token_1"]
+        await bot.start(tokens)
+
+        # Set up a position
+        bot.inventory_manager.set_position("token_1", 100.0, 0.50)
+
+        # Trigger redemption error
+        await bot._on_redemption_error(
+            token_id="token_1",
+            condition_id="0xcond1",
+            error_message="Transaction failed",
+        )
+
+        # Position should still exist
+        position = bot.inventory_manager.get_position("token_1")
+        assert position.size == 100.0
+
+        # Cleanup
+        bot._running = False
+        if bot._main_task:
+            bot._main_task.cancel()
+        if bot._markout_task:
+            bot._markout_task.cancel()
+
+    def test_get_status_includes_redemptions(self, bot):
+        """Test that get_status includes redemption summary."""
+        status = bot.get_status()
+
+        assert "redemptions" in status
+        assert "total_markets" in status["redemptions"]
+        assert "pending_redemptions" in status["redemptions"]
+        assert "completed_redemptions" in status["redemptions"]
+
+
+# --- Inventory Manager Clear Position Tests ---
+
+class TestInventoryManagerClearPosition:
+    """Tests for inventory manager clear_position method."""
+
+    def test_clear_position_zeros_size(self, bot):
+        """Test that clear_position zeros the size."""
+        bot.inventory_manager.set_position("token_1", 100.0, 0.50)
+        bot.inventory_manager.clear_position("token_1")
+
+        position = bot.inventory_manager.get_position("token_1")
+        assert position.size == 0.0
+        assert position.avg_entry_price == 0.0
+
+    def test_clear_position_preserves_realized_pnl(self, bot):
+        """Test that clear_position preserves realized PnL."""
+        bot.inventory_manager.set_position("token_1", 100.0, 0.50)
+        position = bot.inventory_manager.get_position("token_1")
+        position.realized_pnl = 25.0
+
+        bot.inventory_manager.clear_position("token_1")
+
+        # Realized PnL should be preserved
+        position = bot.inventory_manager.get_position("token_1")
+        assert position.realized_pnl == 25.0
+        assert position.size == 0.0
+
+    def test_clear_position_nonexistent_no_error(self, bot):
+        """Test that clear_position on nonexistent position does nothing."""
+        # Should not raise
+        bot.inventory_manager.clear_position("nonexistent")

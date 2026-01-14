@@ -427,6 +427,53 @@ def send_active_quoting_market_halt_alert(
     return send_alert(message)
 
 
+def send_active_quoting_redemption_alert(
+    market_name: str,
+    position_size: float,
+    tx_hash: Optional[str] = None,
+    success: bool = True,
+    error_message: Optional[str] = None,
+) -> bool:
+    """
+    Send alert when a position is redeemed after market resolution.
+
+    Args:
+        market_name: Market name/identifier
+        position_size: Size of the position that was redeemed
+        tx_hash: Transaction hash (if successful)
+        success: Whether redemption was successful
+        error_message: Error message (if failed)
+
+    Returns:
+        True if sent successfully
+    """
+    # Truncate long market names
+    if len(market_name) > 40:
+        market_name = market_name[:37] + "..."
+
+    if success:
+        emoji = "💰"
+        message = f"{emoji} <b>Position Redeemed</b>\n\n"
+        message += f"<b>Market:</b> {market_name}\n"
+        message += f"<b>Size:</b> {position_size:.2f} shares\n"
+        if tx_hash:
+            # Truncate tx hash for display
+            tx_display = tx_hash[:20] + "..." if len(tx_hash) > 20 else tx_hash
+            message += f"<b>Tx:</b> <code>{tx_display}</code>"
+    else:
+        emoji = "⚠️"
+        message = f"{emoji} <b>Redemption Failed</b>\n\n"
+        message += f"<b>Market:</b> {market_name}\n"
+        message += f"<b>Size:</b> {position_size:.2f} shares\n"
+        if error_message:
+            # Truncate long error messages
+            if len(error_message) > 100:
+                error_message = error_message[:97] + "..."
+            message += f"<b>Error:</b> <code>{error_message}</code>"
+
+    return send_alert(message)
+
+
 # Re-export TELEGRAM_ENABLED for checking if alerts are configured
 __all__ = [
     "TELEGRAM_ENABLED",
@@ -437,5 +484,6 @@ __all__ = [
     "send_active_quoting_daily_summary",
     "send_active_quoting_error_alert",
     "send_active_quoting_market_halt_alert",
+    "send_active_quoting_redemption_alert",
     "FillAlertThrottler",
 ]

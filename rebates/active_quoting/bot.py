@@ -41,6 +41,7 @@ from .momentum_detector import MomentumDetector
 from .risk_manager import RiskManager, CircuitBreakerState
 from .fill_analytics import FillAnalytics
 from .persistence import ActiveQuotingPersistence, PersistenceConfig
+from .redemption_manager import RedemptionManager
 from .alerts import (
     TELEGRAM_ENABLED,
     send_active_quoting_startup_alert,
@@ -49,6 +50,7 @@ from .alerts import (
     send_active_quoting_circuit_breaker_alert,
     send_active_quoting_daily_summary,
     send_active_quoting_market_halt_alert,
+    send_active_quoting_redemption_alert,
 )
 
 logger = logging.getLogger(__name__)
@@ -160,6 +162,14 @@ class ActiveQuotingBot:
 
         self.fill_analytics = FillAnalytics(
             on_markout_captured=self._on_markout_captured,
+        )
+
+        self.redemption_manager = RedemptionManager(
+            on_redemption_complete=self._on_redemption_complete,
+            on_redemption_error=self._on_redemption_error,
+            resolution_check_delay_seconds=60.0,  # Wait 60s after market end before first check
+            resolution_check_interval_seconds=30.0,  # Check every 30s until resolved
+            max_resolution_check_attempts=20,  # Give up after ~10 minutes
         )
 
         # WebSocket managers
@@ -282,6 +292,7 @@ class ActiveQuotingBot:
         token_ids: List[str],
         market_names: Optional[Dict[str, str]] = None,
         market_times: Optional[Dict[str, tuple[datetime, datetime]]] = None,
+        condition_ids: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Start the bot for the given token IDs.
@@ -290,6 +301,7 @@ class ActiveQuotingBot:
             token_ids: List of token IDs to quote on
             market_names: Optional mapping of token_id -> human-readable name
             market_times: Optional mapping of token_id -> (start_time, end_time) in UTC
+            condition_ids: Optional mapping of token_id -> condition_id for redemption
         """
         if self._running:
             logger.warning("Bot is already running")
@@ -345,6 +357,7 @@ class ActiveQuotingBot:
         for token_id in token_ids:
             # Use restored position if available
             position = self.inventory_manager.get_position(token_id)
+            condition_id = condition_ids.get(token_id, "") if condition_ids else ""
             self._markets[token_id] = MarketState(
                 token_id=token_id,
                 reverse_token_id="",  # Will be set if available
@@ -352,12 +365,22 @@ class ActiveQuotingBot:
                 orderbook=OrderbookState(token_id=token_id),
                 momentum=MomentumState(token_id=token_id),
                 position=position,
+                condition_id=condition_id,
             )
 
             # Register market time windows for smart stale detection
             if market_times and token_id in market_times:
                 start_time, end_time = market_times[token_id]
                 self.risk_manager.set_market_time_window(token_id, start_time, end_time)
+
+                # Register market for redemption if we have condition_id
+                if condition_id:
+                    self.redemption_manager.register_market(
+                        token_id=token_id,
+                        condition_id=condition_id,
+                        market_end_time=end_time,
+                        position_size=position.size,
+                    )
 
         try:
             # Start session in database (Phase 6)
@@ -565,6 +588,9 @@ class ActiveQuotingBot:
                 stale = self.risk_manager.check_stale_feeds()
                 if stale:
                     logger.warning(f"Stale feeds detected: {len(stale)} markets")
+
+                # Check for resolved markets that need redemption
+                await self._check_redemptions()
 
                 # Check circuit breaker state
                 if self.risk_manager.state == CircuitBreakerState.HALTED:
@@ -946,6 +972,102 @@ class ActiveQuotingBot:
         if self.persistence.is_enabled:
             self.persistence.save_markout(sample)
 
+    # --- Redemption Handling ---
+
+    async def _check_redemptions(self) -> None:
+        """Check for markets ready for redemption and trigger redemptions."""
+        # Get markets ready to check
+        ready_markets = self.redemption_manager.get_markets_ready_for_check()
+
+        for state in ready_markets:
+            token_id = state.token_id
+
+            # Get current position size from inventory manager
+            position = self.inventory_manager.get_position(token_id)
+            current_size = position.size
+
+            # Update redemption manager with current position
+            self.redemption_manager.update_position_size(token_id, current_size)
+
+            # Skip if no position
+            if current_size <= 0:
+                logger.info(
+                    f"No position to redeem for {token_id[:20]}... (size: {current_size})"
+                )
+                continue
+
+            # Cancel any open orders for this market before redemption
+            market = self._markets.get(token_id)
+            if market and market.is_quoting:
+                logger.info(f"Cancelling quotes for {token_id[:20]}... before redemption")
+                await self._cancel_market_quotes(token_id)
+
+            # Attempt redemption
+            await self.redemption_manager.attempt_redemption(token_id, current_size)
+
+    async def _on_redemption_complete(
+        self,
+        token_id: str,
+        condition_id: str,
+        tx_hash: str,
+        position_size: float,
+    ) -> None:
+        """Handle successful redemption."""
+        logger.info(
+            f"Redemption complete for {token_id[:20]}...: "
+            f"size={position_size:.2f}, tx={tx_hash[:20] if tx_hash else 'N/A'}..."
+        )
+
+        # Clear position from inventory manager
+        # Note: The actual balance will be updated on next position sync from API
+        self.inventory_manager.clear_position(token_id)
+
+        # Remove from active tokens (no longer need to quote on this market)
+        self._active_tokens.discard(token_id)
+
+        # Clear from persistence
+        if self.persistence.is_enabled:
+            self.persistence.clear_position(token_id)
+
+        # Get market name for alert
+        market_name = self._market_names.get(token_id, token_id[:40])
+
+        # Send alert
+        if self._enable_alerts:
+            send_active_quoting_redemption_alert(
+                market_name=market_name,
+                position_size=position_size,
+                tx_hash=tx_hash,
+                success=True,
+            )
+
+    async def _on_redemption_error(
+        self,
+        token_id: str,
+        condition_id: str,
+        error_message: str,
+    ) -> None:
+        """Handle failed redemption."""
+        logger.error(
+            f"Redemption failed for {token_id[:20]}...: {error_message}"
+        )
+
+        # Get position size for alert
+        position = self.inventory_manager.get_position(token_id)
+        position_size = position.size
+
+        # Get market name for alert
+        market_name = self._market_names.get(token_id, token_id[:40])
+
+        # Send alert
+        if self._enable_alerts:
+            send_active_quoting_redemption_alert(
+                market_name=market_name,
+                position_size=position_size,
+                success=False,
+                error_message=error_message,
+            )
+
     # --- Daily Summary Loop (Phase 6) ---
 
     async def _daily_summary_loop(self) -> None:
@@ -1030,6 +1152,7 @@ class ActiveQuotingBot:
             "positions": self.inventory_manager.get_summary(),
             "risk": self.risk_manager.get_summary(),
             "analytics": self.fill_analytics.get_summary(),
+            "redemptions": self.redemption_manager.get_summary(),
         }
 
     def is_running(self) -> bool:
@@ -1075,13 +1198,14 @@ def discover_markets(assets: List[str]) -> List[Dict[str, Any]]:
 
 def get_token_ids_from_markets(
     markets: List[Dict[str, Any]]
-) -> tuple[List[str], Dict[str, str], Dict[str, tuple[datetime, datetime]]]:
+) -> tuple[List[str], Dict[str, str], Dict[str, tuple[datetime, datetime]], Dict[str, str]]:
     """
-    Extract token IDs, market names, and time windows from market data.
+    Extract token IDs, market names, time windows, and condition IDs from market data.
 
     Returns:
-        Tuple of (token_ids, market_names dict, market_times dict)
+        Tuple of (token_ids, market_names dict, market_times dict, condition_ids dict)
         market_times maps token_id -> (start_time, end_time) in UTC
+        condition_ids maps token_id -> condition_id for redemption
     """
     import json
     from datetime import datetime, timedelta
@@ -1089,11 +1213,13 @@ def get_token_ids_from_markets(
     token_ids = []
     market_names = {}
     market_times = {}  # token_id -> (start_time, end_time)
+    condition_ids = {}  # token_id -> condition_id
 
     for market in markets:
         # Get tokens from clobTokenIds (may be JSON string or list)
         clob_tokens = market.get("clobTokenIds", [])
         question = market.get("question", "Unknown")
+        condition_id = market.get("conditionId", "")
 
         # Parse if it's a JSON string
         if isinstance(clob_tokens, str):
@@ -1126,8 +1252,10 @@ def get_token_ids_from_markets(
                 market_names[token_id] = question
                 if start_time and end_time:
                     market_times[token_id] = (start_time, end_time)
+                if condition_id:
+                    condition_ids[token_id] = condition_id
 
-    return token_ids, market_names, market_times
+    return token_ids, market_names, market_times, condition_ids
 
 
 async def run_bot(
@@ -1160,6 +1288,7 @@ async def run_bot(
 
     market_names = {}
     market_times = {}
+    condition_ids = {}
 
     # Auto-discover markets if no tokens provided
     if not token_ids:
@@ -1170,7 +1299,7 @@ async def run_bot(
             logger.error("No upcoming markets found. Exiting.")
             return
 
-        token_ids, market_names, market_times = get_token_ids_from_markets(markets)
+        token_ids, market_names, market_times, condition_ids = get_token_ids_from_markets(markets)
 
         if not token_ids:
             logger.error("No token IDs found in discovered markets. Exiting.")
@@ -1190,7 +1319,12 @@ async def run_bot(
     )
 
     try:
-        await bot.start(token_ids, market_names=market_names, market_times=market_times)
+        await bot.start(
+            token_ids,
+            market_names=market_names,
+            market_times=market_times,
+            condition_ids=condition_ids,
+        )
 
         # Main loop - periodically check for new markets
         check_interval = 60  # Check for new markets every 60 seconds
@@ -1200,7 +1334,7 @@ async def run_bot(
 
             # Discover new markets
             new_markets = discover_markets(config.assets)
-            new_token_ids, new_names, new_times = get_token_ids_from_markets(new_markets)
+            new_token_ids, new_names, new_times, new_cids = get_token_ids_from_markets(new_markets)
 
             # Find tokens we're not already tracking
             current_tokens = bot._active_tokens
@@ -1212,6 +1346,8 @@ async def run_bot(
                         market_names[tid] = new_names[tid]
                     if tid in new_times:
                         market_times[tid] = new_times[tid]
+                    if tid in new_cids:
+                        condition_ids[tid] = new_cids[tid]
 
             if added:
                 logger.info(f"Discovered {len(added)} new tokens, adding to bot")

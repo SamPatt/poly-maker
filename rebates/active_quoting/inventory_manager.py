@@ -359,6 +359,21 @@ class InventoryManager:
         if token_id in self._positions:
             del self._positions[token_id]
 
+    def clear_position(self, token_id: str) -> None:
+        """
+        Clear position size for a token after redemption.
+
+        Unlike reset_position, this preserves realized PnL for tracking.
+
+        Args:
+            token_id: Token ID
+        """
+        if token_id in self._positions:
+            position = self._positions[token_id]
+            position.size = 0.0
+            position.avg_entry_price = 0.0
+            # Keep realized_pnl and total_fees_paid for session tracking
+
     def reset_all(self) -> None:
         """Reset all positions."""
         self._positions.clear()
