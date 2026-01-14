@@ -1594,6 +1594,17 @@ async def run_bot(
         poly_client=poly_client,
     )
 
+    # Set up signal handlers for graceful shutdown
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+
+    def signal_handler():
+        logger.info("Received shutdown signal")
+        shutdown_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, signal_handler)
+
     try:
         await bot.start(
             token_ids,
@@ -1605,8 +1616,13 @@ async def run_bot(
         # Main loop - periodically check for new markets
         check_interval = 60  # Check for new markets every 60 seconds
 
-        while bot.is_running():
-            await asyncio.sleep(check_interval)
+        while bot.is_running() and not shutdown_event.is_set():
+            # Use wait_for with timeout so we can check shutdown_event
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=check_interval)
+                break  # Shutdown requested
+            except asyncio.TimeoutError:
+                pass  # Normal timeout, continue loop
 
             # Discover new markets
             new_markets = discover_markets(config.assets)
