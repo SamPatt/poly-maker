@@ -198,6 +198,7 @@ class Fill:
     fee: float = 0.0
     timestamp: datetime = field(default_factory=datetime.utcnow)
     trade_id: Optional[str] = None
+    ws_sequence: Optional[int] = None
 
     @property
     def notional(self) -> float:
@@ -228,6 +229,7 @@ class OrderState:
     fills: List[Fill] = field(default_factory=list)
     post_only: bool = True
     fee_rate_bps: int = 0
+    ws_sequence: Optional[int] = None
 
     @property
     def filled_size(self) -> float:

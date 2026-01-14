@@ -553,6 +553,72 @@ class OrderManager:
             self._pending_orders[order_id].status = status
             self._pending_orders[order_id].updated_at = datetime.utcnow()
 
+    def reconcile_with_api_orders(self, api_orders: List[Dict[str, Any]]) -> None:
+        """
+        Reconcile internal order state with orders fetched from REST API.
+
+        This ensures cancel_all() and open-order tracking reflect reality
+        after reconnects or missed WebSocket updates.
+        """
+        api_order_ids: Set[str] = set()
+
+        for api_order in api_orders or []:
+            order_id = api_order.get("id") or api_order.get("order_id")
+            if not order_id:
+                continue
+
+            api_order_ids.add(order_id)
+
+            status_str = api_order.get("status", "").upper()
+            status_map = {
+                "PENDING": OrderStatus.PENDING,
+                "OPEN": OrderStatus.OPEN,
+                "LIVE": OrderStatus.OPEN,
+                "MATCHED": OrderStatus.PARTIALLY_FILLED,
+                "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
+                "FILLED": OrderStatus.FILLED,
+                "CANCELLED": OrderStatus.CANCELLED,
+                "CANCELED": OrderStatus.CANCELLED,
+                "EXPIRED": OrderStatus.EXPIRED,
+                "REJECTED": OrderStatus.REJECTED,
+            }
+            status = status_map.get(status_str, OrderStatus.PENDING)
+
+            side_str = api_order.get("side", "").upper()
+            side = OrderSide.BUY if side_str == "BUY" else OrderSide.SELL
+            token_id = api_order.get("asset_id", api_order.get("token_id", ""))
+
+            original_size = float(api_order.get("original_size", api_order.get("size", 0)))
+            matched = float(api_order.get("size_matched", 0))
+            remaining_size = float(api_order.get("remaining_size", original_size - matched))
+            price = float(api_order.get("price", 0))
+
+            if order_id in self._pending_orders:
+                order = self._pending_orders[order_id]
+                order.status = status
+                order.remaining_size = remaining_size
+                order.updated_at = datetime.utcnow()
+            else:
+                order = OrderState(
+                    order_id=order_id,
+                    token_id=token_id,
+                    side=side,
+                    price=price,
+                    original_size=original_size,
+                    remaining_size=remaining_size,
+                    status=status,
+                )
+                self._pending_orders[order_id] = order
+
+        for order_id, order in list(self._pending_orders.items()):
+            if order.is_open() and order_id not in api_order_ids:
+                logger.warning(
+                    f"Reconcile: Order {order_id} not in API response, "
+                    f"marking as cancelled"
+                )
+                order.status = OrderStatus.CANCELLED
+                order.updated_at = datetime.utcnow()
+
     def remove_order(self, order_id: str) -> Optional[OrderState]:
         """Remove an order from tracking."""
         return self._pending_orders.pop(order_id, None)

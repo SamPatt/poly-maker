@@ -359,6 +359,8 @@ class ActiveQuotingBot:
 
             # Reconcile user channel manager state with API orders
             self.user_channel_manager.reconcile_with_api_orders(open_orders)
+            # Reconcile order manager state for cancel_all accuracy
+            self.order_manager.reconcile_with_api_orders(open_orders)
 
             # Reconcile pending buy reservations
             # Build set of token_ids with open BUY orders and their sizes
@@ -386,6 +388,13 @@ class ActiveQuotingBot:
                         f"from {current_pending:.2f} to {expected_pending:.2f} (excess: {excess:.2f})"
                     )
                     self.inventory_manager.release_pending_buy(token_id, excess)
+                elif expected_pending > current_pending + 0.01:
+                    delta = expected_pending - current_pending
+                    logger.warning(
+                        f"Reconcile: Increasing pending buys for {token_id[:20]}... "
+                        f"from {current_pending:.2f} to {expected_pending:.2f} (delta: {delta:.2f})"
+                    )
+                    self.inventory_manager.reserve_pending_buy(token_id, delta)
 
             logger.debug("Order reconciliation complete")
 
@@ -1058,6 +1067,7 @@ class ActiveQuotingBot:
             size=fill.size,
             fee=fill.fee,
             trade_id=fill.trade_id,
+            ws_sequence=fill.ws_sequence,
         )
 
         # Update inventory
@@ -1118,6 +1128,7 @@ class ActiveQuotingBot:
             status=order_state.status.value,
             original_size=order_state.original_size,
             remaining_size=order_state.remaining_size,
+            ws_sequence=order_state.ws_sequence,
         )
         
         # Sync order_manager's state with authoritative user channel state

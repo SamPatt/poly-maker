@@ -202,6 +202,28 @@ class UserChannelManager:
         else:
             await self._handle_single_message(data)
 
+    def _extract_ws_sequence(self, data: Dict) -> Optional[int]:
+        """Extract a WebSocket sequence number if present in the message."""
+        if not isinstance(data, dict):
+            return None
+
+        for key in (
+            "sequence",
+            "seq",
+            "sequence_number",
+            "sequenceNumber",
+            "message_seq",
+            "message_sequence",
+            "seq_num",
+            "seqNum",
+        ):
+            if key in data:
+                try:
+                    return int(data.get(key))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
     async def _handle_single_message(self, data: Dict) -> None:
         """Handle a single parsed message."""
         if not isinstance(data, dict):
@@ -226,24 +248,26 @@ class UserChannelManager:
 
         event_type = data.get("event_type")
 
+        ws_sequence = self._extract_ws_sequence(data)
+
         if event_type == "order":
-            await self._handle_order_event(data)
+            await self._handle_order_event(data, ws_sequence)
         elif event_type == "trade":
-            await self._handle_trade_event(data)
+            await self._handle_trade_event(data, ws_sequence)
         # Also handle direct order/trade objects without event_type wrapper
         elif "order_id" in data and "status" in data:
-            await self._handle_order_event(data)
+            await self._handle_order_event(data, ws_sequence)
         # Handle Polymarket format: has 'id', 'asset_id', 'side', 'price', 'size', 'market'
         elif "id" in data and "asset_id" in data and "market" in data:
             # This is likely a trade event in Polymarket format
-            await self._handle_trade_event(data)
+            await self._handle_trade_event(data, ws_sequence)
         elif "trade_id" in data or ("order_id" in data and "price" in data and "size" in data):
-            await self._handle_trade_event(data)
+            await self._handle_trade_event(data, ws_sequence)
         else:
             # Log unknown message formats for debugging
             logger.debug(f"Unknown user WS message format: {list(data.keys())[:6]}")
 
-    async def _handle_order_event(self, data: Dict) -> None:
+    async def _handle_order_event(self, data: Dict, ws_sequence: Optional[int] = None) -> None:
         """Handle an order status update."""
         order_id = data.get("order_id") or data.get("id")
         if not order_id:
@@ -280,6 +304,8 @@ class UserChannelManager:
             order = self._orders[order_id]
             order.status = status
             order.updated_at = datetime.utcnow()
+            if ws_sequence is not None:
+                order.ws_sequence = ws_sequence
 
             # Update remaining size if provided
             if "remaining_size" in data or "size_matched" in data:
@@ -303,6 +329,7 @@ class UserChannelManager:
                 remaining_size=remaining_size,
                 status=status,
                 fee_rate_bps=fee_rate_bps,
+                ws_sequence=ws_sequence,
             )
             self._orders[order_id] = order
 
@@ -321,7 +348,7 @@ class UserChannelManager:
         if order.is_done():
             self._maybe_cleanup_order(order_id, token_id)
 
-    async def _handle_trade_event(self, data: Dict) -> None:
+    async def _handle_trade_event(self, data: Dict, ws_sequence: Optional[int] = None) -> None:
         """
         Handle a fill/trade event.
 
@@ -430,6 +457,7 @@ class UserChannelManager:
             fee=fee,
             timestamp=timestamp,
             trade_id=trade_id,
+            ws_sequence=ws_sequence,
         )
 
         logger.info(f"Fill: trade={trade_id} token={token_id[:20] if token_id else 'N/A'}... side={side.value} price={price} size={size}")
