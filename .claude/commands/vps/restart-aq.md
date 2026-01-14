@@ -16,13 +16,16 @@ Execute these commands:
 3. Wait briefly:
    `sleep 1`
 
-4. Start the AQ bot:
-   `ssh trading "cd /home/polymaker/poly-maker && screen -dmS aq bash -c 'source .venv/bin/activate && python -m rebates.active_quoting.bot 2>&1 | tee /tmp/aq.log'"`
+4. Rotate logs (keep last 5):
+   `ssh trading "cd /tmp && rm -f aq.log.5 && for i in 4 3 2 1; do [ -f aq.log.\$i ] && mv aq.log.\$i aq.log.\$((i+1)); done; [ -f aq.log ] && mv aq.log aq.log.1; touch aq.log"`
 
-5. Wait for startup:
+5. Start the AQ bot (appending to log):
+   `ssh trading "cd /home/polymaker/poly-maker && screen -dmS aq bash -c 'source .venv/bin/activate && python -m rebates.active_quoting.bot 2>&1 | tee -a /tmp/aq.log'"`
+
+6. Wait for startup:
    `sleep 5`
 
-6. Verify it started and show initial logs:
+7. Verify it started and show initial logs:
    `ssh trading "pgrep -f 'rebates.active_quoting.bot' && echo 'AQ bot restarted successfully' || echo 'Failed to restart AQ bot'"`
    `ssh trading "tail -20 /tmp/aq.log"`
 
