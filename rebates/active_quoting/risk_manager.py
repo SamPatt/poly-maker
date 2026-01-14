@@ -43,7 +43,7 @@ class HaltReason(Enum):
 
 @dataclass
 class MarketRiskState:
-    """Risk state for a single market."""
+    """Risk state for a single token (one side of a market)."""
     token_id: str
     realized_pnl: float = 0.0       # Cumulative realized P&L
     unrealized_pnl: float = 0.0     # Current unrealized P&L
@@ -60,6 +60,20 @@ class MarketRiskState:
     def total_pnl(self) -> float:
         """Total P&L (realized + unrealized)."""
         return self.realized_pnl + self.unrealized_pnl
+
+    def update_pnl(self, realized: float, unrealized: float) -> None:
+        """Update P&L and recalculate drawdown."""
+        self.realized_pnl = realized
+        self.unrealized_pnl = unrealized
+        total = self.total_pnl
+
+        # Update peak if we have new high
+        if total > self.peak_pnl:
+            self.peak_pnl = total
+
+        # Calculate drawdown from peak
+        self.current_drawdown = self.peak_pnl - total
+        self.last_update_time = datetime.utcnow()
 
     def should_monitor_staleness(self, now: Optional[datetime] = None) -> bool:
         """
@@ -96,19 +110,40 @@ class MarketRiskState:
         # Future market (more than 15 min away) - do not monitor
         return False
 
-    def update_pnl(self, realized: float, unrealized: float) -> None:
-        """Update P&L and recalculate drawdown."""
-        self.realized_pnl = realized
-        self.unrealized_pnl = unrealized
-        total = self.total_pnl
+
+@dataclass
+class MarketPairRiskState:
+    """
+    Risk state for a market pair (both UP and DOWN tokens).
+
+    In binary markets, holding both sides reduces risk since UP + DOWN = $1 at resolution.
+    Drawdown should be calculated on the combined position, not individually.
+    """
+    condition_id: str
+    token_ids: List[str] = field(default_factory=list)  # Tokens in this pair
+    combined_realized_pnl: float = 0.0
+    combined_unrealized_pnl: float = 0.0
+    peak_combined_pnl: float = 0.0
+    current_drawdown: float = 0.0
+    halted: bool = False
+
+    @property
+    def combined_pnl(self) -> float:
+        """Total combined P&L for the market pair."""
+        return self.combined_realized_pnl + self.combined_unrealized_pnl
+
+    def update_combined_pnl(self, realized: float, unrealized: float) -> None:
+        """Update combined P&L and recalculate drawdown."""
+        self.combined_realized_pnl = realized
+        self.combined_unrealized_pnl = unrealized
+        total = self.combined_pnl
 
         # Update peak if we have new high
-        if total > self.peak_pnl:
-            self.peak_pnl = total
+        if total > self.peak_combined_pnl:
+            self.peak_combined_pnl = total
 
         # Calculate drawdown from peak
-        self.current_drawdown = self.peak_pnl - total
-        self.last_update_time = datetime.utcnow()
+        self.current_drawdown = self.peak_combined_pnl - total
 
 
 @dataclass
@@ -183,6 +218,10 @@ class RiskManager:
         self._global_state = GlobalRiskState()
         self._stale_markets: Set[str] = set()
 
+        # Market pair tracking (for combined drawdown calculation)
+        self._token_to_condition: Dict[str, str] = {}  # token_id -> condition_id
+        self._market_pair_states: Dict[str, MarketPairRiskState] = {}  # condition_id -> state
+
         # Recovery parameters
         self._recovery_duration_seconds = getattr(
             config, 'circuit_breaker_recovery_seconds', 60.0
@@ -242,6 +281,39 @@ class RiskManager:
         market_state.market_start_time = start_time
         market_state.market_end_time = end_time
 
+    def register_token_pair(self, token_id: str, condition_id: str) -> None:
+        """
+        Register a token as part of a market pair.
+
+        In binary markets, UP and DOWN tokens share the same condition_id.
+        This allows us to calculate combined drawdown across both sides.
+
+        Args:
+            token_id: Token ID
+            condition_id: Market's condition ID (shared by both UP and DOWN tokens)
+        """
+        if not condition_id:
+            return
+
+        self._token_to_condition[token_id] = condition_id
+
+        # Create or update market pair state
+        if condition_id not in self._market_pair_states:
+            self._market_pair_states[condition_id] = MarketPairRiskState(
+                condition_id=condition_id,
+                token_ids=[token_id],
+            )
+        elif token_id not in self._market_pair_states[condition_id].token_ids:
+            self._market_pair_states[condition_id].token_ids.append(token_id)
+
+    def get_market_pair_state(self, condition_id: str) -> Optional[MarketPairRiskState]:
+        """Get the market pair state for a condition_id."""
+        return self._market_pair_states.get(condition_id)
+
+    def _get_condition_id_for_token(self, token_id: str) -> Optional[str]:
+        """Get the condition_id for a token, if registered."""
+        return self._token_to_condition.get(token_id)
+
     # --- P&L Tracking ---
 
     def update_market_pnl(
@@ -261,11 +333,39 @@ class RiskManager:
         market_state = self.get_market_state(token_id)
         market_state.update_pnl(realized_pnl, unrealized_pnl)
 
+        # Update market pair state if token is part of a pair
+        self._update_market_pair_pnl(token_id)
+
         # Recalculate global state
         self._recalculate_global_pnl()
 
-        # Check for drawdown limits
+        # Check for drawdown limits (uses combined drawdown for pairs)
         self._check_drawdown_limits(token_id)
+
+    def _update_market_pair_pnl(self, token_id: str) -> None:
+        """
+        Update combined P&L for the market pair this token belongs to.
+
+        Args:
+            token_id: Token ID that was just updated
+        """
+        condition_id = self._get_condition_id_for_token(token_id)
+        if not condition_id:
+            return
+
+        pair_state = self._market_pair_states.get(condition_id)
+        if not pair_state:
+            return
+
+        # Sum P&L across all tokens in the pair
+        combined_realized = 0.0
+        combined_unrealized = 0.0
+        for tid in pair_state.token_ids:
+            if tid in self._market_states:
+                combined_realized += self._market_states[tid].realized_pnl
+                combined_unrealized += self._market_states[tid].unrealized_pnl
+
+        pair_state.update_combined_pnl(combined_realized, combined_unrealized)
 
     def update_from_position(
         self,
@@ -301,24 +401,57 @@ class RiskManager:
         self._global_state.update_total_pnl()
 
     def _check_drawdown_limits(self, token_id: str) -> None:
-        """Check if drawdown limits have been exceeded."""
+        """
+        Check if drawdown limits have been exceeded.
+
+        For tokens that are part of a market pair (binary markets with UP/DOWN),
+        uses COMBINED drawdown across both sides. This prevents false halts when
+        holding both sides of a market (which is hedged).
+        """
         market_state = self.get_market_state(token_id)
 
-        # Check per-market drawdown
-        if market_state.current_drawdown >= self.config.max_drawdown_per_market_usdc:
-            if not market_state.halted:
-                market_state.halted = True
-                logger.warning(
-                    f"Market {token_id} halted: drawdown ${market_state.current_drawdown:.2f} "
-                    f">= limit ${self.config.max_drawdown_per_market_usdc:.2f}"
-                )
-                if self.on_market_halt:
-                    asyncio.create_task(
-                        self.on_market_halt(
-                            token_id,
-                            f"Drawdown ${market_state.current_drawdown:.2f} exceeded limit"
-                        )
+        # Check if this token is part of a market pair
+        condition_id = self._get_condition_id_for_token(token_id)
+        pair_state = self._market_pair_states.get(condition_id) if condition_id else None
+
+        if pair_state:
+            # Use COMBINED drawdown for market pairs
+            if pair_state.current_drawdown >= self.config.max_drawdown_per_market_usdc:
+                if not pair_state.halted:
+                    pair_state.halted = True
+                    # Also halt all individual tokens in the pair
+                    for tid in pair_state.token_ids:
+                        if tid in self._market_states:
+                            self._market_states[tid].halted = True
+                    logger.warning(
+                        f"Market pair {condition_id[:20]}... halted: "
+                        f"combined drawdown ${pair_state.current_drawdown:.2f} "
+                        f">= limit ${self.config.max_drawdown_per_market_usdc:.2f}"
                     )
+                    if self.on_market_halt:
+                        # Notify for the token that triggered the check
+                        asyncio.create_task(
+                            self.on_market_halt(
+                                token_id,
+                                f"Drawdown ${pair_state.current_drawdown:.2f} exceeded limit"
+                            )
+                        )
+        else:
+            # Fallback to individual token drawdown (no pair registered)
+            if market_state.current_drawdown >= self.config.max_drawdown_per_market_usdc:
+                if not market_state.halted:
+                    market_state.halted = True
+                    logger.warning(
+                        f"Market {token_id} halted: drawdown ${market_state.current_drawdown:.2f} "
+                        f">= limit ${self.config.max_drawdown_per_market_usdc:.2f}"
+                    )
+                    if self.on_market_halt:
+                        asyncio.create_task(
+                            self.on_market_halt(
+                                token_id,
+                                f"Drawdown ${market_state.current_drawdown:.2f} exceeded limit"
+                            )
+                        )
 
         # Check global drawdown
         if self._global_state.current_drawdown >= self.config.max_drawdown_global_usdc:
@@ -653,10 +786,17 @@ class RiskManager:
         if self.state == CircuitBreakerState.HALTED:
             return False, "Circuit breaker halted"
 
-        # Check market-specific halt
+        # Check market pair halt (if token is part of a pair)
+        condition_id = self._get_condition_id_for_token(token_id)
+        if condition_id:
+            pair_state = self._market_pair_states.get(condition_id)
+            if pair_state and pair_state.halted:
+                return False, "Market pair halted due to combined drawdown"
+
+        # Check market-specific halt (fallback for non-paired tokens)
         market_state = self.get_market_state(token_id)
         if market_state.halted:
-            return False, f"Market halted due to drawdown"
+            return False, "Market halted due to drawdown"
 
         # Check stale feed
         if market_state.is_stale:

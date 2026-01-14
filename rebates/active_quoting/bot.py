@@ -559,8 +559,14 @@ class ActiveQuotingBot:
                 start_time, end_time = market_times[token_id]
                 self.risk_manager.set_market_time_window(token_id, start_time, end_time)
 
+            # Register token pair for combined drawdown calculation
+            # (both UP and DOWN tokens in a binary market share the same condition_id)
+            if condition_id:
+                self.risk_manager.register_token_pair(token_id, condition_id)
+
                 # Register market for redemption if we have condition_id
-                if condition_id:
+                if market_times and token_id in market_times:
+                    start_time, end_time = market_times[token_id]
                     self.redemption_manager.register_market(
                         token_id=token_id,
                         condition_id=condition_id,
