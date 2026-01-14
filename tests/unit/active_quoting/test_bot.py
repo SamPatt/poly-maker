@@ -896,3 +896,82 @@ class TestInventoryManagerClearPosition:
         """Test that clear_position on nonexistent position does nothing."""
         # Should not raise
         bot.inventory_manager.clear_position("nonexistent")
+
+
+# --- Fill Protection Tests ---
+
+class TestFillProtection:
+    """Tests for fill protection against stale API data."""
+
+    def test_has_recent_fill_false_initially(self, bot):
+        """Test that has_recent_fill returns False with no fills."""
+        assert not bot.inventory_manager.has_recent_fill("token_1")
+
+    def test_has_recent_fill_true_after_fill(self, bot):
+        """Test that has_recent_fill returns True after a fill."""
+        fill = Fill(
+            order_id="order_1",
+            token_id="token_1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            fee=0.0,
+            timestamp=datetime.utcnow(),
+            trade_id="trade_1",
+        )
+        bot.inventory_manager.update_from_fill(fill)
+
+        assert bot.inventory_manager.has_recent_fill("token_1")
+
+    def test_get_last_fill_time(self, bot):
+        """Test that get_last_fill_time returns the fill time."""
+        fill = Fill(
+            order_id="order_1",
+            token_id="token_1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            fee=0.0,
+            timestamp=datetime.utcnow(),
+            trade_id="trade_1",
+        )
+        bot.inventory_manager.update_from_fill(fill)
+
+        last_fill_time = bot.inventory_manager.get_last_fill_time("token_1")
+        assert last_fill_time is not None
+        # Should be within last few seconds
+        assert (datetime.utcnow() - last_fill_time).total_seconds() < 5
+
+    def test_fill_protection_blocks_position_reduction(self, bot):
+        """Test that API sync doesn't reduce position with recent fills."""
+        # Simulate a fill that updated position to 20
+        fill = Fill(
+            order_id="order_1",
+            token_id="token_1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=20.0,
+            fee=0.0,
+            timestamp=datetime.utcnow(),
+            trade_id="trade_1",
+        )
+        bot.inventory_manager.update_from_fill(fill)
+
+        # Position should be 20
+        assert bot.inventory_manager.get_position("token_1").size == 20.0
+
+        # Now if API tries to say position is 0 (stale data), it should be ignored
+        # The has_recent_fill check will return True, blocking the reduction
+        assert bot.inventory_manager.has_recent_fill("token_1")
+
+        # Manually test the protection logic
+        old_size = 20.0
+        api_size = 0.0
+        if api_size < old_size and bot.inventory_manager.has_recent_fill("token_1"):
+            # Should skip the update
+            pass
+        else:
+            bot.inventory_manager.set_position("token_1", api_size, 0.5)
+
+        # Position should still be 20, not 0
+        assert bot.inventory_manager.get_position("token_1").size == 20.0

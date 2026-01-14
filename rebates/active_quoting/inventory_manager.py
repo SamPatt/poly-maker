@@ -9,12 +9,16 @@ Handles:
 """
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Dict, Optional
 
 from .config import ActiveQuotingConfig
 from .models import Fill, Position, OrderSide
 
 logger = logging.getLogger(__name__)
+
+# Don't allow API to reduce position if there was a fill within this window
+FILL_PROTECTION_SECONDS = 30.0
 
 
 @dataclass
@@ -47,6 +51,7 @@ class InventoryManager:
         self.config = config
         self._positions: Dict[str, Position] = {}  # token_id -> Position
         self._pending_buys: Dict[str, float] = {}  # token_id -> pending buy size
+        self._last_fill_time: Dict[str, datetime] = {}  # token_id -> last fill timestamp
 
     @property
     def positions(self) -> Dict[str, Position]:
@@ -93,6 +98,9 @@ class InventoryManager:
 
         position.update_from_fill(fill)
 
+        # Record fill time to protect against stale API data
+        self._last_fill_time[fill.token_id] = datetime.utcnow()
+
         logger.info(
             f"Position updated: {fill.token_id} "
             f"{old_size:.2f} -> {position.size:.2f} "
@@ -102,6 +110,28 @@ class InventoryManager:
         # Release pending buy capacity when fill comes in
         if fill.side == OrderSide.BUY:
             self.release_pending_buy(fill.token_id, fill.size)
+
+    def has_recent_fill(self, token_id: str, seconds: float = FILL_PROTECTION_SECONDS) -> bool:
+        """
+        Check if a token has had a recent fill.
+
+        Used to protect against stale API data overwriting recent fills.
+
+        Args:
+            token_id: Token ID
+            seconds: Time window to consider "recent"
+
+        Returns:
+            True if there was a fill within the time window
+        """
+        if token_id not in self._last_fill_time:
+            return False
+        elapsed = (datetime.utcnow() - self._last_fill_time[token_id]).total_seconds()
+        return elapsed < seconds
+
+    def get_last_fill_time(self, token_id: str) -> Optional[datetime]:
+        """Get the last fill time for a token."""
+        return self._last_fill_time.get(token_id)
 
     def reserve_pending_buy(self, token_id: str, size: float) -> None:
         """

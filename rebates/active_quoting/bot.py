@@ -251,6 +251,15 @@ class ActiveQuotingBot:
 
                 # Only update if position changed
                 if abs(size - old_size) >= 0.01:
+                    # CRITICAL: Don't let stale API data reduce our position if we have recent fills
+                    # The data API lags behind real-time fills, so we trust fills over API
+                    if size < old_size and self.inventory_manager.has_recent_fill(token_id):
+                        logger.warning(
+                            f"Ignoring API position reduction for {token_id[:20]}...: "
+                            f"API says {size:.0f} but we have {old_size:.0f} with recent fills"
+                        )
+                        continue
+
                     self.inventory_manager.set_position(token_id, size, avg_price)
 
                     # Clear pending buys since API position already reflects fills
