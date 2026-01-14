@@ -138,12 +138,17 @@ class QuoteEngine:
             my_bid, my_ask, tick_size, best_bid, best_ask
         )
 
+        # Enforce max buy price - don't buy above this threshold
+        bid_size = self.config.order_size_usdc
+        if my_bid > self.config.max_buy_price:
+            bid_size = 0  # Don't place buy order above max price
+
         # Create the target quote
         target_quote = Quote(
             token_id=orderbook.token_id,
             bid_price=my_bid,
             ask_price=my_ask,
-            bid_size=self.config.order_size_usdc,
+            bid_size=bid_size,
             ask_size=self.config.order_size_usdc,
         )
 
@@ -345,6 +350,9 @@ class QuoteEngine:
         my_bid, my_ask = self._clamp_prices(my_bid, my_ask, tick_size, best_bid, best_ask)
 
         if side == OrderSide.BUY:
+            # Enforce max buy price
+            if my_bid > self.config.max_buy_price:
+                return None, f"Buy price {my_bid:.4f} exceeds max {self.config.max_buy_price}"
             return my_bid, "Buy quote calculated"
         else:
             return my_ask, "Sell quote calculated"

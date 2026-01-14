@@ -46,6 +46,9 @@ class ActiveQuotingConfig:
     wind_down_taker_threshold_seconds: float = 40.0  # Switch to taker mode at 40 seconds
     wind_down_taker_price_threshold: float = 0.25  # Only taker sell if price < $0.25
 
+    # --- Price Limits ---
+    max_buy_price: float = 0.90  # Never buy above this price (avoid overpaying near certainty)
+
     # --- WebSocket Gap Safety (Phase 6) ---
     halt_on_ws_gaps: bool = True  # Halt quoting when WS gaps cannot be reconciled
     ws_gap_reconcile_attempts: int = 3  # Max reconciliation attempts before halting
@@ -104,6 +107,8 @@ class ActiveQuotingConfig:
             wind_down_start_seconds=float(os.getenv("AQ_WIND_DOWN_START_SECONDS", "300.0")),
             wind_down_taker_threshold_seconds=float(os.getenv("AQ_WIND_DOWN_TAKER_THRESHOLD_SECONDS", "40.0")),
             wind_down_taker_price_threshold=float(os.getenv("AQ_WIND_DOWN_TAKER_PRICE_THRESHOLD", "0.25")),
+            # Price Limits
+            max_buy_price=float(os.getenv("AQ_MAX_BUY_PRICE", "0.90")),
             # WebSocket Gap Safety (Phase 6)
             halt_on_ws_gaps=os.getenv("AQ_HALT_ON_WS_GAPS", "true").lower() == "true",
             ws_gap_reconcile_attempts=int(os.getenv("AQ_WS_GAP_RECONCILE_ATTEMPTS", "3")),

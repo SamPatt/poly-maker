@@ -148,6 +148,7 @@ class ActiveQuotingBot:
         # Wind-down state tracking
         self._wind_down_taker_executed: Set[str] = set()  # condition_ids where taker exit was executed
         self._wind_down_logged: Dict[str, float] = {}  # token_id -> last log time (avoid spam)
+        self._wind_down_orders_cancelled: Set[str] = set()  # condition_ids where orders were cancelled on wind-down entry
 
         # Tasks
         self._main_task: Optional[asyncio.Task] = None
@@ -1159,9 +1160,13 @@ class ActiveQuotingBot:
             position_before_fill=position_size_before,
         )
 
-        # Get mid price at fill time
+        # Get mid price at fill time (fallback to fill.price if unavailable)
         orderbook = self.orderbook_manager.get_orderbook(fill.token_id)
-        mid_price = orderbook.mid_price() if orderbook else fill.price
+        mid_price = fill.price  # Default fallback
+        if orderbook:
+            ob_mid = orderbook.mid_price()
+            if ob_mid is not None:
+                mid_price = ob_mid
 
         # Record fill for markout tracking
         record = self.fill_analytics.record_fill(
@@ -1552,10 +1557,20 @@ class ActiveQuotingBot:
 
         # Phase 1: Wind-down - maker sells only
         if wind_down.phase == WindDownPhase.WIND_DOWN:
-            # Cancel buy orders if any exist
-            market = self._markets.get(token_id)
-            if market and market.is_quoting:
+            # On first entry to wind-down, cancel ALL orders for both tokens in the pair
+            condition_id = self.risk_manager._token_to_condition.get(token_id)
+            if condition_id and condition_id not in self._wind_down_orders_cancelled:
+                market_name = self._market_names.get(token_id, token_id[:20])
+                logger.warning(f"WIND-DOWN ENTRY {market_name}: Cancelling all orders for market pair")
+
+                # Cancel orders for this token
                 await self._cancel_market_quotes(token_id)
+
+                # Cancel orders for paired token too
+                if wind_down.paired_token_id:
+                    await self._cancel_market_quotes(wind_down.paired_token_id)
+
+                self._wind_down_orders_cancelled.add(condition_id)
 
             # Place sell orders if we have excess and can sell profitably
             if wind_down.excess_token_id == token_id and wind_down.excess_size > 0:
@@ -1616,14 +1631,21 @@ class ActiveQuotingBot:
             return
 
         best_ask = orderbook.best_ask
-        if best_ask is None:
+        best_bid = orderbook.best_bid
+        if best_ask is None or best_bid is None:
             return
 
-        # Check if we can sell profitably
-        # To be a maker, we need to place at best_ask or higher
-        # For it to be profitable, best_ask must be > avg_entry_price
+        # To be a maker sell, we must place ABOVE best_bid to avoid crossing
+        # Place at best_ask to be at front of queue
         sell_price = best_ask
 
+        # Safety check: ensure our sell won't cross the book
+        if sell_price <= best_bid:
+            # Would cross the book - try placing 1 tick above best_bid
+            tick_size = 0.01
+            sell_price = best_bid + tick_size
+
+        # Check if we can sell profitably
         if sell_price <= wind_down.avg_entry_price:
             # Can't sell profitably at maker price, skip
             return
