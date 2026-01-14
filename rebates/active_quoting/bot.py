@@ -1188,6 +1188,7 @@ class ActiveQuotingBot:
                     "drawdown": risk_summary.get("global", {}).get("current_drawdown", 0),
                     "consecutive_errors": risk_summary.get("global", {}).get("consecutive_errors", 0),
                     "stale_markets": len(risk_summary.get("stale_markets", [])),
+                    "halt_reason": risk_summary.get("halt_reason", "NONE"),
                 },
             )
 

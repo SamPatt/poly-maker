@@ -21,6 +21,7 @@ from rebates.active_quoting.risk_manager import (
     CircuitBreakerState,
     MarketRiskState,
     GlobalRiskState,
+    HaltReason,
 )
 from rebates.active_quoting.models import Position, OrderSide
 
@@ -823,3 +824,142 @@ class TestCallbacks:
         await risk_manager.trigger_warning("Test")
 
         assert len(kill_switch_called) == 0
+
+
+# --- HaltReason and WebSocket Gap Halt Tests (Phase 6) ---
+
+class TestHaltReason:
+    """Tests for HaltReason enum and halt reason tracking."""
+
+    def test_halt_reason_enum_values(self):
+        """Test HaltReason enum has expected values."""
+        assert HaltReason.NONE.value == "NONE"
+        assert HaltReason.GLOBAL_DRAWDOWN.value == "GLOBAL_DRAWDOWN"
+        assert HaltReason.CONSECUTIVE_ERRORS.value == "CONSECUTIVE_ERRORS"
+        assert HaltReason.USER_WS_DISCONNECT.value == "USER_WS_DISCONNECT"
+        assert HaltReason.WS_GAP_UNRESOLVED.value == "WS_GAP_UNRESOLVED"
+        assert HaltReason.MANUAL.value == "MANUAL"
+
+    def test_initial_halt_reason_is_none(self, risk_manager):
+        """Test that initial halt_reason is NONE."""
+        assert risk_manager.halt_reason == HaltReason.NONE
+
+    @pytest.mark.asyncio
+    async def test_halt_sets_halt_reason(self, risk_manager):
+        """Test that triggering halt sets the halt_reason."""
+        await risk_manager.trigger_halt("Test halt", HaltReason.WS_GAP_UNRESOLVED)
+
+        assert risk_manager.state == CircuitBreakerState.HALTED
+        assert risk_manager.halt_reason == HaltReason.WS_GAP_UNRESOLVED
+
+    @pytest.mark.asyncio
+    async def test_default_halt_reason_is_manual(self, risk_manager):
+        """Test that default halt reason is MANUAL."""
+        await risk_manager.trigger_halt("Test halt")
+
+        assert risk_manager.halt_reason == HaltReason.MANUAL
+
+    @pytest.mark.asyncio
+    async def test_is_halted_due_to_ws_gaps(self, risk_manager):
+        """Test is_halted_due_to_ws_gaps() method."""
+        # Initially not halted
+        assert not risk_manager.is_halted_due_to_ws_gaps()
+
+        # Halt with WS_GAP_UNRESOLVED
+        await risk_manager.trigger_halt("WS gaps", HaltReason.WS_GAP_UNRESOLVED)
+        assert risk_manager.is_halted_due_to_ws_gaps()
+
+        # Reset and halt with different reason
+        await risk_manager.force_reset_to_normal()
+        await risk_manager.trigger_halt("Other reason", HaltReason.MANUAL)
+        assert not risk_manager.is_halted_due_to_ws_gaps()
+
+    @pytest.mark.asyncio
+    async def test_recover_from_ws_gap_halt_success(self, risk_manager):
+        """Test successful recovery from WS gap halt."""
+        await risk_manager.trigger_halt("WS gaps", HaltReason.WS_GAP_UNRESOLVED)
+        assert risk_manager.state == CircuitBreakerState.HALTED
+
+        await risk_manager.recover_from_ws_gap_halt()
+
+        assert risk_manager.state == CircuitBreakerState.NORMAL
+        assert risk_manager.halt_reason == HaltReason.NONE
+
+    @pytest.mark.asyncio
+    async def test_recover_from_ws_gap_halt_wrong_reason(self, risk_manager):
+        """Test that recovery does not work for non-WS-gap halts."""
+        await risk_manager.trigger_halt("Manual halt", HaltReason.MANUAL)
+
+        await risk_manager.recover_from_ws_gap_halt()
+
+        # Should still be halted
+        assert risk_manager.state == CircuitBreakerState.HALTED
+
+    @pytest.mark.asyncio
+    async def test_halt_reason_cleared_on_recovery(self, risk_manager):
+        """Test that halt_reason is cleared when returning to NORMAL."""
+        await risk_manager.trigger_halt("Test", HaltReason.WS_GAP_UNRESOLVED)
+        await risk_manager.recover_from_ws_gap_halt()
+
+        assert risk_manager.halt_reason == HaltReason.NONE
+
+    @pytest.mark.asyncio
+    async def test_halt_reason_kept_during_recovering_state(self, risk_manager):
+        """Test that halt_reason is kept during RECOVERING state."""
+        await risk_manager.trigger_halt("Test", HaltReason.GLOBAL_DRAWDOWN)
+        await risk_manager.start_recovery()
+
+        assert risk_manager.state == CircuitBreakerState.RECOVERING
+        # halt_reason should be kept for debugging purposes
+        assert risk_manager.halt_reason == HaltReason.GLOBAL_DRAWDOWN
+
+    def test_summary_includes_halt_reason(self, risk_manager):
+        """Test that summary includes halt_reason field."""
+        summary = risk_manager.get_summary()
+        assert "halt_reason" in summary
+        assert summary["halt_reason"] == HaltReason.NONE.value
+
+    @pytest.mark.asyncio
+    async def test_summary_shows_halt_reason_when_halted(self, risk_manager):
+        """Test that summary shows correct halt_reason when halted."""
+        await risk_manager.trigger_halt("WS gaps", HaltReason.WS_GAP_UNRESOLVED)
+
+        summary = risk_manager.get_summary()
+        assert summary["halt_reason"] == HaltReason.WS_GAP_UNRESOLVED.value
+
+    @pytest.mark.asyncio
+    async def test_global_drawdown_sets_correct_halt_reason(self, config):
+        """Test that global drawdown halt sets correct halt_reason."""
+        risk_manager = RiskManager(config)
+
+        # Create drawdown that exceeds global limit
+        risk_manager.update_market_pnl("token1", realized_pnl=50.0, unrealized_pnl=0.0)
+        risk_manager.update_market_pnl("token1", realized_pnl=-60.0, unrealized_pnl=0.0)
+
+        await asyncio.sleep(0.01)  # Allow async tasks
+
+        assert risk_manager.state == CircuitBreakerState.HALTED
+        assert risk_manager.halt_reason == HaltReason.GLOBAL_DRAWDOWN
+
+    @pytest.mark.asyncio
+    async def test_consecutive_errors_sets_correct_halt_reason(self, config):
+        """Test that consecutive errors halt sets correct halt_reason."""
+        risk_manager = RiskManager(config)
+
+        for _ in range(config.max_consecutive_errors):
+            risk_manager.record_error()
+
+        await asyncio.sleep(0.01)  # Allow async tasks
+
+        assert risk_manager.state == CircuitBreakerState.HALTED
+        assert risk_manager.halt_reason == HaltReason.CONSECUTIVE_ERRORS
+
+    @pytest.mark.asyncio
+    async def test_user_disconnect_sets_correct_halt_reason(self, config):
+        """Test that user WS disconnect sets correct halt_reason."""
+        risk_manager = RiskManager(config)
+
+        await risk_manager.on_user_disconnect()
+
+        assert risk_manager.state == CircuitBreakerState.HALTED
+        assert risk_manager.halt_reason == HaltReason.USER_WS_DISCONNECT

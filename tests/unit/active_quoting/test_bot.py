@@ -50,6 +50,8 @@ def bot(config):
         api_key="test_key",
         api_secret="test_secret",
         api_passphrase="test_passphrase",
+        enable_persistence=False,
+        enable_alerts=False,
     )
 
     # Mock WebSocket managers
@@ -100,6 +102,8 @@ class TestBotInitialization:
             api_key="test_key",
             api_secret="test_secret",
             api_passphrase="test_passphrase",
+            enable_persistence=False,
+            enable_alerts=False,
         )
 
         assert bot.inventory_manager is not None
@@ -120,6 +124,8 @@ class TestBotInitialization:
             api_secret="test_secret",
             api_passphrase="test_passphrase",
             poly_client=mock_client,
+            enable_persistence=False,
+            enable_alerts=False,
         )
 
         assert bot._poly_client == mock_client
@@ -131,6 +137,8 @@ class TestBotInitialization:
             api_key="test_key",
             api_secret="test_secret",
             api_passphrase="test_passphrase",
+            enable_persistence=False,
+            enable_alerts=False,
         )
 
         assert bot._running is False
@@ -688,6 +696,8 @@ class TestRedemptionIntegration:
             api_key="test_key",
             api_secret="test_secret",
             api_passphrase="test_passphrase",
+            enable_persistence=False,
+            enable_alerts=False,
         )
 
         assert bot.redemption_manager is not None

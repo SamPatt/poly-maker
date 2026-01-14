@@ -312,6 +312,8 @@ def send_active_quoting_circuit_breaker_alert(
             message += f"<b>Errors:</b> {details['consecutive_errors']}\n"
         if "stale_markets" in details:
             message += f"<b>Stale Markets:</b> {details['stale_markets']}\n"
+        if "halt_reason" in details and details["halt_reason"] != "NONE":
+            message += f"<b>Halt Reason:</b> {details['halt_reason']}\n"
 
     message += f"\n<b>Time:</b> {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
 
