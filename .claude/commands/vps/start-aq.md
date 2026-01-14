@@ -18,8 +18,8 @@ Execute these commands:
 3. Rotate logs (keep last 5):
    `ssh trading "cd /tmp && rm -f aq.log.5 && for i in 4 3 2 1; do [ -f aq.log.\$i ] && mv aq.log.\$i aq.log.\$((i+1)); done; [ -f aq.log ] && mv aq.log aq.log.1; touch aq.log"`
 
-4. Start the AQ bot (appending to log):
-   `ssh trading "cd /home/polymaker/poly-maker && screen -dmS aq bash -c 'source .venv/bin/activate && python -m rebates.active_quoting.bot 2>&1 | tee -a /tmp/aq.log'"`
+4. Start the AQ bot (using exec so SIGHUP goes directly to Python for graceful shutdown):
+   `ssh trading "cd /home/polymaker/poly-maker && screen -dmS aq bash -c 'source .venv/bin/activate && exec python -u -m rebates.active_quoting.bot >> /tmp/aq.log 2>&1'"`
 
 5. Wait for startup:
    `sleep 5`

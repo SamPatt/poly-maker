@@ -15,8 +15,8 @@ Execute these commands:
 1. Stop the AQ bot screen session (sends SIGHUP for graceful shutdown):
    `ssh trading "screen -S aq -X quit 2>/dev/null || true"`
 
-2. Wait for graceful shutdown (cancelling orders, sending alerts):
-   `sleep 5`
+2. Wait for graceful shutdown (cancelling orders, sending alerts - may take 10+ seconds with many orders):
+   `sleep 12`
 
 3. Verify it stopped:
    `ssh trading "pgrep -f 'rebates.active_quoting.bot' && echo 'AQ bot still running (may need force kill)' || echo 'AQ bot stopped successfully'"`
