@@ -530,18 +530,24 @@ class UserChannelManager:
                     fill_size = float(our_size) if our_size is not None else size
 
                     # STRICT validation: order must be placed this session with sufficient remaining size
-                    if maker_order_id:
-                        is_valid, reject_reason = self.is_valid_for_fill(maker_order_id, fill_size)
-                        if not is_valid:
-                            logger.warning(
-                                f"Skipping fill - {reject_reason} "
-                                f"(order_id={maker_order_id[:20]}..., trade_id={trade_id}, size={fill_size:.2f})"
-                            )
-                            continue  # Check other maker_orders
+                    # Require order_id to be present - reject fills with missing order_id
+                    if not maker_order_id:
+                        logger.warning(
+                            f"Skipping fill - maker_address matches but no order_id in maker_order "
+                            f"(trade_id={trade_id}, size={fill_size:.2f})"
+                        )
+                        continue  # Check other maker_orders
+
+                    is_valid, reject_reason = self.is_valid_for_fill(maker_order_id, fill_size)
+                    if not is_valid:
+                        logger.warning(
+                            f"Skipping fill - {reject_reason} "
+                            f"(order_id={maker_order_id[:20]}..., trade_id={trade_id}, size={fill_size:.2f})"
+                        )
+                        continue  # Check other maker_orders
 
                     is_our_fill = True
-                    if maker_order_id:
-                        order_id = maker_order_id
+                    order_id = maker_order_id
 
                     if our_size is not None:
                         size = fill_size
