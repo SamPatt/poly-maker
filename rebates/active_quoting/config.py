@@ -20,8 +20,10 @@ class ActiveQuotingConfig:
 
     # --- Quote Refresh (Hysteresis) ---
     refresh_threshold_ticks: int = 2  # Only refresh if quote is >= 2 ticks from target
+    refresh_on_mid_move_ticks: int = 1  # Force refresh if mid moves this many ticks
     min_refresh_interval_ms: int = 500  # Per market, prevents churn
     global_refresh_cap_per_sec: int = 10  # Across all markets
+    max_quote_age_seconds: float = 2.0  # Skip quoting if orderbook is stale
 
     # --- Momentum Detection ---
     momentum_threshold_ticks: int = 3  # Trigger if price moves 3+ ticks
@@ -100,8 +102,10 @@ class ActiveQuotingConfig:
             max_spread_ticks=int(os.getenv("AQ_MAX_SPREAD_TICKS", "10")),
             # Quote Refresh
             refresh_threshold_ticks=int(os.getenv("AQ_REFRESH_THRESHOLD_TICKS", "2")),
+            refresh_on_mid_move_ticks=int(os.getenv("AQ_REFRESH_ON_MID_MOVE_TICKS", "1")),
             min_refresh_interval_ms=int(os.getenv("AQ_MIN_REFRESH_INTERVAL_MS", "500")),
             global_refresh_cap_per_sec=int(os.getenv("AQ_GLOBAL_REFRESH_CAP_PER_SEC", "10")),
+            max_quote_age_seconds=float(os.getenv("AQ_MAX_QUOTE_AGE_SECONDS", "2.0")),
             # Momentum Detection
             momentum_threshold_ticks=int(os.getenv("AQ_MOMENTUM_THRESHOLD_TICKS", "3")),
             momentum_window_ms=int(os.getenv("AQ_MOMENTUM_WINDOW_MS", "500")),
@@ -178,10 +182,14 @@ class ActiveQuotingConfig:
         # Refresh validation
         if self.refresh_threshold_ticks < 1:
             errors.append("refresh_threshold_ticks must be >= 1")
+        if self.refresh_on_mid_move_ticks < 0:
+            errors.append("refresh_on_mid_move_ticks must be >= 0")
         if self.min_refresh_interval_ms < 0:
             errors.append("min_refresh_interval_ms must be >= 0")
         if self.global_refresh_cap_per_sec < 1:
             errors.append("global_refresh_cap_per_sec must be >= 1")
+        if self.max_quote_age_seconds <= 0:
+            errors.append("max_quote_age_seconds must be > 0")
 
         # Momentum validation
         if self.momentum_threshold_ticks < 1:

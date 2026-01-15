@@ -180,6 +180,19 @@ class QuoteEngine:
 
         # Check if we need to refresh (hysteresis)
         if current_quote is not None:
+            mid_price = orderbook.mid_price()
+            if (
+                mid_price is not None
+                and self.config.refresh_on_mid_move_ticks > 0
+            ):
+                mid_move = abs(mid_price - current_quote.mid_price())
+                mid_threshold = self.config.refresh_on_mid_move_ticks * tick_size
+                if mid_move >= mid_threshold:
+                    return QuoteDecision(
+                        action=QuoteAction.PLACE_QUOTE,
+                        quote=target_quote,
+                        reason="Mid moved beyond refresh threshold"
+                    )
             if not self._needs_refresh(current_quote, target_quote, tick_size):
                 return QuoteDecision(
                     action=QuoteAction.KEEP_CURRENT,

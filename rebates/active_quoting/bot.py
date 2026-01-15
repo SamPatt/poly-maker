@@ -1069,6 +1069,18 @@ class ActiveQuotingBot:
         if not orderbook or not orderbook.is_valid():
             return
 
+        if orderbook.last_update_time is None:
+            return
+        quote_age = (datetime.utcnow() - orderbook.last_update_time).total_seconds()
+        if quote_age > self.config.max_quote_age_seconds:
+            if market.is_quoting:
+                await self._cancel_market_quotes(token_id)
+            logger.debug(
+                f"Skipping quote for {token_id[:20]}...: orderbook age "
+                f"{quote_age:.2f}s > {self.config.max_quote_age_seconds:.2f}s"
+            )
+            return
+
         # Update market state with latest orderbook
         market.orderbook = orderbook
 
