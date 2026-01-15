@@ -348,7 +348,7 @@ class ActiveQuotingBot:
             synced_count = 0
             for token_id in token_ids:
                 old_position = self.inventory_manager.get_position(token_id)
-                old_size = old_position.size
+                old_size = old_position.confirmed_size  # Compare against last API value, not effective_size
 
                 # Get position from API, default to 0 if not found
                 if token_id in api_positions:
