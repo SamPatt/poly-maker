@@ -11,6 +11,11 @@ Phase 2: Dual Tracking Architecture
 - confirmed_size: Position from last API sync (authoritative)
 - pending_fills: WebSocket fills not yet confirmed by API (tracked by trade_id)
 - effective_size: confirmed_size + pending_fill_buys - pending_fill_sells
+
+Phase 3: Conservative Buy Limit Checks
+- Buy limits use conservative_exposure = confirmed + pending_fill_buys + pending_order_buys
+- This prevents exceeding position limits even with rapid WS fills before API sync
+- Sell availability still uses effective_size (confirmed + pending_buys - pending_sells)
 """
 import logging
 from dataclasses import dataclass, field
@@ -370,7 +375,8 @@ class InventoryManager:
         Calculate worst-case liability for a position.
 
         For binary options, max loss = shares x entry_price (if outcome goes to 0).
-        Uses confirmed_size for limit checks (Phase 3 will add conservative formula).
+        Uses confirmed_size (not conservative exposure) because liability is about
+        worst-case loss on confirmed positions, not pending fills.
 
         Args:
             token_id: Token ID
@@ -379,14 +385,14 @@ class InventoryManager:
             Maximum liability in USDC
         """
         position = self.get_position(token_id)
-        # Use confirmed_size for limit checks (matches pre-Phase-2 behavior)
         return abs(position.confirmed_size) * position.confirmed_avg_price
 
     def calculate_total_liability(self) -> float:
         """
         Calculate total liability across all positions.
 
-        Uses confirmed_size for limit checks (Phase 3 will add conservative formula).
+        Uses confirmed_size (not conservative exposure) because liability is about
+        worst-case loss on confirmed positions, not pending fills.
 
         Returns:
             Total maximum liability in USDC
@@ -433,9 +439,12 @@ class InventoryManager:
         Check if position limits allow buying/selling.
 
         Limits checked:
-        - MAX_POSITION_PER_MARKET: Share count limit (including pending orders)
+        - MAX_POSITION_PER_MARKET: Share count limit (using conservative exposure)
         - MAX_LIABILITY_PER_MARKET_USDC: Worst-case loss limit
         - MAX_TOTAL_LIABILITY_USDC: Total exposure limit
+
+        Phase 3: Uses conservative exposure formula for buy limits:
+        conservative_exposure = confirmed + pending_fill_buys + pending_order_buys
 
         Args:
             token_id: Token ID
@@ -447,16 +456,25 @@ class InventoryManager:
         position = self.get_position(token_id)
         pending_orders = self.get_pending_buy_size(token_id)
 
-        # Use confirmed_size for limit checks (Phase 3 will add conservative formula)
-        # This matches pre-Phase-2 behavior where API sync set position directly
+        # Phase 3: Conservative exposure for buy limit checks
+        # Counts ALL potential buy-side exposure (worst case: all buys settle, no sells settle)
         confirmed = position.confirmed_size
-        effective_position = confirmed + pending_orders
+        pending_fill_buys = position.pending_fill_buys
+        conservative_exposure = confirmed + pending_fill_buys + pending_orders
 
-        # Check position size limit (confirmed + pending orders)
-        if effective_position >= self.config.max_position_per_market:
+        # Always log all three components for debugging
+        logger.debug(
+            f"Buy limit check: confirmed={confirmed:.0f} + pending_fills={pending_fill_buys:.0f} + "
+            f"pending_orders={pending_orders:.0f} = {conservative_exposure:.0f} "
+            f"(max={self.config.max_position_per_market})"
+        )
+
+        # Check position size limit (using conservative exposure)
+        if conservative_exposure >= self.config.max_position_per_market:
             limits.can_buy = False
             limits.buy_limit_reason = (
-                f"Position {confirmed:.0f} + pending_orders {pending_orders:.0f} >= max {self.config.max_position_per_market}"
+                f"Position {confirmed:.0f} + pending_fills {pending_fill_buys:.0f} + "
+                f"pending_orders {pending_orders:.0f} >= max {self.config.max_position_per_market}"
             )
 
         # Check liability per market (uses confirmed_size)
@@ -502,16 +520,18 @@ class InventoryManager:
             if not limits.can_buy:
                 return False, limits.buy_limit_reason
 
-            # Check if this buy would exceed limits (using confirmed + pending orders)
+            # Phase 3: Check if this buy would exceed limits using conservative exposure
             position = self.get_position(token_id)
             pending_orders = self.get_pending_buy_size(token_id)
             confirmed = position.confirmed_size
-            projected_size = confirmed + pending_orders + size
+            pending_fill_buys = position.pending_fill_buys
+            projected_size = confirmed + pending_fill_buys + pending_orders + size
 
             if projected_size > self.config.max_position_per_market:
                 return False, (
                     f"Buy would exceed position limit: "
-                    f"{projected_size:.0f} (confirmed={confirmed:.0f} + pending_orders={pending_orders:.0f} + order={size:.0f}) > {self.config.max_position_per_market}"
+                    f"{projected_size:.0f} (confirmed={confirmed:.0f} + pending_fills={pending_fill_buys:.0f} + "
+                    f"pending_orders={pending_orders:.0f} + order={size:.0f}) > {self.config.max_position_per_market}"
                 )
         else:  # SELL
             if not limits.can_sell:
@@ -528,7 +548,8 @@ class InventoryManager:
         """
         Get adjusted order size respecting limits.
 
-        Uses confirmed_size for limit calculations (Phase 3 will add conservative formula).
+        Phase 3: Uses conservative exposure formula for buy limits:
+        conservative_exposure = confirmed + pending_fill_buys + pending_order_buys
 
         Args:
             token_id: Token ID
@@ -545,17 +566,19 @@ class InventoryManager:
             # This allows quick exits after WS fills before API sync
             return min(target_size, max(0, position.effective_size))
 
-        # For buys, respect position limits using confirmed + pending orders
+        # Phase 3: For buys, respect position limits using conservative exposure
         confirmed = position.confirmed_size
+        pending_fill_buys = position.pending_fill_buys
         pending_orders = self.get_pending_buy_size(token_id)
-        effective_position = confirmed + pending_orders
-        remaining_capacity = self.config.max_position_per_market - effective_position
+        conservative_exposure = confirmed + pending_fill_buys + pending_orders
+        remaining_capacity = self.config.max_position_per_market - conservative_exposure
 
         if remaining_capacity <= 0:
-            if pending_orders > 0:
+            if pending_fill_buys > 0 or pending_orders > 0:
                 logger.debug(
                     f"Buy blocked for {token_id[:20]}...: "
-                    f"confirmed={confirmed:.0f} + pending_orders={pending_orders:.0f} >= max={self.config.max_position_per_market}"
+                    f"confirmed={confirmed:.0f} + pending_fills={pending_fill_buys:.0f} + "
+                    f"pending_orders={pending_orders:.0f} >= max={self.config.max_position_per_market}"
                 )
             return 0
 

@@ -1001,12 +1001,16 @@ class TestEffectiveSizeUsedByConsumers:
         # get_inventory should return effective (60), not confirmed (50)
         assert manager.get_inventory("token1") == 60.0
 
-    def test_check_limits_buys_use_confirmed_size(self, manager):
-        """Buy limits should use confirmed_size (Phase 2 behavior)."""
+    def test_check_limits_buys_use_conservative_exposure(self, manager):
+        """Buy limits should use conservative_exposure (Phase 3 behavior).
+
+        Conservative exposure = confirmed + pending_fill_buys + pending_orders
+        This prevents exceeding limits when WS fills arrive before API sync.
+        """
         # Set confirmed at 90 (below 100 limit)
         manager.set_position("token1", size=90.0, avg_entry_price=0.10)
 
-        # Add pending buy of 15 (effective = 105, but buy limits use confirmed = 90)
+        # Add pending buy of 15 (conservative exposure = 90 + 15 = 105 >= 100)
         fill = Fill(
             order_id="order1",
             token_id="token1",
@@ -1020,11 +1024,12 @@ class TestEffectiveSizeUsedByConsumers:
         pos = manager.get_position("token1")
         assert pos.confirmed_size == 90.0
         assert pos.effective_size == 105.0
+        assert pos.pending_fill_buys == 15.0
 
-        # Should still allow buys because confirmed_size (90) < limit (100)
-        # Phase 3 will add conservative exposure formula
+        # Phase 3: Should block buys because conservative_exposure (105) >= limit (100)
         limits = manager.check_limits("token1")
-        assert limits.can_buy is True  # Pending fills don't affect buy limit checks yet
+        assert limits.can_buy is False
+        assert "pending_fills 15" in limits.buy_limit_reason
 
     def test_check_limits_sells_use_effective_size(self, manager):
         """Sell availability should use effective_size (allows quick exits after WS fills)."""
@@ -1137,3 +1142,286 @@ class TestEffectiveSizeUsedByConsumers:
         assert summary["token1"]["confirmed_size"] == 50.0
         assert summary["token1"]["pending_delta"] == 10.0
         assert summary["token1"]["pending_fills_count"] == 1
+
+
+# =============================================================================
+# Phase 3: Conservative Buy Limit Tests
+# =============================================================================
+
+
+class TestPhase3ConservativeBuyLimits:
+    """Tests for Phase 3 conservative buy limit checks.
+
+    Phase 3 changes buy limit checks to use conservative_exposure:
+    conservative_exposure = confirmed + pending_fill_buys + pending_order_buys
+
+    This prevents exceeding position limits even when multiple WS fills arrive
+    before API sync.
+
+    Sell limits remain unchanged - they still use effective_size to allow
+    quick exits after WS fills.
+    """
+
+    def test_buy_limits_include_pending_fill_buys(self, manager):
+        """Buy limits should use conservative exposure including pending fill buys.
+
+        This is the main Phase 3 test case from the prompt:
+        - Set confirmed at 70
+        - Add pending buy fill of 25 -> conservative = 95
+        - check_limits().can_buy should be True (room for 5 more)
+        - can_place_order(10) should be False (95 + 10 = 105 > 100)
+        - can_place_order(3) should be True (95 + 3 = 98 < 100)
+        """
+        # Set confirmed at 70
+        manager.set_position("token1", size=70.0, avg_entry_price=0.50)
+
+        # Add pending buy fill of 25 (effective = 95, conservative = 95)
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=25.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 70.0
+        assert pos.pending_fill_buys == 25.0
+        assert pos.effective_size == 95.0
+
+        # check_limits() returns can_buy=True because conservative_exposure (95) < max (100)
+        # This indicates some room remains for small buys
+        limits = manager.check_limits("token1")
+        assert limits.can_buy is True  # Room for up to 5 more units
+
+        # can_place_order() is the REAL blocker for specific order sizes
+        # 95 + 10 = 105 > 100, so this specific order is rejected
+        allowed, reason = manager.can_place_order("token1", OrderSide.BUY, 10)
+        assert allowed is False
+        assert "pending_fills" in reason or "105" in reason
+
+        # A smaller order that fits would be allowed
+        allowed_small, _ = manager.can_place_order("token1", OrderSide.BUY, 3)
+        assert allowed_small is True  # 95 + 3 = 98 < 100
+
+    def test_can_place_order_includes_pending_fill_buys(self, manager):
+        """can_place_order should include pending_fill_buys in its projection."""
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        # Add pending buy fills
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=40.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        # conservative_exposure = 50 + 40 = 90
+        # Trying to place order of 15 would give 90 + 15 = 105 > 100
+        allowed, reason = manager.can_place_order("token1", OrderSide.BUY, 15)
+        assert allowed is False
+        assert "105" in reason  # Should show projected size
+        assert "pending_fills=40" in reason  # Should mention pending fills
+
+    def test_adjusted_order_size_respects_pending_fills(self, manager):
+        """get_adjusted_order_size should return reduced size accounting for pending fills."""
+        manager.set_position("token1", size=60.0, avg_entry_price=0.50)
+
+        # Add pending buy fills
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=30.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        # conservative_exposure = 60 + 30 = 90
+        # Remaining capacity = 100 - 90 = 10
+        # Requested size of 20 should be reduced to 10
+        adjusted = manager.get_adjusted_order_size("token1", OrderSide.BUY, 20)
+        assert adjusted == 10.0
+
+    def test_sell_limits_unchanged(self, manager):
+        """Sell availability should still use effective_size (unchanged from Phase 2).
+
+        This ensures sells are allowed even when confirmed_size = 0 but pending_fill_buys > 0.
+        """
+        # No confirmed position
+        assert manager.get_position("token1").confirmed_size == 0.0
+
+        # Add pending buy fill
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=30.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 0.0  # Still 0
+        assert pos.effective_size == 30.0  # But we have pending buy
+
+        # Should allow sells because effective_size > 0
+        limits = manager.check_limits("token1")
+        assert limits.can_sell is True
+
+        # Should be able to place sell order
+        allowed, _ = manager.can_place_order("token1", OrderSide.SELL, 15)
+        assert allowed is True
+
+        # Adjusted sell size should use effective_size
+        adjusted = manager.get_adjusted_order_size("token1", OrderSide.SELL, 50)
+        assert adjusted == 30.0  # Capped to effective_size
+
+    def test_conservative_exposure_calculation(self, manager):
+        """Verify conservative_exposure formula: confirmed + pending_fill_buys + pending_orders."""
+        manager.set_position("token1", size=40.0, avg_entry_price=0.50)
+
+        # Add pending fill buys
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=20.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        # Reserve pending buy orders
+        manager.reserve_pending_buy("token1", 15.0)
+
+        # conservative_exposure = 40 (confirmed) + 20 (pending_fill_buys) + 15 (pending_orders) = 75
+        # Remaining capacity = 100 - 75 = 25
+        adjusted = manager.get_adjusted_order_size("token1", OrderSide.BUY, 50)
+        assert adjusted == 25.0
+
+        # check_limits should still allow buying (75 < 100)
+        limits = manager.check_limits("token1")
+        assert limits.can_buy is True
+
+        # Reserve more to hit the limit
+        manager.reserve_pending_buy("token1", 25.0)  # Now: 40 + 20 + 40 = 100
+
+        limits = manager.check_limits("token1")
+        assert limits.can_buy is False
+        assert "pending_fills 20" in limits.buy_limit_reason
+        assert "pending_orders 40" in limits.buy_limit_reason
+
+    def test_pending_sell_fills_not_included_in_buy_limits(self, manager):
+        """Pending sell fills should NOT reduce conservative exposure for buy limits.
+
+        This is intentional conservative behavior: we don't assume sells will settle.
+        """
+        manager.set_position("token1", size=90.0, avg_entry_price=0.50)
+
+        # Add pending sell fill
+        sell_fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.SELL,
+            price=0.55,
+            size=20.0,
+            trade_id="sell1",
+        )
+        manager.update_from_fill(sell_fill)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 90.0
+        assert pos.pending_fill_sells == 20.0
+        assert pos.effective_size == 70.0  # 90 - 20
+
+        # Conservative exposure for buy limits = confirmed + pending_fill_buys + pending_orders
+        # = 90 + 0 + 0 = 90
+        # NOT: confirmed - pending_fill_sells = 70 (we don't credit pending sells)
+        limits = manager.check_limits("token1")
+        assert limits.can_buy is True  # 90 < 100
+
+        # Can place small buy order
+        allowed, _ = manager.can_place_order("token1", OrderSide.BUY, 5)
+        assert allowed is True  # 90 + 0 + 0 + 5 = 95 <= 100
+
+        # Cannot place order that would exceed limit
+        allowed, reason = manager.can_place_order("token1", OrderSide.BUY, 15)
+        assert allowed is False  # 90 + 0 + 0 + 15 = 105 > 100
+
+    def test_problem_scenario_from_prompt(self, manager):
+        """Test the exact problem scenario from the Phase 3 prompt.
+
+        Timeline:
+        1. API sync: confirmed_size = 80
+        2. WS fill: BUY 15 -> pending_fill_buys = 15
+        3. WS fill: BUY 15 -> pending_fill_buys = 30
+        4. Bot checks can_buy(10): should be blocked!
+
+        Without Phase 3: confirmed(80) + pending_orders(0) = 80 < 100 -> allowed
+        With Phase 3: confirmed(80) + pending_fills(30) = 110 >= 100 -> blocked
+        """
+        # Step 1: API sync
+        manager.set_position("token1", size=80.0, avg_entry_price=0.50)
+
+        # Step 2: First WS fill
+        fill1 = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=15.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill1)
+
+        # Step 3: Second WS fill
+        fill2 = Fill(
+            order_id="order2",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=15.0,
+            trade_id="fill2",
+        )
+        manager.update_from_fill(fill2)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 80.0
+        assert pos.pending_fill_buys == 30.0  # 15 + 15
+        assert pos.effective_size == 110.0
+
+        # Step 4: Bot checks can_buy(10)
+        # Phase 3: conservative_exposure = 80 + 30 = 110 >= 100, so blocked
+        limits = manager.check_limits("token1")
+        assert limits.can_buy is False
+        assert "110" in limits.buy_limit_reason or "pending_fills 30" in limits.buy_limit_reason
+
+        # Also verify can_place_order blocks it
+        allowed, reason = manager.can_place_order("token1", OrderSide.BUY, 10)
+        assert allowed is False
+
+    def test_adjusted_size_zero_when_at_limit(self, manager):
+        """get_adjusted_order_size should return 0 when at conservative limit."""
+        manager.set_position("token1", size=70.0, avg_entry_price=0.50)
+
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=30.0,  # conservative = 70 + 30 = 100
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        # At limit, should return 0
+        adjusted = manager.get_adjusted_order_size("token1", OrderSide.BUY, 10)
+        assert adjusted == 0.0

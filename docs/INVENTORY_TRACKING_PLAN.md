@@ -201,9 +201,21 @@ def force_reconcile(self, token_id: str, api_size: float):
 - ✅ All consumers use `effective_size` via `.size` property alias
 - ✅ Comprehensive tests for dual tracking behavior (673 tests passing)
 
-### Phase 3: Conservative Limit Checks ✅ COMPLETED (as part of Phase 2)
-- ✅ `check_limits()` uses `effective_size` for position limit checks
-- ✅ Ensures position limits account for pending fills
+### Phase 3: Conservative Buy Limit Checks ✅ COMPLETED
+- ✅ `check_limits()` uses conservative_exposure for buy limits
+- ✅ `can_place_order()` uses conservative_exposure for buy checks
+- ✅ `get_adjusted_order_size()` uses conservative_exposure for buy sizing
+- ✅ Sell limits unchanged (still use effective_size for quick exits)
+- ✅ Comprehensive tests for Phase 3 behavior (77 tests passing)
+
+**Conservative exposure formula:**
+```python
+conservative_exposure = confirmed + pending_fill_buys + pending_order_buys
+```
+
+This prevents exceeding position limits even when multiple WS fills arrive
+before API sync. Pending sell fills are intentionally NOT credited (worst case
+assumption: all buys settle, no sells settle).
 
 ### Phase 4: Update PnL/Risk ✅ COMPLETED (as part of Phase 2)
 - ✅ Risk manager uses `effective_size` (via `.size` alias)
