@@ -620,7 +620,7 @@ class UserChannelManager:
             ws_sequence=ws_sequence,
         )
 
-        logger.info(f"Fill: trade={trade_id} token={token_id[:20] if token_id else 'N/A'}... side={side.value} price={price} size={size}")
+        logger.info(f"Fill: trade={trade_id} token={token_id if token_id else 'N/A'} side={side.value} price={price} size={size}")
 
         # Update order state if we have it
         if order_id and order_id in self._orders:

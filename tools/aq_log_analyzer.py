@@ -22,7 +22,7 @@ TIMESTAMP_FMT = "%Y-%m-%d %H:%M:%S,%f"
 
 QUOTE_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}).*?"
-    r"Quote decision for (?P<token>[0-9a-fA-F]+)\.\.\.: PLACE_QUOTE - .*?"
+    r"Quote decision for (?P<token>\S+): PLACE_QUOTE - .*?"
     r"best_bid=(?P<best_bid>[0-9.]+)\s+"
     r"best_ask=(?P<best_ask>[0-9.]+)\s+"
     r"mid=(?P<mid>[0-9.]+|N/A)\s+"
@@ -31,7 +31,7 @@ QUOTE_RE = re.compile(
 
 FILL_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}).*?"
-    r"Fill: trade=.*? token=(?P<token>[0-9a-fA-F]+)\.\.\. "
+    r"Fill: trade=.*? token=(?P<token>\S+) "
     r"side=(?P<side>BUY|SELL) price=(?P<price>[0-9.]+) size=(?P<size>[0-9.]+)"
 )
 
@@ -142,9 +142,12 @@ def summarize(
     horizons: List[int],
     csv_path: Optional[str],
     token_filter: Optional[str],
+    require_in_book: bool,
 ) -> None:
     rows = []
     by_token_stats: Dict[str, Dict[str, float]] = {}
+    dropped_stale = 0
+    dropped_out_of_book = 0
 
     for fill in fills:
         if token_filter and fill.token != token_filter:
@@ -155,6 +158,10 @@ def summarize(
             continue
         age = (fill.ts - quote.ts).total_seconds()
         if age > lookback_seconds:
+            dropped_stale += 1
+            continue
+        if require_in_book and not (quote.best_bid <= fill.price <= quote.best_ask):
+            dropped_out_of_book += 1
             continue
 
         edge = _edge_bps(fill.side, fill.price, quote.mid)
@@ -217,6 +224,10 @@ def summarize(
     print("=" * 60)
     print(f"Analyzed fills: {total_fills}")
     print(f"Tokens: {len(by_token_stats)}")
+    if dropped_stale:
+        print(f"Dropped (stale quote): {dropped_stale}")
+    if dropped_out_of_book:
+        print(f"Dropped (price outside quote): {dropped_out_of_book}")
     print("=" * 60)
 
     for token, stats in sorted(by_token_stats.items()):
@@ -249,6 +260,11 @@ def main() -> None:
                         help="Comma-separated markout horizons in seconds")
     parser.add_argument("--csv", help="Optional path to write per-fill CSV")
     parser.add_argument("--token", help="Filter to a specific token prefix")
+    parser.add_argument(
+        "--require-in-book",
+        action="store_true",
+        help="Drop fills with prices outside the matched quote bid/ask (reduces prefix collisions)",
+    )
     args = parser.parse_args()
 
     horizons = [int(h.strip()) for h in args.horizons.split(",") if h.strip()]
@@ -260,6 +276,7 @@ def main() -> None:
         horizons=horizons,
         csv_path=args.csv,
         token_filter=args.token,
+        require_in_book=args.require_in_book,
     )
 
 

@@ -1092,7 +1092,7 @@ class ActiveQuotingBot:
             mid = orderbook.mid_price() if orderbook else None
             mid_str = f"{mid:.4f}" if mid is not None else "N/A"
             logger.info(
-                f"Quote decision for {token_id[:20]}...: {decision.action.value} - {decision.reason} | "
+                f"Quote decision for {token_id}: {decision.action.value} - {decision.reason} | "
                 f"best_bid={best_bid:.4f} best_ask={best_ask:.4f} mid={mid_str} "
                 f"bid={decision.quote.bid_price:.4f} ask={decision.quote.ask_price:.4f}"
             )
