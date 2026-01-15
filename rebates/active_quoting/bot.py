@@ -60,6 +60,7 @@ from .alerts import (
     send_active_quoting_market_halt_alert,
     send_active_quoting_redemption_alert,
     send_active_quoting_market_resolution_summary,
+    TelegramCommandHandler,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,9 @@ class ActiveQuotingBot:
         self._daily_summary_task: Optional[asyncio.Task] = None
         self._market_ws_task: Optional[asyncio.Task] = None
         self._user_ws_task: Optional[asyncio.Task] = None
+
+        # Telegram command handler for /stop command
+        self._telegram_handler: Optional[TelegramCommandHandler] = None
 
         # Position sync tracking (fallback for WebSocket fill issues)
         self._last_position_sync: float = 0.0
@@ -645,6 +649,15 @@ class ActiveQuotingBot:
             self._markout_task = asyncio.create_task(self._markout_loop())
             self._daily_summary_task = asyncio.create_task(self._daily_summary_loop())
 
+            # Start Telegram command handler for /stop and /status commands
+            if self._enable_alerts:
+                self._telegram_handler = TelegramCommandHandler(
+                    on_stop_command=lambda: self.stop("Telegram /stop command"),
+                    on_status_command=self._send_status_via_telegram,
+                )
+                await self._telegram_handler.start()
+                logger.info("Telegram command handler started (supports /stop, /status)")
+
             logger.info("Bot started successfully")
 
             # Send startup alert (Phase 6)
@@ -754,6 +767,11 @@ class ActiveQuotingBot:
                 await self._daily_summary_task
             except asyncio.CancelledError:
                 pass
+
+        # Stop Telegram command handler
+        if self._telegram_handler:
+            await self._telegram_handler.stop()
+            self._telegram_handler = None
 
         # Cancel WebSocket tasks (disconnect will close the connections)
         for ws_task in [self._market_ws_task, self._user_ws_task]:
@@ -1932,6 +1950,30 @@ class ActiveQuotingBot:
     def is_running(self) -> bool:
         """Check if bot is running."""
         return self._running
+
+    async def _send_status_via_telegram(self) -> None:
+        """Send bot status via Telegram in response to /status command."""
+        from .alerts import send_alert
+
+        status = self.get_status()
+        pnl_summary = self.pnl_tracker.session
+
+        message = "📊 <b>AQ Bot Status</b>\n\n"
+        message += f"<b>Running:</b> {'✅ Yes' if status['running'] else '❌ No'}\n"
+        message += f"<b>Markets:</b> {status['active_markets']}\n"
+        message += f"<b>Circuit Breaker:</b> {status['circuit_breaker_state']}\n"
+        message += f"<b>Open Orders:</b> {status['open_orders']}\n\n"
+
+        # P&L Summary
+        message += f"<b>Session P&L:</b> ${pnl_summary.net_pnl:+.2f}\n"
+        message += f"<b>Total Trades:</b> {pnl_summary.total_trades}\n"
+        message += f"<b>Win Rate:</b> {pnl_summary.win_rate:.0f}%\n\n"
+
+        # WebSocket status
+        message += f"<b>Market WS:</b> {'🟢' if status['market_ws_connected'] else '🔴'}\n"
+        message += f"<b>User WS:</b> {'🟢' if status['user_ws_connected'] else '🔴'}"
+
+        send_alert(message, wait=True)
 
 
 # --- CLI Entry Point ---

@@ -9,6 +9,7 @@ Provides specific alert functions for:
 
 Integrates with existing alerts/telegram.py infrastructure.
 """
+import asyncio
 import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Any
@@ -624,4 +625,127 @@ __all__ = [
     "send_active_quoting_market_halt_alert",
     "send_active_quoting_redemption_alert",
     "FillAlertThrottler",
+    "TelegramCommandHandler",
 ]
+
+
+class TelegramCommandHandler:
+    """
+    Handles incoming Telegram commands for the AQ bot.
+
+    Supports commands:
+    - /stop - Gracefully stop the bot
+    - /start - Start the bot (if stopped)
+    - /status - Get bot status
+    """
+
+    def __init__(self, on_stop_command=None, on_start_command=None, on_status_command=None):
+        """
+        Initialize the command handler.
+
+        Args:
+            on_stop_command: Async callback when /stop is received
+            on_start_command: Async callback when /start is received
+            on_status_command: Async callback when /status is received
+        """
+        self.on_stop_command = on_stop_command
+        self.on_start_command = on_start_command
+        self.on_status_command = on_status_command
+        self._running = False
+        self._last_update_id = 0
+        self._task = None
+
+    async def start(self):
+        """Start polling for Telegram commands."""
+        if not TELEGRAM_ENABLED:
+            return
+
+        self._running = True
+        self._task = asyncio.create_task(self._poll_loop())
+
+    async def stop(self):
+        """Stop polling for commands."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _poll_loop(self):
+        """Background loop to poll for Telegram updates."""
+        import aiohttp
+        import os
+
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+        if not bot_token or not chat_id:
+            return
+
+        base_url = f"https://api.telegram.org/bot{bot_token}"
+
+        while self._running:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    # Get updates with long polling
+                    params = {
+                        "offset": self._last_update_id + 1,
+                        "timeout": 30,  # Long poll for 30 seconds
+                        "allowed_updates": ["message"],
+                    }
+
+                    async with session.get(
+                        f"{base_url}/getUpdates",
+                        params=params,
+                        timeout=aiohttp.ClientTimeout(total=35)
+                    ) as resp:
+                        if resp.status != 200:
+                            await asyncio.sleep(5)
+                            continue
+
+                        data = await resp.json()
+
+                        if not data.get("ok"):
+                            await asyncio.sleep(5)
+                            continue
+
+                        for update in data.get("result", []):
+                            self._last_update_id = update["update_id"]
+                            await self._handle_update(update, chat_id)
+
+            except asyncio.CancelledError:
+                break
+            except asyncio.TimeoutError:
+                # Normal timeout from long polling, continue
+                continue
+            except Exception as e:
+                # Log error but keep running
+                print(f"Telegram poll error: {e}")
+                await asyncio.sleep(5)
+
+    async def _handle_update(self, update: dict, authorized_chat_id: str):
+        """Handle a single Telegram update."""
+        message = update.get("message", {})
+        text = message.get("text", "")
+        msg_chat_id = str(message.get("chat", {}).get("id", ""))
+
+        # Only process commands from authorized chat
+        if msg_chat_id != authorized_chat_id:
+            return
+
+        # Check for commands
+        if text.startswith("/stop"):
+            if self.on_stop_command:
+                send_alert("🛑 <b>Stop command received</b>\n\nShutting down bot...", wait=True)
+                await self.on_stop_command()
+
+        elif text.startswith("/start"):
+            if self.on_start_command:
+                send_alert("🚀 <b>Start command received</b>\n\nStarting bot...", wait=True)
+                await self.on_start_command()
+
+        elif text.startswith("/status"):
+            if self.on_status_command:
+                await self.on_status_command()
