@@ -216,8 +216,9 @@ class TestStartupShutdown:
         bot.user_channel_manager.disconnect.assert_called()
 
     @pytest.mark.asyncio
-    async def test_stop_when_not_running(self, bot):
-        """Test that stop does nothing when not running."""
+    async def test_stop_when_already_stopped(self, bot):
+        """Test that stop does nothing when already stopped."""
+        bot._stopped = True  # Mark as already stopped
         await bot.stop()
 
         bot.order_manager.cancel_all.assert_not_called()

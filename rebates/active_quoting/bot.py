@@ -135,7 +135,8 @@ class ActiveQuotingBot:
         self._init_components()
 
         # State
-        self._running: bool = False
+        self._running: bool = False  # True when actively trading
+        self._stopped: bool = False  # True when fully stopped (process should exit)
         self._markets: Dict[str, MarketState] = {}  # token_id -> MarketState
         self._active_tokens: Set[str] = set()
         self._last_quote_refresh: Dict[str, datetime] = {}
@@ -642,7 +643,8 @@ class ActiveQuotingBot:
             # Start Telegram command handler for /stopaq, /startaq, /status, and trading bot commands
             if self._enable_alerts:
                 self._telegram_handler = TelegramCommandHandler(
-                    on_stop_command=lambda: self.stop("Telegram /stopaq command"),
+                    on_stop_command=lambda: self.pause("Telegram /stopaq command"),
+                    on_start_command=self.resume,
                     on_status_command=self._send_status_via_telegram,
                 )
                 await self._telegram_handler.start()
@@ -719,11 +721,12 @@ class ActiveQuotingBot:
         Args:
             reason: Reason for shutdown (for logging/alerts)
         """
-        if not self._running:
+        if self._stopped:
             return
 
         logger.info(f"Stopping ActiveQuotingBot... (reason: {reason})")
         self._running = False
+        self._stopped = True
 
         # Collect final stats for alerts and persistence
         stats = self.fill_analytics.get_summary()
@@ -814,6 +817,97 @@ class ActiveQuotingBot:
 
         logger.info("Bot stopped")
 
+    async def pause(self, reason: str = "Telegram /stopaq command") -> None:
+        """
+        Pause trading without full shutdown.
+
+        Unlike stop(), this keeps the Telegram handler and WebSockets alive
+        so that /startaq can resume trading.
+
+        Args:
+            reason: Reason for pausing (for logging/alerts)
+        """
+        if not self._running:
+            logger.info("Bot already paused")
+            return
+
+        logger.info(f"Pausing ActiveQuotingBot... (reason: {reason})")
+        self._running = False
+
+        # Cancel all orders
+        try:
+            self.inventory_manager.clear_all_pending_buys()
+            cancelled = await self.order_manager.cancel_all()
+            logger.info(f"Cancelled {cancelled} orders on pause")
+        except Exception as e:
+            logger.error(f"Error cancelling orders on pause: {e}")
+
+        # Cancel main loop tasks (but keep telegram handler and websockets alive)
+        if self._main_task and not self._main_task.done():
+            self._main_task.cancel()
+            try:
+                await self._main_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._markout_task and not self._markout_task.done():
+            self._markout_task.cancel()
+            try:
+                await self._markout_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._daily_summary_task and not self._daily_summary_task.done():
+            self._daily_summary_task.cancel()
+            try:
+                await self._daily_summary_task
+            except asyncio.CancelledError:
+                pass
+
+        # Send pause alert
+        if self._enable_alerts:
+            stats = self.fill_analytics.get_summary()
+            send_telegram_alert(
+                f"AQ Bot PAUSED\n"
+                f"Reason: {reason}\n"
+                f"Fills: {stats.get('total_fills', 0)}, "
+                f"PnL: ${stats.get('realized_pnl', 0.0):.2f}\n"
+                f"Use /startaq to resume",
+                is_error=False,
+            )
+
+        logger.info("Bot paused (use /startaq to resume)")
+
+    async def resume(self) -> None:
+        """
+        Resume trading after pause.
+
+        Restarts the main loop and markout tasks.
+        """
+        if self._running:
+            logger.info("Bot already running")
+            if self._enable_alerts:
+                send_telegram_alert("AQ Bot is already running", is_error=False)
+            return
+
+        logger.info("Resuming ActiveQuotingBot...")
+        self._running = True
+
+        # Restart main loop tasks
+        self._main_task = asyncio.create_task(self._main_loop())
+        self._markout_task = asyncio.create_task(self._markout_loop())
+        self._daily_summary_task = asyncio.create_task(self._daily_summary_loop())
+
+        # Send resume alert
+        if self._enable_alerts:
+            send_telegram_alert(
+                f"AQ Bot RESUMED\n"
+                f"Trading restarted",
+                is_error=False,
+            )
+
+        logger.info("Bot resumed")
+
     async def run(self, token_ids: List[str]) -> None:
         """
         Run the bot until stopped.
@@ -828,8 +922,9 @@ class ActiveQuotingBot:
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
 
-        # Wait until stopped
-        while self._running:
+        # Wait until fully stopped (not just paused)
+        # _running=False means paused, _stopped=True means exit
+        while not self._stopped:
             await asyncio.sleep(1)
 
     # --- Main Loop ---
