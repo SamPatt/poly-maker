@@ -475,9 +475,10 @@ class InventoryManager:
                 f"Total liability ${total_liability:.2f} >= max ${self.config.max_total_liability_usdc:.2f}"
             )
 
-        # Selling is allowed if we have confirmed position
-        # (effective_size could be higher due to pending fills, but we check confirmed)
-        if confirmed <= 0:
+        # Selling is allowed if we have effective position (confirmed + pending buys)
+        # This allows quick exits after WS fills before API sync
+        effective = position.effective_size
+        if effective <= 0:
             limits.can_sell = False
             limits.sell_limit_reason = "No position to sell"
 
@@ -538,14 +539,14 @@ class InventoryManager:
             Adjusted size (may be 0 if limits prevent ordering)
         """
         position = self.get_position(token_id)
-        confirmed = position.confirmed_size
 
         if side == OrderSide.SELL:
-            # For sells, can only sell confirmed position
-            # (pending fills haven't settled yet)
-            return min(target_size, max(0, confirmed))
+            # For sells, can sell up to effective_size (confirmed + pending buys)
+            # This allows quick exits after WS fills before API sync
+            return min(target_size, max(0, position.effective_size))
 
         # For buys, respect position limits using confirmed + pending orders
+        confirmed = position.confirmed_size
         pending_orders = self.get_pending_buy_size(token_id)
         effective_position = confirmed + pending_orders
         remaining_capacity = self.config.max_position_per_market - effective_position

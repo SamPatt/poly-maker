@@ -975,7 +975,12 @@ class TestForceReconciliation:
 
 
 class TestEffectiveSizeUsedByConsumers:
-    """Tests to verify effective_size is used consistently."""
+    """Tests to verify effective_size and confirmed_size are used appropriately.
+
+    Phase 2 behavior:
+    - Buy limits use confirmed_size (conservative)
+    - Sell availability uses effective_size (allows quick exits after WS fills)
+    """
 
     def test_get_inventory_returns_effective_size(self, manager):
         """get_inventory should return effective_size not confirmed_size."""
@@ -996,12 +1001,12 @@ class TestEffectiveSizeUsedByConsumers:
         # get_inventory should return effective (60), not confirmed (50)
         assert manager.get_inventory("token1") == 60.0
 
-    def test_check_limits_uses_confirmed_size(self, manager):
-        """check_limits should use confirmed_size for limit checks (Phase 2 behavior)."""
+    def test_check_limits_buys_use_confirmed_size(self, manager):
+        """Buy limits should use confirmed_size (Phase 2 behavior)."""
         # Set confirmed at 90 (below 100 limit)
         manager.set_position("token1", size=90.0, avg_entry_price=0.10)
 
-        # Add pending buy of 15 (effective = 105, but limits use confirmed = 90)
+        # Add pending buy of 15 (effective = 105, but buy limits use confirmed = 90)
         fill = Fill(
             order_id="order1",
             token_id="token1",
@@ -1019,7 +1024,47 @@ class TestEffectiveSizeUsedByConsumers:
         # Should still allow buys because confirmed_size (90) < limit (100)
         # Phase 3 will add conservative exposure formula
         limits = manager.check_limits("token1")
-        assert limits.can_buy is True  # Pending fills don't affect limit checks yet
+        assert limits.can_buy is True  # Pending fills don't affect buy limit checks yet
+
+    def test_check_limits_sells_use_effective_size(self, manager):
+        """Sell availability should use effective_size (allows quick exits after WS fills)."""
+        # No confirmed position, but add a pending buy fill
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=20.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 0.0  # API hasn't confirmed yet
+        assert pos.effective_size == 20.0  # But we have pending buy
+
+        # Should allow sells because effective_size > 0
+        # This enables quick exits after WS fills before API sync
+        limits = manager.check_limits("token1")
+        assert limits.can_sell is True
+        assert limits.sell_limit_reason == ""
+
+    def test_adjusted_sell_size_uses_effective(self, manager):
+        """get_adjusted_order_size for sells should use effective_size."""
+        # Only pending fills, no confirmed position
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=15.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        # Should be able to sell up to effective_size (15)
+        size = manager.get_adjusted_order_size("token1", OrderSide.SELL, 20.0)
+        assert size == 15.0  # Capped to effective_size
 
     def test_check_limits_blocks_at_confirmed_limit(self, manager):
         """check_limits should block when confirmed_size >= limit."""
