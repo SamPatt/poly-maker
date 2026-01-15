@@ -631,12 +631,14 @@ __all__ = [
 
 class TelegramCommandHandler:
     """
-    Handles incoming Telegram commands for the AQ bot.
+    Handles incoming Telegram commands for the AQ bot and trading bot.
 
     Supports commands:
-    - /stop - Gracefully stop the bot
-    - /start - Start the bot (if stopped)
+    - /stopaq - Gracefully stop the AQ bot
+    - /startaq - Start the AQ bot (if stopped)
     - /status - Get bot status
+    - /starttrading - Start the trading bot
+    - /stoptrading - Stop the trading bot
     """
 
     def __init__(self, on_stop_command=None, on_start_command=None, on_status_command=None):
@@ -644,8 +646,8 @@ class TelegramCommandHandler:
         Initialize the command handler.
 
         Args:
-            on_stop_command: Async callback when /stop is received
-            on_start_command: Async callback when /start is received
+            on_stop_command: Async callback when /stopaq is received
+            on_start_command: Async callback when /startaq is received
             on_status_command: Async callback when /status is received
         """
         self.on_stop_command = on_stop_command
@@ -654,6 +656,7 @@ class TelegramCommandHandler:
         self._running = False
         self._last_update_id = 0
         self._task = None
+        self._trading_bot_process = None
 
     async def start(self):
         """Start polling for Telegram commands."""
@@ -736,16 +739,99 @@ class TelegramCommandHandler:
             return
 
         # Check for commands
-        if text.startswith("/stop"):
+        if text.startswith("/stopaq"):
             if self.on_stop_command:
-                send_alert("🛑 <b>Stop command received</b>\n\nShutting down bot...", wait=True)
+                send_alert("🛑 <b>Stop AQ command received</b>\n\nShutting down AQ bot...", wait=True)
                 await self.on_stop_command()
 
-        elif text.startswith("/start"):
+        elif text.startswith("/startaq"):
             if self.on_start_command:
-                send_alert("🚀 <b>Start command received</b>\n\nStarting bot...", wait=True)
+                send_alert("🚀 <b>Start AQ command received</b>\n\nStarting AQ bot...", wait=True)
                 await self.on_start_command()
+
+        elif text.startswith("/stoptrading"):
+            await self._stop_trading_bot()
+
+        elif text.startswith("/starttrading"):
+            await self._start_trading_bot()
 
         elif text.startswith("/status"):
             if self.on_status_command:
                 await self.on_status_command()
+
+    async def _start_trading_bot(self):
+        """Start the trading bot as a subprocess."""
+        import subprocess
+        import os
+
+        # Check if already running
+        if self._trading_bot_process is not None:
+            if self._trading_bot_process.poll() is None:
+                send_alert("⚠️ <b>Trading bot already running</b>", wait=True)
+                return
+
+        try:
+            # Get the poly-maker directory
+            bot_dir = "/home/polymaker/poly-maker"
+            python_path = os.path.join(bot_dir, ".venv", "bin", "python")
+            main_script = os.path.join(bot_dir, "main.py")
+
+            # Start the trading bot
+            self._trading_bot_process = subprocess.Popen(
+                [python_path, main_script],
+                cwd=bot_dir,
+                stdout=open("/tmp/trading_bot.log", "a"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+            send_alert(
+                f"🚀 <b>Trading bot started</b>\n\n"
+                f"<b>PID:</b> {self._trading_bot_process.pid}\n"
+                f"<b>Log:</b> /tmp/trading_bot.log",
+                wait=True
+            )
+        except Exception as e:
+            send_alert(f"❌ <b>Failed to start trading bot</b>\n\n<code>{str(e)[:200]}</code>", wait=True)
+
+    async def _stop_trading_bot(self):
+        """Stop the trading bot subprocess."""
+        import subprocess
+        import signal
+
+        # First try to stop our tracked process
+        if self._trading_bot_process is not None:
+            if self._trading_bot_process.poll() is None:
+                try:
+                    self._trading_bot_process.send_signal(signal.SIGTERM)
+                    send_alert("🛑 <b>Trading bot stopping</b>\n\nSent SIGTERM...", wait=True)
+                    self._trading_bot_process = None
+                    return
+                except Exception as e:
+                    send_alert(f"⚠️ <b>Error stopping tracked process</b>\n\n<code>{str(e)[:100]}</code>", wait=True)
+
+        # Fallback: find and kill any running main.py process
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "python.*main.py"],
+                capture_output=True,
+                text=True
+            )
+            pids = result.stdout.strip().split("\n")
+            pids = [p for p in pids if p]
+
+            if not pids:
+                send_alert("ℹ️ <b>Trading bot not running</b>", wait=True)
+                return
+
+            for pid in pids:
+                subprocess.run(["kill", "-TERM", pid])
+
+            send_alert(
+                f"🛑 <b>Trading bot stopped</b>\n\n"
+                f"<b>Killed PIDs:</b> {', '.join(pids)}",
+                wait=True
+            )
+            self._trading_bot_process = None
+        except Exception as e:
+            send_alert(f"❌ <b>Failed to stop trading bot</b>\n\n<code>{str(e)[:200]}</code>", wait=True)

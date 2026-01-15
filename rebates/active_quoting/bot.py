@@ -158,7 +158,7 @@ class ActiveQuotingBot:
         self._market_ws_task: Optional[asyncio.Task] = None
         self._user_ws_task: Optional[asyncio.Task] = None
 
-        # Telegram command handler for /stop command
+        # Telegram command handler for bot control commands
         self._telegram_handler: Optional[TelegramCommandHandler] = None
 
         # Position sync tracking (fallback for WebSocket fill issues)
@@ -639,14 +639,14 @@ class ActiveQuotingBot:
             self._markout_task = asyncio.create_task(self._markout_loop())
             self._daily_summary_task = asyncio.create_task(self._daily_summary_loop())
 
-            # Start Telegram command handler for /stop and /status commands
+            # Start Telegram command handler for /stopaq, /startaq, /status, and trading bot commands
             if self._enable_alerts:
                 self._telegram_handler = TelegramCommandHandler(
-                    on_stop_command=lambda: self.stop("Telegram /stop command"),
+                    on_stop_command=lambda: self.stop("Telegram /stopaq command"),
                     on_status_command=self._send_status_via_telegram,
                 )
                 await self._telegram_handler.start()
-                logger.info("Telegram command handler started (supports /stop, /status)")
+                logger.info("Telegram command handler started (supports /stopaq, /startaq, /status, /starttrading, /stoptrading)")
 
             logger.info("Bot started successfully")
 
