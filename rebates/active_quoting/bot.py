@@ -298,12 +298,17 @@ class ActiveQuotingBot:
 
             # Build a dict of token_id -> (size, avg_price) from API
             api_positions = {}
+            logger.info(f"API returned {len(positions_data)} total positions")
             for pos in positions_data:
                 token_id = str(pos.get("asset", ""))
                 size = float(pos.get("size", 0))
                 avg_price = float(pos.get("avgPrice", 0.5))
+                title = pos.get("title", "")
                 if token_id in token_ids:
                     api_positions[token_id] = (size, avg_price)
+                    logger.info(f"API position match: {token_id[:20]}... size={size:.2f} title={title[:40]}")
+
+            logger.info(f"Matched {len(api_positions)} positions for {len(token_ids)} active tokens")
 
             synced_count = 0
             for token_id in token_ids:
