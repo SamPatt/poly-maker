@@ -43,7 +43,7 @@ def config():
 
 
 @pytest.fixture
-def bot(config):
+def bot(config, valid_orderbook):
     """Create ActiveQuotingBot instance with mocked components."""
     bot = ActiveQuotingBot(
         config=config,
@@ -59,6 +59,7 @@ def bot(config):
     bot.orderbook_manager.connect = AsyncMock()
     bot.orderbook_manager.disconnect = AsyncMock()
     bot.orderbook_manager.is_connected = MagicMock(return_value=True)
+    bot.orderbook_manager.get_orderbook = MagicMock(return_value=valid_orderbook)
 
     bot.user_channel_manager = MagicMock()
     bot.user_channel_manager.connect = AsyncMock()

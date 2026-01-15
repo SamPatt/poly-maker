@@ -14,6 +14,7 @@ class ActiveQuotingConfig:
 
     # --- Quote Pricing ---
     quote_offset_ticks: int = 0  # Quote AT best bid/ask, not inside
+    min_spread_ticks_to_quote: int = 2  # Skip quoting when spread is too tight
     improve_when_spread_ticks: int = 4  # Only improve by 1 tick if spread >= 4 ticks
     max_spread_ticks: int = 10  # Widen to this during momentum
 
@@ -33,6 +34,9 @@ class ActiveQuotingConfig:
     max_liability_per_market_usdc: float = 50.0  # Worst-case loss
     max_total_liability_usdc: float = 500.0  # Across all markets
     inventory_skew_coefficient: float = 0.02  # Linear: skew = coef * inventory
+    inventory_discrepancy_threshold: float = 2.0  # Shares before halt checks
+    inventory_discrepancy_duration_seconds: float = 30.0  # Seconds over threshold before halt
+    inventory_discrepancy_reconcile_interval_seconds: float = 30.0  # Interval between reconcile attempts
 
     # --- Risk Management ---
     max_drawdown_per_market_usdc: float = 20.0  # Stop quoting that market
@@ -40,6 +44,7 @@ class ActiveQuotingConfig:
     max_consecutive_errors: int = 5
     stale_feed_timeout_seconds: float = 30.0  # Max time without WS events
     circuit_breaker_recovery_seconds: float = 60.0  # Recovery period after halt
+    market_performance_log_interval_seconds: float = 300.0  # Per-market P&L summary interval
 
     # --- End-of-Market Wind-Down ---
     wind_down_start_seconds: float = 300.0  # Start wind-down 5 minutes (300s) before end
@@ -60,6 +65,11 @@ class ActiveQuotingConfig:
     batch_size: int = 15  # Max orders per batch request
     cancel_on_momentum: bool = True
     post_only: bool = True  # Always
+
+    # --- Balance/Allowance Throttling (Phase 7) ---
+    balance_error_threshold: int = 3  # Consecutive balance/allowance rejections before throttling
+    balance_error_window_seconds: float = 60.0  # Window for consecutive errors
+    balance_error_cooldown_seconds: float = 60.0  # Throttle duration before retry
 
     # --- Fee Handling ---
     fee_cache_ttl_seconds: int = 300  # Cache fee rates for 5 min
@@ -82,6 +92,7 @@ class ActiveQuotingConfig:
         return cls(
             # Quote Pricing
             quote_offset_ticks=int(os.getenv("AQ_QUOTE_OFFSET_TICKS", "0")),
+            min_spread_ticks_to_quote=int(os.getenv("AQ_MIN_SPREAD_TICKS_TO_QUOTE", "2")),
             improve_when_spread_ticks=int(os.getenv("AQ_IMPROVE_WHEN_SPREAD_TICKS", "4")),
             max_spread_ticks=int(os.getenv("AQ_MAX_SPREAD_TICKS", "10")),
             # Quote Refresh
@@ -98,12 +109,16 @@ class ActiveQuotingConfig:
             max_liability_per_market_usdc=float(os.getenv("AQ_MAX_LIABILITY_PER_MARKET_USDC", "50.0")),
             max_total_liability_usdc=float(os.getenv("AQ_MAX_TOTAL_LIABILITY_USDC", "500.0")),
             inventory_skew_coefficient=float(os.getenv("AQ_INVENTORY_SKEW_COEFFICIENT", "0.02")),
+            inventory_discrepancy_threshold=float(os.getenv("AQ_INVENTORY_DISCREPANCY_THRESHOLD", "2.0")),
+            inventory_discrepancy_duration_seconds=float(os.getenv("AQ_INVENTORY_DISCREPANCY_DURATION_SECONDS", "30.0")),
+            inventory_discrepancy_reconcile_interval_seconds=float(os.getenv("AQ_INVENTORY_DISCREPANCY_RECONCILE_INTERVAL_SECONDS", "30.0")),
             # Risk Management
             max_drawdown_per_market_usdc=float(os.getenv("AQ_MAX_DRAWDOWN_PER_MARKET_USDC", "20.0")),
             max_drawdown_global_usdc=float(os.getenv("AQ_MAX_DRAWDOWN_GLOBAL_USDC", "100.0")),
             max_consecutive_errors=int(os.getenv("AQ_MAX_CONSECUTIVE_ERRORS", "5")),
             stale_feed_timeout_seconds=float(os.getenv("AQ_STALE_FEED_TIMEOUT_SECONDS", "30.0")),
             circuit_breaker_recovery_seconds=float(os.getenv("AQ_CIRCUIT_BREAKER_RECOVERY_SECONDS", "60.0")),
+            market_performance_log_interval_seconds=float(os.getenv("AQ_MARKET_PERFORMANCE_LOG_INTERVAL_SECONDS", "300.0")),
             # End-of-Market Wind-Down
             wind_down_start_seconds=float(os.getenv("AQ_WIND_DOWN_START_SECONDS", "300.0")),
             wind_down_taker_threshold_seconds=float(os.getenv("AQ_WIND_DOWN_TAKER_THRESHOLD_SECONDS", "40.0")),
@@ -120,6 +135,10 @@ class ActiveQuotingConfig:
             batch_size=int(os.getenv("AQ_BATCH_SIZE", "15")),
             cancel_on_momentum=os.getenv("AQ_CANCEL_ON_MOMENTUM", "true").lower() == "true",
             post_only=os.getenv("AQ_POST_ONLY", "true").lower() == "true",
+            # Balance/Allowance Throttling (Phase 7)
+            balance_error_threshold=int(os.getenv("AQ_BALANCE_ERROR_THRESHOLD", "3")),
+            balance_error_window_seconds=float(os.getenv("AQ_BALANCE_ERROR_WINDOW_SECONDS", "60.0")),
+            balance_error_cooldown_seconds=float(os.getenv("AQ_BALANCE_ERROR_COOLDOWN_SECONDS", "60.0")),
             # Fee Handling
             fee_cache_ttl_seconds=int(os.getenv("AQ_FEE_CACHE_TTL_SECONDS", "300")),
             # WebSocket Configuration
@@ -141,8 +160,12 @@ class ActiveQuotingConfig:
         # Quote pricing validation
         if self.quote_offset_ticks < 0:
             errors.append("quote_offset_ticks must be >= 0")
+        if self.min_spread_ticks_to_quote < 1:
+            errors.append("min_spread_ticks_to_quote must be >= 1")
         if self.improve_when_spread_ticks < 1:
             errors.append("improve_when_spread_ticks must be >= 1")
+        if self.min_spread_ticks_to_quote > self.max_spread_ticks:
+            errors.append("min_spread_ticks_to_quote must be <= max_spread_ticks")
         if self.max_spread_ticks < self.improve_when_spread_ticks:
             errors.append("max_spread_ticks must be >= improve_when_spread_ticks")
 
@@ -173,6 +196,12 @@ class ActiveQuotingConfig:
             errors.append("max_total_liability_usdc must be >= max_liability_per_market_usdc")
         if self.inventory_skew_coefficient < 0:
             errors.append("inventory_skew_coefficient must be >= 0")
+        if self.inventory_discrepancy_threshold <= 0:
+            errors.append("inventory_discrepancy_threshold must be > 0")
+        if self.inventory_discrepancy_duration_seconds <= 0:
+            errors.append("inventory_discrepancy_duration_seconds must be > 0")
+        if self.inventory_discrepancy_reconcile_interval_seconds <= 0:
+            errors.append("inventory_discrepancy_reconcile_interval_seconds must be > 0")
 
         # Risk validation
         if self.max_drawdown_per_market_usdc <= 0:
@@ -185,6 +214,8 @@ class ActiveQuotingConfig:
             errors.append("stale_feed_timeout_seconds must be > 0")
         if self.circuit_breaker_recovery_seconds <= 0:
             errors.append("circuit_breaker_recovery_seconds must be > 0")
+        if self.market_performance_log_interval_seconds <= 0:
+            errors.append("market_performance_log_interval_seconds must be > 0")
 
         # WebSocket Gap Safety validation (Phase 6)
         if self.ws_gap_reconcile_attempts < 1:
@@ -198,6 +229,14 @@ class ActiveQuotingConfig:
             errors.append("order_size_usdc must be >= 5 for live trading (Polymarket minimum is 5 shares)")
         if not 1 <= self.batch_size <= 15:
             errors.append("batch_size must be between 1 and 15")
+
+        # Balance/Allowance throttling validation
+        if self.balance_error_threshold < 1:
+            errors.append("balance_error_threshold must be >= 1")
+        if self.balance_error_window_seconds <= 0:
+            errors.append("balance_error_window_seconds must be > 0")
+        if self.balance_error_cooldown_seconds < 0:
+            errors.append("balance_error_cooldown_seconds must be >= 0")
 
         # Fee validation
         if self.fee_cache_ttl_seconds < 0:

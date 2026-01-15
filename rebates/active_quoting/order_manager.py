@@ -34,6 +34,8 @@ class OrderResult:
     """Result of an order operation."""
     success: bool
     order_id: Optional[str] = None
+    token_id: Optional[str] = None
+    side: Optional[OrderSide] = None
     error_msg: str = ""
     order_state: Optional[OrderState] = None
 
@@ -231,7 +233,9 @@ class OrderManager:
         if not self._poly_client:
             return OrderResult(
                 success=False,
-                error_msg="No PolymarketClient configured for live orders"
+                error_msg="No PolymarketClient configured for live orders",
+                token_id=token_id,
+                side=side,
             )
 
         try:
@@ -261,6 +265,8 @@ class OrderManager:
                 return OrderResult(
                     success=False,
                     error_msg=error_msg,
+                    token_id=token_id,
+                    side=side,
                 )
 
             order_id = response.get("orderID") or response.get("id")
@@ -285,6 +291,8 @@ class OrderManager:
                 success=True,
                 order_id=order_id,
                 order_state=order_state,
+                token_id=token_id,
+                side=side,
             )
 
         except Exception as e:
@@ -295,6 +303,8 @@ class OrderManager:
             return OrderResult(
                 success=False,
                 error_msg=str(e),
+                token_id=token_id,
+                side=side,
             )
 
     def _simulate_order(
@@ -331,6 +341,8 @@ class OrderManager:
             success=True,
             order_id=order_id,
             order_state=order_state,
+            token_id=token_id,
+            side=side,
         )
 
     async def place_quote(
@@ -392,21 +404,34 @@ class OrderManager:
 
             # For now, place orders individually in parallel
             # TODO: Use actual batch API when available
-            tasks = [
-                self.place_order(token_id, side, price, size, neg_risk)
-                for token_id, side, price, size, neg_risk in batch
-            ]
+            tasks = []
+            for token_id, side, price, size, neg_risk in batch:
+                tasks.append(self.place_order(token_id, side, price, size, neg_risk))
 
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for order_result in batch_results:
+            for order_result, order in zip(batch_results, batch):
+                token_id, side, price, size, _ = order
                 if isinstance(order_result, Exception):
                     result.failed_orders.append(
-                        OrderResult(success=False, error_msg=str(order_result))
+                        OrderResult(
+                            success=False,
+                            error_msg=str(order_result),
+                            token_id=token_id,
+                            side=side,
+                        )
                     )
                 elif order_result.success:
+                    if order_result.token_id is None:
+                        order_result.token_id = token_id
+                    if order_result.side is None:
+                        order_result.side = side
                     result.successful_orders.append(order_result)
                 else:
+                    if order_result.token_id is None:
+                        order_result.token_id = token_id
+                    if order_result.side is None:
+                        order_result.side = side
                     result.failed_orders.append(order_result)
 
         return result

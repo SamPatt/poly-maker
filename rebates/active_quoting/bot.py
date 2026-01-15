@@ -86,6 +86,24 @@ class WindDownState:
     current_price: Optional[float] = None  # Current best bid for excess token
 
 
+@dataclass
+class BalanceErrorState:
+    """Track balance/allowance rejection streaks for throttling."""
+    count: int = 0
+    first_seen: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
+    throttled_until: Optional[datetime] = None
+
+
+@dataclass
+class InventoryDiscrepancyState:
+    """Track persistent inventory discrepancies for safety halts."""
+    first_seen: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
+    last_reconcile: Optional[datetime] = None
+    active: bool = False
+
+
 class ActiveQuotingBot:
     """
     Main orchestration class for active two-sided quoting.
@@ -173,6 +191,17 @@ class ActiveQuotingBot:
         # WebSocket gap safety halt tracking (Phase 6)
         self._gap_reconcile_attempts: int = 0  # Counter for failed reconciliation attempts
         self._last_gap_recovery_time: float = 0.0  # Last recovery attempt when halted due to gaps
+
+        # Balance/allowance rejection throttling (Phase 7)
+        self._balance_error_states: Dict[str, BalanceErrorState] = {}
+
+        # Inventory discrepancy halts (Phase 7)
+        self._inventory_discrepancy_states: Dict[str, InventoryDiscrepancyState] = {}
+
+        # Per-market performance tracking
+        self._order_reject_counts: Dict[str, int] = {}
+        self._balance_reject_counts: Dict[str, int] = {}
+        self._last_market_perf_log: datetime = datetime.utcnow()
 
     def _init_components(self) -> None:
         """Initialize all sub-components."""
@@ -989,6 +1018,7 @@ class ActiveQuotingBot:
 
                 # Periodic P&L summary logging
                 self.pnl_tracker.maybe_log_summary()
+                self._maybe_log_market_performance()
 
                 # Small delay to prevent tight loop
                 await asyncio.sleep(0.1)
@@ -1023,6 +1053,16 @@ class ActiveQuotingBot:
         if not market:
             return
 
+        if self._is_balance_throttled(token_id):
+            if market.is_quoting:
+                await self._cancel_market_quotes(token_id)
+            return
+
+        if await self._check_inventory_discrepancy(token_id):
+            if market.is_quoting:
+                await self._cancel_market_quotes(token_id)
+            return
+
         # Get orderbook
         orderbook = self.orderbook_manager.get_orderbook(token_id)
         if not orderbook or not orderbook.is_valid():
@@ -1046,7 +1086,15 @@ class ActiveQuotingBot:
 
         # Debug log for quote decisions (temporary)
         if decision.action == QuoteAction.PLACE_QUOTE:
-            logger.info(f"Quote decision for {token_id[:20]}...: {decision.action.value} - {decision.reason}")
+            best_bid = orderbook.best_bid
+            best_ask = orderbook.best_ask
+            mid = orderbook.mid_price() if orderbook else None
+            mid_str = f"{mid:.4f}" if mid is not None else "N/A"
+            logger.info(
+                f"Quote decision for {token_id[:20]}...: {decision.action.value} - {decision.reason} | "
+                f"best_bid={best_bid:.4f} best_ask={best_ask:.4f} mid={mid_str} "
+                f"bid={decision.quote.bid_price:.4f} ask={decision.quote.ask_price:.4f}"
+            )
         elif decision.action == QuoteAction.CANCEL_ALL:
             logger.debug(f"Quote decision for {token_id[:20]}...: {decision.action.value} - {decision.reason}")
 
@@ -1061,6 +1109,9 @@ class ActiveQuotingBot:
 
     async def _place_or_update_quote(self, token_id: str, quote: Quote) -> None:
         """Place or update quote for a market."""
+        if self._is_balance_throttled(token_id):
+            return
+
         # Check rate limiting
         if not self._check_refresh_rate(token_id):
             return
@@ -1101,6 +1152,32 @@ class ActiveQuotingBot:
             # Wait for exchange to process cancellation
             await asyncio.sleep(0.2)
 
+        # Guard: avoid post-only orders that would cross the book
+        orderbook = self.orderbook_manager.get_orderbook(token_id)
+        if not orderbook or orderbook.best_bid is None or orderbook.best_ask is None:
+            logger.warning(f"Skipping quote for {token_id[:20]}...: missing best bid/ask")
+            return
+
+        best_bid = orderbook.best_bid
+        best_ask = orderbook.best_ask
+
+        if adjusted_quote.bid_size >= min_size and adjusted_quote.bid_price >= best_ask:
+            logger.warning(
+                f"Skipping bid for {token_id[:20]}...: bid {adjusted_quote.bid_price:.4f} "
+                f">= best_ask {best_ask:.4f} (post-only would cross)"
+            )
+            adjusted_quote.bid_size = 0
+
+        if adjusted_quote.ask_size >= min_size and adjusted_quote.ask_price <= best_bid:
+            logger.warning(
+                f"Skipping ask for {token_id[:20]}...: ask {adjusted_quote.ask_price:.4f} "
+                f"<= best_bid {best_bid:.4f} (post-only would cross)"
+            )
+            adjusted_quote.ask_size = 0
+
+        if adjusted_quote.bid_size < min_size and adjusted_quote.ask_size < min_size:
+            return
+
         # Place orders
         orders_to_place = []
         if adjusted_quote.bid_size >= min_size:
@@ -1123,6 +1200,7 @@ class ActiveQuotingBot:
         if orders_to_place:
             result = await self.order_manager.place_orders_batch(orders_to_place)
             if result.all_succeeded:
+                self._clear_balance_errors(token_id)
                 # Register placed orders with user channel manager for fill verification
                 for order_result in result.successful_orders:
                     if order_result.order_id:
@@ -1143,11 +1221,26 @@ class ActiveQuotingBot:
                 # Don't count these toward circuit breaker
                 soft_errors = {"not enough balance", "order crosses book", "allowance"}
                 has_hard_error = False
+                has_balance_error = False
+                balance_error_msg = ""
                 for failed in result.failed_orders:
                     error_lower = failed.error_msg.lower()
+                    if failed.token_id:
+                        self._order_reject_counts[failed.token_id] = (
+                            self._order_reject_counts.get(failed.token_id, 0) + 1
+                        )
+                    if self._is_balance_error(failed.error_msg):
+                        has_balance_error = True
+                        balance_error_msg = failed.error_msg
+                        if failed.token_id:
+                            self._balance_reject_counts[failed.token_id] = (
+                                self._balance_reject_counts.get(failed.token_id, 0) + 1
+                            )
                     if not any(soft in error_lower for soft in soft_errors):
                         has_hard_error = True
                         break
+                if has_balance_error:
+                    await self._record_balance_rejection(token_id, balance_error_msg)
                 if has_hard_error:
                     self.risk_manager.record_error()
 
@@ -1186,6 +1279,209 @@ class ActiveQuotingBot:
 
         self._global_refresh_count += 1
         return True
+
+    def _is_balance_error(self, error_msg: str) -> bool:
+        """Check if an error message indicates balance/allowance issues."""
+        error_lower = error_msg.lower()
+        return any(
+            marker in error_lower
+            for marker in (
+                "not enough balance",
+                "insufficient balance",
+                "allowance",
+            )
+        )
+
+    def _get_balance_error_state(self, token_id: str) -> BalanceErrorState:
+        """Get or initialize balance error tracking for a token."""
+        if token_id not in self._balance_error_states:
+            self._balance_error_states[token_id] = BalanceErrorState()
+        return self._balance_error_states[token_id]
+
+    def _clear_balance_errors(self, token_id: str) -> None:
+        """Clear balance error tracking for a token."""
+        if token_id in self._balance_error_states:
+            self._balance_error_states[token_id] = BalanceErrorState()
+
+    def _is_balance_throttled(self, token_id: str) -> bool:
+        """Check if a token is throttled due to balance/allowance errors."""
+        state = self._balance_error_states.get(token_id)
+        if not state or state.throttled_until is None:
+            return False
+
+        now = datetime.utcnow()
+        if now >= state.throttled_until:
+            self._balance_error_states[token_id] = BalanceErrorState()
+            logger.info(
+                f"Balance throttle cleared for {token_id[:20]}... "
+                f"(cooldown expired)"
+            )
+            return False
+
+        return True
+
+    async def _record_balance_rejection(self, token_id: str, error_msg: str) -> None:
+        """Record a balance/allowance rejection and throttle if needed."""
+        state = self._get_balance_error_state(token_id)
+        now = datetime.utcnow()
+        window = timedelta(seconds=self.config.balance_error_window_seconds)
+
+        if state.first_seen is None or (now - state.first_seen) > window:
+            state.count = 0
+            state.first_seen = now
+
+        state.count += 1
+        state.last_seen = now
+
+        if state.count < self.config.balance_error_threshold:
+            return
+
+        if state.throttled_until and now < state.throttled_until:
+            return
+
+        cooldown = timedelta(seconds=self.config.balance_error_cooldown_seconds)
+        state.throttled_until = now + cooldown
+
+        logger.warning(
+            f"Balance throttle activated for {token_id[:20]}...: "
+            f"errors={state.count} within {self.config.balance_error_window_seconds:.0f}s, "
+            f"cooldown={self.config.balance_error_cooldown_seconds:.0f}s, "
+            f"last_error={error_msg}"
+        )
+
+        await self._cancel_market_quotes(token_id)
+        await self._sync_positions_from_api({token_id})
+
+    def _maybe_log_market_performance(self, force: bool = False) -> bool:
+        """Log per-market performance at a fixed interval."""
+        now = datetime.utcnow()
+        elapsed = (now - self._last_market_perf_log).total_seconds()
+
+        if not force and elapsed < self.config.market_performance_log_interval_seconds:
+            return False
+
+        self._last_market_perf_log = now
+        self._log_market_performance()
+        return True
+
+    def _log_market_performance(self) -> None:
+        """Log per-market realized P&L and reject counts."""
+        summary = self.pnl_tracker.get_session_summary()
+        markets = summary.get("markets", {})
+        if not markets:
+            return
+
+        logger.info("=" * 60)
+        logger.info("PER-MARKET PERFORMANCE SUMMARY")
+        logger.info("=" * 60)
+
+        sorted_markets = sorted(
+            markets.items(),
+            key=lambda item: item[1]["net_pnl"],
+            reverse=True,
+        )
+
+        for token_id, stats in sorted_markets:
+            rejects = self._order_reject_counts.get(token_id, 0)
+            balance_rejects = self._balance_reject_counts.get(token_id, 0)
+            market_name = stats.get("market", token_id[:16] + "...")
+            logger.info(
+                f"{market_name} | "
+                f"trades={stats['trades']:<3} "
+                f"net_pnl={stats['net_pnl']:+.2f} "
+                f"fees={stats['fees']:.2f} "
+                f"win_rate={stats['win_rate']:.1f}% "
+                f"rejects={rejects} "
+                f"balance_rejects={balance_rejects}"
+            )
+
+        logger.info("=" * 60)
+
+    def _get_inventory_discrepancy_state(self, token_id: str) -> InventoryDiscrepancyState:
+        """Get or initialize inventory discrepancy tracking for a token."""
+        if token_id not in self._inventory_discrepancy_states:
+            self._inventory_discrepancy_states[token_id] = InventoryDiscrepancyState()
+        return self._inventory_discrepancy_states[token_id]
+
+    def _clear_inventory_discrepancy_state(self, token_id: str) -> None:
+        """Clear inventory discrepancy tracking for a token."""
+        if token_id in self._inventory_discrepancy_states:
+            self._inventory_discrepancy_states[token_id] = InventoryDiscrepancyState()
+
+    async def _check_inventory_discrepancy(self, token_id: str) -> bool:
+        """
+        Halt quoting if inventory discrepancy persists beyond threshold.
+
+        Returns:
+            True if quoting should be halted for this token.
+        """
+        position = self.inventory_manager.get_position(token_id)
+        discrepancy = position.effective_size - position.confirmed_size
+        abs_discrepancy = abs(discrepancy)
+        threshold = self.config.inventory_discrepancy_threshold
+
+        if abs_discrepancy < threshold:
+            state = self._inventory_discrepancy_states.get(token_id)
+            if state and state.active:
+                logger.info(
+                    f"Inventory discrepancy cleared for {token_id[:20]}... "
+                    f"(confirmed={position.confirmed_size:.2f}, "
+                    f"effective={position.effective_size:.2f})"
+                )
+            self._clear_inventory_discrepancy_state(token_id)
+            return False
+
+        state = self._get_inventory_discrepancy_state(token_id)
+        now = datetime.utcnow()
+
+        if state.first_seen is None:
+            state.first_seen = now
+        state.last_seen = now
+
+        duration = (now - state.first_seen).total_seconds()
+        if not state.active and duration < self.config.inventory_discrepancy_duration_seconds:
+            return False
+
+        if not state.active:
+            state.active = True
+            details = {
+                "token_id": token_id,
+                "confirmed_size": round(position.confirmed_size, 4),
+                "effective_size": round(position.effective_size, 4),
+                "pending_delta": round(position.pending_delta, 4),
+                "pending_fills": len(position.pending_fills),
+                "discrepancy": round(discrepancy, 4),
+                "threshold": threshold,
+                "duration_seconds": round(duration, 2),
+            }
+            logger.warning(f"Inventory discrepancy halt: {details}")
+
+            if self._enable_alerts:
+                market_name = self._market_names.get(token_id, token_id[:20] + "...")
+                reason = (
+                    f"Inventory discrepancy {discrepancy:+.2f} "
+                    f"for {duration:.0f}s (threshold {threshold:.2f})"
+                )
+                send_active_quoting_market_halt_alert(market_name, reason)
+
+        await self._reconcile_inventory_discrepancy(token_id, state)
+        return True
+
+    async def _reconcile_inventory_discrepancy(
+        self,
+        token_id: str,
+        state: InventoryDiscrepancyState,
+    ) -> None:
+        """Force reconciliation steps while a discrepancy halt is active."""
+        now = datetime.utcnow()
+        if state.last_reconcile is not None:
+            elapsed = (now - state.last_reconcile).total_seconds()
+            if elapsed < self.config.inventory_discrepancy_reconcile_interval_seconds:
+                return
+
+        state.last_reconcile = now
+        await self._reconcile_orders()
+        await self._sync_positions_from_api({token_id})
 
     # --- Markout Processing ---
 

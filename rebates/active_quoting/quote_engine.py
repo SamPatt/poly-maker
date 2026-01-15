@@ -123,6 +123,21 @@ class QuoteEngine:
                 reason="No best bid/ask available"
             )
 
+        spread_ticks = orderbook.spread_ticks()
+        if spread_ticks is None:
+            return QuoteDecision(
+                action=QuoteAction.CANCEL_ALL,
+                reason="Unable to calculate spread"
+            )
+        if spread_ticks < self.config.min_spread_ticks_to_quote:
+            return QuoteDecision(
+                action=QuoteAction.CANCEL_ALL,
+                reason=(
+                    f"Spread {spread_ticks} ticks < min "
+                    f"{self.config.min_spread_ticks_to_quote}"
+                ),
+            )
+
         # Calculate target quote prices
         my_bid, my_ask = self._calculate_base_prices(
             best_bid, best_ask, tick_size
@@ -350,6 +365,15 @@ class QuoteEngine:
 
         if best_bid is None or best_ask is None:
             return None, "No best bid/ask"
+
+        spread_ticks = orderbook.spread_ticks()
+        if spread_ticks is None:
+            return None, "Unable to calculate spread"
+        if spread_ticks < self.config.min_spread_ticks_to_quote:
+            return None, (
+                f"Spread {spread_ticks} ticks < min "
+                f"{self.config.min_spread_ticks_to_quote}"
+            )
 
         # Calculate base price for this side
         my_bid, my_ask = self._calculate_base_prices(best_bid, best_ask, tick_size)
