@@ -784,17 +784,22 @@ class TelegramCommandHandler:
             bot_dir = "/home/polymaker/poly-maker"
             python_path = os.path.join(bot_dir, ".venv", "bin", "python")
 
-            # Start the gabagool bot
+            # Set up environment for live trading
+            env = os.environ.copy()
+            env["GABAGOOL_DRY_RUN"] = "false"
+
+            # Start the gabagool bot in LIVE mode
             self._gabagool_process = subprocess.Popen(
                 [python_path, "-m", "rebates.gabagool.run"],
                 cwd=bot_dir,
+                env=env,
                 stdout=open("/tmp/gabagool.log", "a"),
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
 
             send_alert(
-                f"🍖 <b>Gabagool bot started</b>\n\n"
+                f"🍖 <b>Gabagool bot started (LIVE)</b>\n\n"
                 f"<b>PID:</b> {self._gabagool_process.pid}\n"
                 f"<b>Log:</b> /tmp/gabagool.log",
                 wait=True
