@@ -436,6 +436,10 @@ class UserChannelManager:
             # Check if it's an order we're tracking
             if order_id and order_id in self._orders:
                 is_our_fill = True
+            elif self._wallet_address:
+                # We have wallet configured but can't verify this fill - skip it
+                logger.debug(f"Skipping unverified fill (no maker_orders, unknown order): trade_id={trade_id}")
+                return
 
         # Use trade_id as fallback for order_id if still not found
         if not order_id:
