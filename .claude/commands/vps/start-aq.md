@@ -9,7 +9,8 @@ The AQ bot automatically discovers and trades 15-minute crypto markets based on 
 
 Execute these commands:
 
-1. Stop any existing AQ bot:
+1. Stop any existing AQ bot (screen or stray process):
+   `ssh trading "pkill -f 'rebates.active_quoting.bot' 2>/dev/null || true"`
    `ssh trading "screen -S aq -X quit 2>/dev/null || true"`
 
 2. Wait briefly:
@@ -25,7 +26,7 @@ Execute these commands:
    `sleep 5`
 
 6. Verify it started and show initial logs:
-   `ssh trading "pgrep -f 'rebates.active_quoting.bot' && echo 'AQ bot started successfully' || echo 'Failed to start AQ bot'"`
+   `ssh trading "pgrep -f 'python -u -m rebates.active_quoting.bot' -a && echo 'AQ bot started successfully' || echo 'Failed to start AQ bot'"`
    `ssh trading "tail -20 /tmp/aq.log"`
 
 Report the result to the user including the discovered markets.
