@@ -2055,25 +2055,48 @@ class ActiveQuotingBot:
 
     async def _send_status_via_telegram(self) -> None:
         """Send bot status via Telegram in response to /status command."""
+        import subprocess
         from .alerts import send_alert
 
+        # Check status of all bots
+        def is_process_running(pattern: str) -> bool:
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", pattern],
+                    capture_output=True,
+                    text=True
+                )
+                return bool(result.stdout.strip())
+            except Exception:
+                return False
+
+        trading_running = is_process_running("python.*main.py")
+        aq_running = self._running  # We know our own status
+        gabagool_running = is_process_running("rebates.gabagool.run")
+
+        # Bot status header
+        message = "📊 <b>Bot Status</b>\n\n"
+        message += "<b>Bots:</b>\n"
+        message += f"  Trading: {'🟢 Running' if trading_running else '🔴 Stopped'}\n"
+        message += f"  AQ: {'🟢 Running' if aq_running else '🟡 Paused'}\n"
+        message += f"  Gabagool: {'🟢 Running' if gabagool_running else '🔴 Stopped'}\n\n"
+
+        # AQ details (since we're the AQ bot)
         status = self.get_status()
         pnl_summary = self.pnl_tracker.session
 
-        message = "📊 <b>AQ Bot Status</b>\n\n"
-        message += f"<b>Running:</b> {'✅ Yes' if status['running'] else '❌ No'}\n"
-        message += f"<b>Markets:</b> {status['active_markets']}\n"
-        message += f"<b>Circuit Breaker:</b> {status['circuit_breaker_state']}\n"
-        message += f"<b>Open Orders:</b> {status['open_orders']}\n\n"
-
-        # P&L Summary
-        message += f"<b>Session P&L:</b> ${pnl_summary.net_pnl:+.2f}\n"
-        message += f"<b>Total Trades:</b> {pnl_summary.total_trades}\n"
-        message += f"<b>Win Rate:</b> {pnl_summary.win_rate:.0f}%\n\n"
+        message += "<b>AQ Details:</b>\n"
+        message += f"  Markets: {status['active_markets']}\n"
+        message += f"  Circuit Breaker: {status['circuit_breaker_state']}\n"
+        message += f"  Open Orders: {status['open_orders']}\n"
+        message += f"  Session P&L: ${pnl_summary.net_pnl:+.2f}\n"
+        message += f"  Total Trades: {pnl_summary.total_trades}\n"
+        message += f"  Win Rate: {pnl_summary.win_rate:.0f}%\n\n"
 
         # WebSocket status
-        message += f"<b>Market WS:</b> {'🟢' if status['market_ws_connected'] else '🔴'}\n"
-        message += f"<b>User WS:</b> {'🟢' if status['user_ws_connected'] else '🔴'}"
+        message += "<b>Connections:</b>\n"
+        message += f"  Market WS: {'🟢' if status['market_ws_connected'] else '🔴'}\n"
+        message += f"  User WS: {'🟢' if status['user_ws_connected'] else '🔴'}"
 
         send_alert(message, wait=True)
 
