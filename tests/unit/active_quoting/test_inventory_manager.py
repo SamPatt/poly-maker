@@ -11,6 +11,7 @@ from rebates.active_quoting.inventory_manager import (
     TrackedPosition,
     PendingFill,
     PENDING_FILL_AGE_OUT_SECONDS,
+    PENDING_FILL_MAX_AGE_SECONDS,
 )
 from rebates.active_quoting.config import ActiveQuotingConfig
 from rebates.active_quoting.models import Fill, OrderSide, Position
@@ -847,12 +848,12 @@ class TestPartialConfirmationReconciliation:
 class TestAgeOutPendingFills:
     """Tests for age-out of old pending fills (Phase 2 requirement)."""
 
-    def test_age_out_logs_trade_ids_and_delta(self, manager, caplog):
-        """Fills older than 30s should be removed with proper logging."""
+    def test_buy_fills_preserved_until_hard_cap(self, manager, caplog):
+        """BUY fills should be preserved until 5 min hard cap (prevents limit bypass)."""
         import logging
-        caplog.set_level(logging.WARNING)
+        caplog.set_level(logging.INFO)
 
-        # Create an old fill (older than age-out threshold)
+        # Create an old BUY fill (older than 30s but under 5 min hard cap)
         old_timestamp = datetime.utcnow() - timedelta(seconds=PENDING_FILL_AGE_OUT_SECONDS + 5)
         fill = Fill(
             order_id="order1",
@@ -860,7 +861,7 @@ class TestAgeOutPendingFills:
             side=OrderSide.BUY,
             price=0.50,
             size=25.0,
-            trade_id="old_fill",
+            trade_id="old_buy_fill",
             timestamp=old_timestamp,
         )
 
@@ -872,13 +873,125 @@ class TestAgeOutPendingFills:
         # Trigger age-out via set_position (which calls _age_out_pending_fills)
         manager.set_position("token1", size=0.0, avg_entry_price=0.50)
 
+        # BUY fill should be PRESERVED (not aged out) - this prevents limit bypass
         pos = manager.get_position("token1")
-        assert len(pos.pending_fills) == 0
+        assert len(pos.pending_fills) == 1, "BUY fills should be preserved until hard cap"
+
+        # Check logging indicates preservation
+        assert "Preserving BUY fills" in caplog.text
+
+    def test_buy_fills_force_aged_after_hard_cap(self, manager, caplog):
+        """BUY fills should be force-aged after 5 min hard cap."""
+        import logging
+        caplog.set_level(logging.WARNING)
+
+        # Create a very old BUY fill (older than 5 min hard cap)
+        very_old_timestamp = datetime.utcnow() - timedelta(seconds=PENDING_FILL_MAX_AGE_SECONDS + 5)
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=25.0,
+            trade_id="very_old_buy_fill",
+            timestamp=very_old_timestamp,
+        )
+
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 1
+
+        # Trigger age-out via set_position
+        manager.set_position("token1", size=0.0, avg_entry_price=0.50)
+
+        # BUY fill should be FORCE aged out after hard cap
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 0, "BUY fills should be force-aged after hard cap"
+
+        # Check logging indicates force age-out
+        assert "FORCE aging out BUY fills" in caplog.text
+        assert "very_old_buy_fill" in caplog.text
+
+    def test_sell_fills_aged_out_after_normal_threshold(self, manager, caplog):
+        """SELL fills should be aged out after normal 30s threshold."""
+        import logging
+        caplog.set_level(logging.WARNING)
+
+        # Create an old SELL fill (older than age-out threshold)
+        # First need a position to sell from
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        old_timestamp = datetime.utcnow() - timedelta(seconds=PENDING_FILL_AGE_OUT_SECONDS + 5)
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.SELL,
+            price=0.50,
+            size=25.0,
+            trade_id="old_sell_fill",
+            timestamp=old_timestamp,
+        )
+
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 1
+
+        # Trigger age-out via set_position
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        # SELL fill should be aged out after normal threshold
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 0, "SELL fills should be aged out"
 
         # Check logging
-        assert "Aging out pending fills" in caplog.text
-        assert "old_fill" in caplog.text
-        assert "+25.00" in caplog.text or "25.00" in caplog.text
+        assert "Aging out SELL fills" in caplog.text
+        assert "old_sell_fill" in caplog.text
+
+    def test_mixed_fills_only_sells_aged_out(self, manager, caplog):
+        """When both BUY and SELL fills are old, only SELLs are aged out."""
+        import logging
+        caplog.set_level(logging.INFO)
+
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        old_timestamp = datetime.utcnow() - timedelta(seconds=PENDING_FILL_AGE_OUT_SECONDS + 5)
+
+        # Add old BUY fill
+        buy_fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="old_buy",
+            timestamp=old_timestamp,
+        )
+        manager.update_from_fill(buy_fill)
+
+        # Add old SELL fill
+        sell_fill = Fill(
+            order_id="order2",
+            token_id="token1",
+            side=OrderSide.SELL,
+            price=0.50,
+            size=5.0,
+            trade_id="old_sell",
+            timestamp=old_timestamp,
+        )
+        manager.update_from_fill(sell_fill)
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 2
+
+        # Trigger age-out
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        # Only BUY fill should remain (SELL aged out)
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 1, "Only BUY fill should remain"
+        assert "old_buy" in pos.pending_fills
 
     def test_recent_fills_not_aged_out(self, manager):
         """Fills newer than threshold should not be aged out."""

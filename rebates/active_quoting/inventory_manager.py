@@ -35,6 +35,10 @@ FILL_PROTECTION_SECONDS = 0.0  # Effectively disabled
 # Pending fill age-out threshold
 PENDING_FILL_AGE_OUT_SECONDS = 30.0
 
+# Hard max age for pending fills - after this, force age-out even BUY fills
+# to prevent memory growth and permanent buy blocking if API never confirms
+PENDING_FILL_MAX_AGE_SECONDS = 300.0  # 5 minutes
+
 
 def _sign(x: float) -> int:
     """Return sign of x: 1 for positive, -1 for negative, 0 for zero."""
@@ -731,36 +735,74 @@ class InventoryManager:
         - Fills for a different session
         - WebSocket/API synchronization issues
 
+        IMPORTANT: BUY fills are handled differently to prevent position limit bypass:
+        - SELL fills: Aged out after 30s (conservative for limits)
+        - BUY fills: Preserved until 5 min hard cap (prevents limit bypass)
+
+        The hard cap prevents memory growth and permanent buy blocking if
+        the API never confirms the fills.
+
         Args:
             position: TrackedPosition to age out
         """
         now = datetime.utcnow()
-        cutoff = now - timedelta(seconds=PENDING_FILL_AGE_OUT_SECONDS)
+        normal_cutoff = now - timedelta(seconds=PENDING_FILL_AGE_OUT_SECONDS)
+        hard_cutoff = now - timedelta(seconds=PENDING_FILL_MAX_AGE_SECONDS)
 
-        old_fills = {
+        # Separate old fills by type
+        old_sells = {
             trade_id: fill
             for trade_id, fill in position.pending_fills.items()
-            if fill.timestamp < cutoff
+            if fill.timestamp < normal_cutoff and fill.side == OrderSide.SELL
         }
 
-        if not old_fills:
-            return
+        old_buys_normal = {
+            trade_id: fill
+            for trade_id, fill in position.pending_fills.items()
+            if fill.timestamp < normal_cutoff and fill.side == OrderSide.BUY
+        }
 
-        # Calculate net delta being removed
-        net_delta = sum(
-            f.size if f.side == OrderSide.BUY else -f.size
-            for f in old_fills.values()
-        )
+        old_buys_hard = {
+            trade_id: fill
+            for trade_id, fill in position.pending_fills.items()
+            if fill.timestamp < hard_cutoff and fill.side == OrderSide.BUY
+        }
 
-        # Remove old fills
-        for trade_id in old_fills:
+        fills_to_remove = []
+
+        # Always age out old SELL fills (conservative for limits)
+        if old_sells:
+            sell_delta = sum(f.size for f in old_sells.values())
+            fills_to_remove.extend(old_sells.keys())
+            logger.warning(
+                f"Aging out SELL fills for {position.token_id[:20]}...: "
+                f"count={len(old_sells)}, size={sell_delta:.2f}, "
+                f"trade_ids={list(old_sells.keys())}"
+            )
+
+        # Preserve BUY fills until hard cap (prevents limit bypass)
+        if old_buys_normal and not old_buys_hard:
+            buy_delta = sum(f.size for f in old_buys_normal.values())
+            logger.info(
+                f"Preserving BUY fills for {position.token_id[:20]}...: "
+                f"count={len(old_buys_normal)}, size={buy_delta:.2f}, "
+                f"waiting for API to confirm (max {PENDING_FILL_MAX_AGE_SECONDS:.0f}s)"
+            )
+
+        # Force age out BUY fills that exceed hard cap
+        if old_buys_hard:
+            buy_delta = sum(f.size for f in old_buys_hard.values())
+            fills_to_remove.extend(old_buys_hard.keys())
+            logger.warning(
+                f"FORCE aging out BUY fills for {position.token_id[:20]}...: "
+                f"count={len(old_buys_hard)}, size={buy_delta:.2f}, "
+                f"exceeded {PENDING_FILL_MAX_AGE_SECONDS:.0f}s hard cap. "
+                f"API may have issues. trade_ids={list(old_buys_hard.keys())}"
+            )
+
+        # Remove the fills
+        for trade_id in fills_to_remove:
             del position.pending_fills[trade_id]
-
-        logger.warning(
-            f"Aging out pending fills for {position.token_id[:20]}...: "
-            f"trade_ids={list(old_fills.keys())}, net_delta={net_delta:+.2f}, "
-            f"confirmed={position.confirmed_size:.2f}"
-        )
 
     def force_reconcile(self, token_id: str) -> None:
         """
