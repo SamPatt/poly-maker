@@ -50,7 +50,9 @@ class ActiveQuotingConfig:
     # --- End-of-Market Wind-Down ---
     wind_down_start_seconds: float = 300.0  # Start wind-down 5 minutes (300s) before end
     wind_down_taker_threshold_seconds: float = 40.0  # Switch to taker mode at 40 seconds
-    wind_down_taker_price_threshold: float = 0.25  # Only taker sell if price < $0.25
+    wind_down_taker_price_threshold: float = 0.25  # Minimum price to taker sell before forced exit
+    wind_down_taker_force_seconds: float = 10.0  # Force taker exit in final seconds
+    wind_down_maker_max_loss_per_share: float = 0.01  # Allow small loss on maker exits
 
     # --- Price Limits ---
     max_buy_price: float = 0.90  # Never buy above this price (avoid overpaying near certainty)
@@ -125,6 +127,8 @@ class ActiveQuotingConfig:
             wind_down_start_seconds=float(os.getenv("AQ_WIND_DOWN_START_SECONDS", "300.0")),
             wind_down_taker_threshold_seconds=float(os.getenv("AQ_WIND_DOWN_TAKER_THRESHOLD_SECONDS", "40.0")),
             wind_down_taker_price_threshold=float(os.getenv("AQ_WIND_DOWN_TAKER_PRICE_THRESHOLD", "0.25")),
+            wind_down_taker_force_seconds=float(os.getenv("AQ_WIND_DOWN_TAKER_FORCE_SECONDS", "10.0")),
+            wind_down_maker_max_loss_per_share=float(os.getenv("AQ_WIND_DOWN_MAKER_MAX_LOSS_PER_SHARE", "0.01")),
             # Price Limits
             max_buy_price=float(os.getenv("AQ_MAX_BUY_PRICE", "0.90")),
             max_bid_above_mid_pct=float(os.getenv("AQ_MAX_BID_ABOVE_MID_PCT", "0.05")),
@@ -226,6 +230,10 @@ class ActiveQuotingConfig:
             errors.append("ws_gap_reconcile_attempts must be >= 1")
         if self.ws_gap_recovery_interval_seconds <= 0:
             errors.append("ws_gap_recovery_interval_seconds must be > 0")
+        if self.wind_down_taker_force_seconds <= 0:
+            errors.append("wind_down_taker_force_seconds must be > 0")
+        if self.wind_down_maker_max_loss_per_share < 0:
+            errors.append("wind_down_maker_max_loss_per_share must be >= 0")
 
         # Order validation (only enforce minimum in live mode)
         # Note: order_size_usdc is actually SHARES despite the name. Polymarket minimum is 5 shares.

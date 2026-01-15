@@ -2053,7 +2053,8 @@ class ActiveQuotingBot:
             # Execute taker exit if conditions are met
             if wind_down.excess_token_id and wind_down.excess_size > 0:
                 if wind_down.current_price is not None:
-                    if wind_down.current_price < self.config.wind_down_taker_price_threshold:
+                    force_exit = wind_down.seconds_remaining <= self.config.wind_down_taker_force_seconds
+                    if wind_down.current_price >= self.config.wind_down_taker_price_threshold or force_exit:
                         await self._execute_taker_exit(wind_down)
                         if condition_id:
                             self._wind_down_taker_executed.add(condition_id)
@@ -2063,7 +2064,7 @@ class ActiveQuotingBot:
                         if now - last_log > 30:
                             logger.info(
                                 f"Wind-down HOLD {market_name}: "
-                                f"price ${wind_down.current_price:.4f} >= ${self.config.wind_down_taker_price_threshold:.2f} threshold, "
+                                f"price ${wind_down.current_price:.4f} < ${self.config.wind_down_taker_price_threshold:.2f} threshold, "
                                 f"holding {wind_down.excess_size:.0f} shares to resolution"
                             )
 
@@ -2076,7 +2077,7 @@ class ActiveQuotingBot:
         """
         Place maker sell orders during wind-down to reduce excess position.
 
-        Only places sells if the price would be profitable (price > avg_entry_price).
+        Allows small loss based on wind_down_maker_max_loss_per_share.
 
         Args:
             token_id: Token to sell
@@ -2105,9 +2106,9 @@ class ActiveQuotingBot:
             tick_size = 0.01
             sell_price = best_bid + tick_size
 
-        # Check if we can sell profitably
-        if sell_price <= wind_down.avg_entry_price:
-            # Can't sell profitably at maker price, skip
+        min_price = wind_down.avg_entry_price - self.config.wind_down_maker_max_loss_per_share
+        if sell_price < min_price:
+            # Too far below allowed loss, skip
             return
 
         # Calculate sell size - sell enough to match positions, respecting minimums
