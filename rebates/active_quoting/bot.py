@@ -1459,8 +1459,8 @@ class ActiveQuotingBot:
         """
         Check for markets that have ended and send resolution summaries.
 
-        This sends a Telegram summary of how we did on each 15-minute market
-        when the market's end_time passes.
+        This sends a SINGLE Telegram summary combining both tokens (UP/DOWN)
+        when the market's end_time passes, showing total P&L including position value.
         """
         if not self._enable_alerts:
             return
@@ -1468,8 +1468,12 @@ class ActiveQuotingBot:
         now = datetime.now(timezone.utc)
 
         for token_id, end_time in list(self._market_end_times.items()):
-            # Skip if already summarized
-            if token_id in self._markets_summarized:
+            # Get condition_id for this token (to group UP/DOWN together)
+            condition_id = self.risk_manager._token_to_condition.get(token_id)
+
+            # Skip if already summarized (by condition_id to avoid duplicate alerts)
+            summary_key = condition_id if condition_id else token_id
+            if summary_key in self._markets_summarized:
                 continue
 
             # Ensure end_time is timezone-aware for comparison
@@ -1480,41 +1484,70 @@ class ActiveQuotingBot:
             if now < end_time:
                 continue
 
-            # Get market stats from PnL tracker
-            market_summary = self.pnl_tracker.get_market_summary(token_id)
-            if not market_summary:
-                # No trades on this market, skip
-                self._markets_summarized.add(token_id)
+            # Get paired token (if binary market)
+            paired_token_id = self._get_paired_token_id(token_id)
+
+            # Collect stats from this token
+            stats1 = self.pnl_tracker._market_stats.get(token_id)
+
+            # Collect stats from paired token (if exists)
+            stats2 = self.pnl_tracker._market_stats.get(paired_token_id) if paired_token_id else None
+
+            # Skip if no trades on either token
+            if not stats1 and not stats2:
+                self._markets_summarized.add(summary_key)
                 continue
 
-            # Get market name
+            # Get market name (use shorter name without outcome suffix if available)
             market_name = self._market_names.get(token_id, token_id[:40])
 
-            # Get market-specific stats
-            stats = self.pnl_tracker._market_stats.get(token_id)
-            if not stats:
-                self._markets_summarized.add(token_id)
-                continue
+            # Combine stats from both tokens
+            combined_net_pnl = (stats1.net_pnl if stats1 else 0) + (stats2.net_pnl if stats2 else 0)
+            combined_gross_pnl = (stats1.gross_pnl if stats1 else 0) + (stats2.gross_pnl if stats2 else 0)
+            combined_fees = (stats1.total_fees if stats1 else 0) + (stats2.total_fees if stats2 else 0)
+            combined_trades = (stats1.total_trades if stats1 else 0) + (stats2.total_trades if stats2 else 0)
+            combined_buys = (stats1.total_buys if stats1 else 0) + (stats2.total_buys if stats2 else 0)
+            combined_sells = (stats1.total_sells if stats1 else 0) + (stats2.total_sells if stats2 else 0)
+            combined_winning = (stats1.winning_trades if stats1 else 0) + (stats2.winning_trades if stats2 else 0)
+            combined_losing = (stats1.losing_trades if stats1 else 0) + (stats2.losing_trades if stats2 else 0)
+            combined_buy_vol = (stats1.buy_volume if stats1 else 0) + (stats2.buy_volume if stats2 else 0)
+            combined_sell_vol = (stats1.sell_volume if stats1 else 0) + (stats2.sell_volume if stats2 else 0)
 
-            # Send resolution summary
-            logger.info(f"Sending resolution summary for {market_name}")
+            # Get remaining positions for both tokens
+            pos1 = self.inventory_manager.get_position(token_id)
+            pos1_size = pos1.size if pos1 else 0
+            pos2 = self.inventory_manager.get_position(paired_token_id) if paired_token_id else None
+            pos2_size = pos2.size if pos2 else 0
+
+            # Calculate position value (remaining shares that won/lost at resolution)
+            # At resolution, winning shares pay $1, losing shares pay $0
+            # We don't know which won yet, so we report the net position
+            total_remaining = pos1_size + pos2_size
+
+            # Send combined resolution summary
+            logger.info(f"Sending combined resolution summary for {market_name} "
+                       f"(condition_id={condition_id}, combined P&L=${combined_net_pnl:.2f})")
             send_active_quoting_market_resolution_summary(
                 market_name=market_name,
-                net_pnl=stats.net_pnl,
-                gross_pnl=stats.gross_pnl,
-                total_fees=stats.total_fees,
-                total_trades=stats.total_trades,
-                buy_count=stats.total_buys,
-                sell_count=stats.total_sells,
-                winning_trades=stats.winning_trades,
-                losing_trades=stats.losing_trades,
-                buy_volume=stats.buy_volume,
-                sell_volume=stats.sell_volume,
+                net_pnl=combined_net_pnl,
+                gross_pnl=combined_gross_pnl,
+                total_fees=combined_fees,
+                total_trades=combined_trades,
+                buy_count=combined_buys,
+                sell_count=combined_sells,
+                winning_trades=combined_winning,
+                losing_trades=combined_losing,
+                buy_volume=combined_buy_vol,
+                sell_volume=combined_sell_vol,
                 session_pnl=self.pnl_tracker.session.net_pnl,
             )
 
-            # Mark as summarized
-            self._markets_summarized.add(token_id)
+            # Mark as summarized (by condition_id to prevent second alert for paired token)
+            self._markets_summarized.add(summary_key)
+            # Also mark individual tokens to be safe
+            if paired_token_id:
+                self._markets_summarized.add(token_id)
+                self._markets_summarized.add(paired_token_id)
 
     # --- Wind-Down Strategy ---
 
