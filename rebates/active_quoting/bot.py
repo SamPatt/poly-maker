@@ -975,6 +975,7 @@ class ActiveQuotingBot:
                 # Periodic order reconciliation to catch missed WebSocket messages
                 if now - self._last_reconcile_time >= self._reconcile_interval:
                     await self._reconcile_orders()
+                    self._last_reconcile_time = now
                     # Check for WebSocket gaps and trigger immediate reconciliation if found
                 elif self.event_ledger.has_unresolved_gaps():
                     logger.warning(

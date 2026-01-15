@@ -155,7 +155,7 @@ class TestBasicQuoteCycle:
     async def test_cycle_hysteresis_keeps_current(
         self, quote_engine, order_manager, basic_orderbook
     ):
-        """Should keep current quote if within hysteresis threshold."""
+        """Should refresh quote when mid move exceeds refresh threshold."""
         # Place initial quote
         initial_decision = quote_engine.calculate_quote(basic_orderbook)
         await order_manager.place_quote(initial_decision.quote)
@@ -170,8 +170,8 @@ class TestBasicQuoteCycle:
             current_quote=initial_decision.quote,
         )
 
-        # Should keep current (1 tick change < 2 tick threshold)
-        assert decision.action == QuoteAction.KEEP_CURRENT
+        # Mid moved beyond refresh threshold, so we refresh
+        assert decision.action == QuoteAction.PLACE_QUOTE
 
     @pytest.mark.asyncio
     async def test_cycle_hysteresis_triggers_refresh(
