@@ -121,15 +121,35 @@ class UserChannelManager:
 
     def is_known_order(self, order_id: str) -> bool:
         """
-        Check if an order ID is known (either from WS events or from placement).
+        Check if an order ID is known AND active (not in terminal state).
+
+        This prevents accepting fills for orders that have already been
+        cancelled or fully filled, which can happen due to race conditions
+        between API reconciliation and WebSocket trade messages.
 
         Args:
             order_id: The order ID to check
 
         Returns:
-            True if we placed this order or received a WS order event for it
+            True if we placed this order and it's not in a terminal state
         """
-        return order_id in self._orders or order_id in self._placed_order_ids
+        # Check placed_order_ids (orders we placed but may not have WS state yet)
+        if order_id in self._placed_order_ids:
+            # If we also have the order in _orders, check its status
+            order = self._orders.get(order_id)
+            if order and order.is_done():
+                return False
+            return True
+
+        # Check _orders (orders we have WS state for)
+        order = self._orders.get(order_id)
+        if order:
+            # Reject terminal orders - they shouldn't accept new fills
+            if order.is_done():
+                return False
+            return True
+
+        return False
 
     def is_connected(self) -> bool:
         """Check if WebSocket is connected and authenticated."""
@@ -561,12 +581,32 @@ class UserChannelManager:
 
     def _maybe_cleanup_order(self, order_id: str, token_id: Optional[str]) -> None:
         """
-        Mark order for potential cleanup.
+        Remove terminal orders from tracking to prevent phantom fills.
 
-        For now, we keep orders in memory. In production, we might want to
-        remove terminal orders after some time to prevent memory growth.
+        When an order reaches a terminal state (FILLED, CANCELLED, etc.),
+        it should be removed from _orders so that:
+        1. is_known_order() returns False for subsequent fill messages
+        2. Memory doesn't grow unbounded with old orders
+
+        This is critical for preventing phantom fills from race conditions
+        between API reconciliation and WebSocket trade messages.
         """
-        pass  # Keep for now, implement cleanup later if needed
+        order = self._orders.get(order_id)
+        if order and order.is_done():
+            # Remove from _orders
+            del self._orders[order_id]
+
+            # Remove from _orders_by_token
+            if token_id and token_id in self._orders_by_token:
+                self._orders_by_token[token_id].discard(order_id)
+
+            # Also remove from placed_order_ids if present
+            self._placed_order_ids.discard(order_id)
+
+            logger.debug(
+                f"Cleaned up terminal order {order_id[:20]}... "
+                f"(status={order.status.value})"
+            )
 
     def add_order(self, order: OrderState) -> None:
         """

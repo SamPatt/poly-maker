@@ -284,8 +284,13 @@ class TestHandleOrderEvent:
 
         await manager._handle_message(data)
 
+        # Terminal orders are cleaned up and no longer retrievable
+        # This prevents phantom fills from race conditions
         updated = manager.get_order("order1")
-        assert updated.status == OrderStatus.CANCELLED
+        assert updated is None, "Cancelled orders should be cleaned up"
+
+        # Also verify it's not in placed_order_ids
+        assert not manager.is_known_order("order1")
 
     @pytest.mark.asyncio
     async def test_handle_order_event_triggers_callback(self, config):
@@ -319,13 +324,13 @@ class TestHandleOrderEvent:
     @pytest.mark.asyncio
     async def test_handle_order_event_maps_status_variants(self, manager):
         """Should handle different status string variants."""
-        status_tests = [
+        # Test non-terminal statuses (orders remain in tracking)
+        non_terminal_tests = [
             ("LIVE", OrderStatus.OPEN),
             ("MATCHED", OrderStatus.PARTIALLY_FILLED),
-            ("CANCELED", OrderStatus.CANCELLED),  # American spelling
         ]
 
-        for i, (status_str, expected_status) in enumerate(status_tests):
+        for i, (status_str, expected_status) in enumerate(non_terminal_tests):
             order_id = f"order{i}"
             data = {
                 "event_type": "order",
@@ -340,6 +345,29 @@ class TestHandleOrderEvent:
 
             order = manager.get_order(order_id)
             assert order.status == expected_status, f"Failed for status {status_str}"
+
+        # Test terminal status (American spelling) - order should be cleaned up
+        data = {
+            "event_type": "order",
+            "order_id": "order_cancelled",
+            "asset_id": "token1",
+            "side": "BUY",
+            "price": "0.50",
+            "status": "CANCELED",  # American spelling
+        }
+        # First create the order as OPEN so it exists
+        manager._orders["order_cancelled"] = OrderState(
+            order_id="order_cancelled",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            original_size=100.0,
+            remaining_size=100.0,
+            status=OrderStatus.OPEN,
+        )
+        await manager._handle_message(data)
+        # Terminal orders are cleaned up
+        assert manager.get_order("order_cancelled") is None
 
 
 class TestHandleTradeEvent:
@@ -704,3 +732,136 @@ class TestDirectOrderFormat:
         await manager._handle_message(data)
 
         assert len(order.fills) == 1
+
+
+class TestPhantomFillPrevention:
+    """Tests for preventing phantom fills from race conditions.
+
+    Phantom fills occur when:
+    1. API reconciliation marks an order as cancelled (not in API response)
+    2. WebSocket trade message arrives milliseconds later for that order
+    3. Without proper checks, the fill would be recorded but never confirmed
+
+    The fix has two parts:
+    - is_known_order() rejects terminal (cancelled/filled) orders
+    - _maybe_cleanup_order() removes terminal orders from tracking
+    """
+
+    def test_is_known_order_rejects_cancelled(self, manager):
+        """is_known_order should return False for cancelled orders."""
+        order = OrderState(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            original_size=100.0,
+            remaining_size=100.0,
+            status=OrderStatus.CANCELLED,
+        )
+        manager._orders["order1"] = order
+
+        # Even though order exists in _orders, it's terminal so not "known"
+        assert manager.is_known_order("order1") is False
+
+    def test_is_known_order_rejects_filled(self, manager):
+        """is_known_order should return False for fully filled orders."""
+        order = OrderState(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            original_size=100.0,
+            remaining_size=0.0,
+            status=OrderStatus.FILLED,
+        )
+        manager._orders["order1"] = order
+
+        assert manager.is_known_order("order1") is False
+
+    def test_is_known_order_accepts_open(self, manager):
+        """is_known_order should return True for open orders."""
+        order = OrderState(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            original_size=100.0,
+            remaining_size=100.0,
+            status=OrderStatus.OPEN,
+        )
+        manager._orders["order1"] = order
+
+        assert manager.is_known_order("order1") is True
+
+    def test_is_known_order_accepts_partially_filled(self, manager):
+        """is_known_order should return True for partially filled orders."""
+        order = OrderState(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            original_size=100.0,
+            remaining_size=50.0,
+            status=OrderStatus.PARTIALLY_FILLED,
+        )
+        manager._orders["order1"] = order
+
+        assert manager.is_known_order("order1") is True
+
+    def test_cleanup_removes_cancelled_order(self, manager):
+        """_maybe_cleanup_order should remove cancelled orders."""
+        order = OrderState(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            original_size=100.0,
+            remaining_size=100.0,
+            status=OrderStatus.CANCELLED,
+        )
+        manager._orders["order1"] = order
+        manager._orders_by_token["token1"] = {"order1"}
+        manager._placed_order_ids.add("order1")
+
+        manager._maybe_cleanup_order("order1", "token1")
+
+        assert "order1" not in manager._orders
+        assert "order1" not in manager._orders_by_token.get("token1", set())
+        assert "order1" not in manager._placed_order_ids
+
+    def test_cleanup_keeps_open_order(self, manager):
+        """_maybe_cleanup_order should not remove open orders."""
+        order = OrderState(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            original_size=100.0,
+            remaining_size=100.0,
+            status=OrderStatus.OPEN,
+        )
+        manager._orders["order1"] = order
+
+        manager._maybe_cleanup_order("order1", "token1")
+
+        assert "order1" in manager._orders
+
+    def test_placed_order_id_with_terminal_status_rejected(self, manager):
+        """is_known_order should reject placed order if it has terminal status."""
+        # Order is in placed_order_ids (just placed)
+        manager._placed_order_ids.add("order1")
+
+        # But also has a terminal status in _orders (got cancelled)
+        order = OrderState(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            original_size=100.0,
+            remaining_size=100.0,
+            status=OrderStatus.CANCELLED,
+        )
+        manager._orders["order1"] = order
+
+        # Should be rejected because terminal status takes precedence
+        assert manager.is_known_order("order1") is False
