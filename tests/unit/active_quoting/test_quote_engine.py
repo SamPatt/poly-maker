@@ -28,6 +28,7 @@ def config():
         refresh_threshold_ticks=2,
         inventory_skew_coefficient=0.1,
         order_size_usdc=10.0,
+        sell_settlement_delay_seconds=0.0,  # Allow immediate selling in tests
     )
 
 

@@ -304,6 +304,16 @@ class InventoryManager:
         if position.size <= 0:
             limits.can_sell = False
             limits.sell_limit_reason = "No position to sell"
+        else:
+            # Check settlement delay - don't sell too soon after a buy
+            # (tokens may not have settled on-chain yet)
+            last_fill = self._last_fill_time.get(token_id)
+            if last_fill is not None:
+                elapsed = (datetime.utcnow() - last_fill).total_seconds()
+                if elapsed < self.config.sell_settlement_delay_seconds:
+                    limits.can_sell = False
+                    remaining = self.config.sell_settlement_delay_seconds - elapsed
+                    limits.sell_limit_reason = f"Settlement delay: {remaining:.0f}s remaining"
 
         return limits
 

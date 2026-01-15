@@ -48,6 +48,10 @@ class ActiveQuotingConfig:
 
     # --- Price Limits ---
     max_buy_price: float = 0.90  # Never buy above this price (avoid overpaying near certainty)
+    max_bid_above_mid_pct: float = 0.05  # Reject bid if > mid * (1 + this) - prevents adverse selection (5% default)
+
+    # --- Settlement Delay ---
+    sell_settlement_delay_seconds: float = 30.0  # Don't sell until this many seconds after last BUY fill
 
     # --- WebSocket Gap Safety (Phase 6) ---
     halt_on_ws_gaps: bool = True  # Halt quoting when WS gaps cannot be reconciled
@@ -109,6 +113,9 @@ class ActiveQuotingConfig:
             wind_down_taker_price_threshold=float(os.getenv("AQ_WIND_DOWN_TAKER_PRICE_THRESHOLD", "0.25")),
             # Price Limits
             max_buy_price=float(os.getenv("AQ_MAX_BUY_PRICE", "0.90")),
+            max_bid_above_mid_pct=float(os.getenv("AQ_MAX_BID_ABOVE_MID_PCT", "0.05")),
+            # Settlement Delay
+            sell_settlement_delay_seconds=float(os.getenv("AQ_SELL_SETTLEMENT_DELAY_SECONDS", "30.0")),
             # WebSocket Gap Safety (Phase 6)
             halt_on_ws_gaps=os.getenv("AQ_HALT_ON_WS_GAPS", "true").lower() == "true",
             ws_gap_reconcile_attempts=int(os.getenv("AQ_WS_GAP_RECONCILE_ATTEMPTS", "3")),

@@ -143,6 +143,17 @@ class QuoteEngine:
         if my_bid > self.config.max_buy_price:
             bid_size = 0  # Don't place buy order above max price
 
+        # Sanity check: Don't bid significantly above mid price (adverse selection protection)
+        mid_price = orderbook.mid_price()
+        if mid_price is not None and self.config.max_bid_above_mid_pct > 0:
+            max_allowed_bid = mid_price * (1 + self.config.max_bid_above_mid_pct)
+            if my_bid > max_allowed_bid:
+                logger.warning(
+                    f"Bid {my_bid:.4f} exceeds {self.config.max_bid_above_mid_pct*100:.0f}% above mid {mid_price:.4f} "
+                    f"(max allowed: {max_allowed_bid:.4f}) - skipping buy"
+                )
+                bid_size = 0  # Don't place buy order that's too far above mid
+
         # Create the target quote
         target_quote = Quote(
             token_id=orderbook.token_id,
