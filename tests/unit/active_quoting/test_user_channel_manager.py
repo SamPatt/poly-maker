@@ -683,7 +683,7 @@ class TestDirectOrderFormat:
 
     @pytest.mark.asyncio
     async def test_handle_direct_trade_object(self, manager):
-        """Should handle trade object without event_type."""
+        """Should handle trade object with trade_id (without event_type)."""
         order = OrderState(
             order_id="order1",
             token_id="token1",
@@ -696,9 +696,9 @@ class TestDirectOrderFormat:
 
         data = {
             "order_id": "order1",
+            "trade_id": "trade123",  # trade_id indicates this is a trade
             "price": "0.50",
             "size": "50",
-            # Has price and size without status -> treat as trade
         }
 
         await manager._handle_message(data)

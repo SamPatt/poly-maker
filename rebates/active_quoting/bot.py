@@ -1038,6 +1038,11 @@ class ActiveQuotingBot:
         if orders_to_place:
             result = await self.order_manager.place_orders_batch(orders_to_place)
             if result.all_succeeded:
+                # Register placed orders with user channel manager for fill verification
+                for order_result in result.successful_orders:
+                    if order_result.order_id:
+                        self.user_channel_manager.register_placed_order(order_result.order_id)
+
                 # Reserve capacity for buy orders to prevent race condition
                 for order in orders_to_place:
                     _, side, _, size, _ = order
@@ -1700,6 +1705,9 @@ class ActiveQuotingBot:
         )
 
         if result.success:
+            # Register placed order for fill verification
+            if result.order_id:
+                self.user_channel_manager.register_placed_order(result.order_id)
             market = self._markets.get(token_id)
             if market:
                 market.is_quoting = True
@@ -1758,6 +1766,9 @@ class ActiveQuotingBot:
         )
 
         if result.success:
+            # Register placed order for fill verification
+            if result.order_id:
+                self.user_channel_manager.register_placed_order(result.order_id)
             logger.info(f"Taker exit order placed for {market_name}")
             self.risk_manager.clear_errors()
         else:

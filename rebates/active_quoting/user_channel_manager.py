@@ -71,6 +71,7 @@ class UserChannelManager:
         # State
         self._orders: Dict[str, OrderState] = {}  # order_id -> OrderState
         self._orders_by_token: Dict[str, Set[str]] = {}  # token_id -> set of order_ids
+        self._placed_order_ids: Set[str] = set()  # order_ids registered from OrderManager
         self._websocket: Optional[websockets.WebSocketClientProtocol] = None
         self._running: bool = False
         self._reconnect_attempts: int = 0
@@ -99,6 +100,36 @@ class UserChannelManager:
             order_ids = self._orders_by_token.get(token_id, set())
             orders = [self._orders[oid] for oid in order_ids if oid in self._orders]
         return [o for o in orders if o.is_open()]
+
+    def register_placed_order(self, order_id: str) -> None:
+        """
+        Register an order ID that was placed by OrderManager.
+
+        This allows fill verification to recognize orders before WS order events arrive.
+        Called by OrderManager when orders are successfully placed.
+
+        Args:
+            order_id: The order ID returned from order placement
+        """
+        if order_id:
+            self._placed_order_ids.add(order_id)
+            logger.debug(f"Registered placed order: {order_id[:20]}...")
+
+    def unregister_placed_order(self, order_id: str) -> None:
+        """Remove a placed order from tracking (e.g., on cancel confirmation)."""
+        self._placed_order_ids.discard(order_id)
+
+    def is_known_order(self, order_id: str) -> bool:
+        """
+        Check if an order ID is known (either from WS events or from placement).
+
+        Args:
+            order_id: The order ID to check
+
+        Returns:
+            True if we placed this order or received a WS order event for it
+        """
+        return order_id in self._orders or order_id in self._placed_order_ids
 
     def is_connected(self) -> bool:
         """Check if WebSocket is connected and authenticated."""
@@ -258,15 +289,15 @@ class UserChannelManager:
         # Also handle direct order/trade objects without event_type wrapper
         elif "order_id" in data and "status" in data:
             await self._handle_order_event(data, ws_sequence)
-        # Handle Polymarket format: has 'id', 'asset_id', 'side', 'price', 'size', 'market'
-        elif "id" in data and "asset_id" in data and "market" in data:
-            # This is likely a trade event in Polymarket format
+        # Handle trade messages that have maker_orders (definitive trade indicator)
+        elif "maker_orders" in data:
             await self._handle_trade_event(data, ws_sequence)
-        elif "trade_id" in data or ("order_id" in data and "price" in data and "size" in data):
+        # Handle explicit trade_id field
+        elif "trade_id" in data:
             await self._handle_trade_event(data, ws_sequence)
         else:
-            # Log unknown message formats for debugging
-            logger.debug(f"Unknown user WS message format: {list(data.keys())[:6]}")
+            # Log unknown message formats for debugging (upgrade to info temporarily to diagnose phantom fills)
+            logger.info(f"Unhandled user WS message: event_type={event_type}, keys={list(data.keys())[:8]}")
 
     async def _handle_order_event(self, data: Dict, ws_sequence: Optional[int] = None) -> None:
         """Handle an order status update."""
@@ -422,15 +453,25 @@ class UserChannelManager:
                            f"amount={mo.get('amount', 'N/A')}, "
                            f"match_size={mo.get('match_size', 'N/A')}")
 
-            # Find our order in maker_orders by checking maker_address
+            # Find our order in maker_orders by checking maker_address AND order tracking
             for maker_order in maker_orders:
                 maker_address = maker_order.get("maker_address", "").lower()
+                maker_order_id = maker_order.get("order_id")
 
-                # Check if this is our order
+                # Check if this is our order: must match wallet AND be a known order
+                # This prevents accepting fills for orders we didn't place
                 if self._wallet_address and maker_address == self._wallet_address:
+                    # Verify we actually placed this order (if order_id is available)
+                    if maker_order_id and not self.is_known_order(maker_order_id):
+                        logger.warning(
+                            f"Skipping fill - maker_address matches but order_id {maker_order_id[:20]}... "
+                            f"is not a known order (trade_id={trade_id})"
+                        )
+                        continue  # Check other maker_orders
+
                     is_our_fill = True
-                    if "order_id" in maker_order:
-                        order_id = maker_order["order_id"]
+                    if maker_order_id:
+                        order_id = maker_order_id
                     # Get matched amount for this specific maker order
                     # Try multiple possible field names
                     our_size = (
@@ -463,8 +504,8 @@ class UserChannelManager:
                 return
         else:
             # No maker_orders in message - this might be a different format
-            # Check if it's an order we're tracking
-            if order_id and order_id in self._orders:
+            # Check if it's an order we're tracking (either from WS or from placement)
+            if order_id and self.is_known_order(order_id):
                 is_our_fill = True
             elif self._wallet_address:
                 # We have wallet configured but can't verify this fill - skip it
