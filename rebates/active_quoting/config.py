@@ -50,7 +50,7 @@ class ActiveQuotingConfig:
     market_performance_log_interval_seconds: float = 300.0  # Per-market P&L summary interval
 
     # --- End-of-Market Wind-Down ---
-    wind_down_start_seconds: float = 300.0  # Start wind-down 5 minutes (300s) before end
+    wind_down_start_seconds: float = 120.0  # Start wind-down 2 minutes (120s) before end
     wind_down_taker_threshold_seconds: float = 40.0  # Switch to taker mode at 40 seconds
     wind_down_taker_price_threshold: float = 0.25  # Minimum price to taker sell before forced exit
     wind_down_taker_force_seconds: float = 10.0  # Force taker exit in final seconds
