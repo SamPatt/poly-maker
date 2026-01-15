@@ -324,26 +324,29 @@ class ActiveQuotingBot:
 
                 # Only update if position changed
                 if abs(size - old_size) >= 0.01:
-                    # CRITICAL: Do not let stale API data reduce our position if:
-                    # 1. We have recent fills (API lags behind real-time fills)
+                    # CRITICAL: Do not let stale API data CHANGE our position if:
+                    # 1. We have recent fills (API lags behind real-time WebSocket fills)
                     # 2. We have pending buy orders (fills may be in flight)
-                    if size < old_size:
-                        has_recent_fill = self.inventory_manager.has_recent_fill(token_id)
-                        pending_buys = self.inventory_manager.get_pending_buy_size(token_id)
-                        
-                        if has_recent_fill:
-                            logger.warning(
-                                f"Ignoring API position reduction for {token_id[:20]}...: "
-                                f"API says {size:.0f} but we have {old_size:.0f} with recent fills"
-                            )
-                            continue
-                        
-                        if pending_buys > 0:
-                            logger.warning(
-                                f"Ignoring API position reduction for {token_id[:20]}...: "
-                                f"API says {size:.0f} but we have {old_size:.0f} with {pending_buys:.0f} pending buys"
-                            )
-                            continue
+                    # NOTE: We block BOTH increases and decreases because stale API can
+                    # report either direction incorrectly after a recent fill.
+                    has_recent_fill = self.inventory_manager.has_recent_fill(token_id)
+                    pending_buys = self.inventory_manager.get_pending_buy_size(token_id)
+
+                    if has_recent_fill:
+                        logger.warning(
+                            f"Ignoring API position change for {token_id[:20]}...: "
+                            f"API says {size:.0f} but we have {old_size:.0f} with recent fills"
+                        )
+                        continue
+
+                    if pending_buys > 0 and size < old_size:
+                        # Only block reductions when we have pending buys
+                        # (pending buys should only affect reductions, not increases)
+                        logger.warning(
+                            f"Ignoring API position reduction for {token_id[:20]}...: "
+                            f"API says {size:.0f} but we have {old_size:.0f} with {pending_buys:.0f} pending buys"
+                        )
+                        continue
 
                     self.inventory_manager.set_position(token_id, size, avg_price)
 
