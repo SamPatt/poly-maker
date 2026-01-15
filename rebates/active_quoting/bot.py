@@ -648,7 +648,7 @@ class ActiveQuotingBot:
                     on_status_command=self._send_status_via_telegram,
                 )
                 await self._telegram_handler.start()
-                logger.info("Telegram command handler started (supports /stopaq, /startaq, /status, /starttrading, /stoptrading)")
+                logger.info("Telegram command handler started (supports /stopaq, /startaq, /status, /starttrading, /stoptrading, /startgab, /stopgab)")
 
             logger.info("Bot started successfully")
 

@@ -639,6 +639,8 @@ class TelegramCommandHandler:
     - /status - Get bot status
     - /starttrading - Start the trading bot
     - /stoptrading - Stop the trading bot
+    - /startgab - Start the Gabagool arbitrage bot
+    - /stopgab - Stop the Gabagool arbitrage bot
     """
 
     def __init__(self, on_stop_command=None, on_start_command=None, on_status_command=None):
@@ -657,6 +659,7 @@ class TelegramCommandHandler:
         self._last_update_id = 0
         self._task = None
         self._trading_bot_process = None
+        self._gabagool_process = None
 
     async def start(self):
         """Start polling for Telegram commands."""
@@ -755,9 +758,91 @@ class TelegramCommandHandler:
         elif text.startswith("/starttrading"):
             await self._start_trading_bot()
 
+        elif text.startswith("/startgab"):
+            await self._start_gabagool_bot()
+
+        elif text.startswith("/stopgab"):
+            await self._stop_gabagool_bot()
+
         elif text.startswith("/status"):
             if self.on_status_command:
                 await self.on_status_command()
+
+    async def _start_gabagool_bot(self):
+        """Start the Gabagool arbitrage bot as a subprocess."""
+        import subprocess
+        import os
+
+        # Check if already running
+        if self._gabagool_process is not None:
+            if self._gabagool_process.poll() is None:
+                send_alert("⚠️ <b>Gabagool bot already running</b>", wait=True)
+                return
+
+        try:
+            # Get the poly-maker directory
+            bot_dir = "/home/polymaker/poly-maker"
+            python_path = os.path.join(bot_dir, ".venv", "bin", "python")
+
+            # Start the gabagool bot
+            self._gabagool_process = subprocess.Popen(
+                [python_path, "-m", "rebates.gabagool.run"],
+                cwd=bot_dir,
+                stdout=open("/tmp/gabagool.log", "a"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+            send_alert(
+                f"🍖 <b>Gabagool bot started</b>\n\n"
+                f"<b>PID:</b> {self._gabagool_process.pid}\n"
+                f"<b>Log:</b> /tmp/gabagool.log",
+                wait=True
+            )
+        except Exception as e:
+            send_alert(f"❌ <b>Failed to start Gabagool bot</b>\n\n<code>{str(e)[:200]}</code>", wait=True)
+
+    async def _stop_gabagool_bot(self):
+        """Stop the Gabagool bot subprocess."""
+        import subprocess
+        import signal
+
+        # First try to stop our tracked process
+        if self._gabagool_process is not None:
+            if self._gabagool_process.poll() is None:
+                try:
+                    self._gabagool_process.send_signal(signal.SIGTERM)
+                    send_alert("🛑 <b>Gabagool bot stopping</b>\n\nSent SIGTERM...", wait=True)
+                    self._gabagool_process = None
+                    return
+                except Exception as e:
+                    send_alert(f"⚠️ <b>Error stopping tracked process</b>\n\n<code>{str(e)[:100]}</code>", wait=True)
+
+        # Fallback: find and kill any running gabagool process
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "rebates.gabagool.run"],
+                capture_output=True,
+                text=True
+            )
+            pids = result.stdout.strip().split("\n")
+            pids = [p for p in pids if p]
+
+            if not pids:
+                send_alert("ℹ️ <b>Gabagool bot not running</b>", wait=True)
+                return
+
+            for pid in pids:
+                subprocess.run(["kill", "-TERM", pid])
+
+            send_alert(
+                f"🛑 <b>Gabagool bot stopped</b>\n\n"
+                f"<b>Killed PIDs:</b> {', '.join(pids)}",
+                wait=True
+            )
+            self._gabagool_process = None
+        except Exception as e:
+            send_alert(f"❌ <b>Failed to stop Gabagool bot</b>\n\n<code>{str(e)[:200]}</code>", wait=True)
 
     async def _start_trading_bot(self):
         """Start the trading bot as a subprocess."""
