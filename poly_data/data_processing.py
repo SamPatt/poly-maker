@@ -73,8 +73,9 @@ def process_data(json_datas, trade=True):
                 new_size = float(data['size'])
                 process_price_change(asset, side, price_level, new_size)
 
-                if trade:
-                    asyncio.create_task(perform_trade(asset))
+            # Only trigger ONE trade per price_change event (after processing all changes)
+            if trade:
+                asyncio.create_task(perform_trade(asset))
         
 
         # pretty_print(f'Received book update for {asset}:', global_state.all_data[asset])

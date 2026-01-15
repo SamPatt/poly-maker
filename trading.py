@@ -307,12 +307,11 @@ async def perform_trade(market):
     Args:
         market (str): The market ID to trade on
     """
-    # Create a lock for this market if it doesn't exist
-    if market not in market_locks:
-        market_locks[market] = asyncio.Lock()
+    # Create a lock for this market if it doesn't exist (atomic operation to prevent race)
+    lock = market_locks.setdefault(market, asyncio.Lock())
 
     # Use lock to prevent concurrent trading on the same market
-    async with market_locks[market]:
+    async with lock:
         try:
             client = global_state.client
             # Get market details from the configuration
