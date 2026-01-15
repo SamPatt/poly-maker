@@ -117,47 +117,33 @@ class TestInventoryManagerBasic:
 
 
 class TestInventoryManagerLiability:
-    """Tests for liability calculation."""
+    """Tests for liability calculation (uses confirmed_size for limit checks)."""
 
     def test_liability_zero_for_no_position(self, manager):
         """No position should have zero liability."""
         liability = manager.calculate_liability("token1")
         assert liability == 0
 
-    def test_liability_calculation(self, manager, buy_fill):
-        """Liability should be size x entry price."""
-        manager.update_from_fill(buy_fill)
+    def test_liability_calculation(self, manager):
+        """Liability should be confirmed_size x entry price."""
+        # Use set_position to establish confirmed position
+        manager.set_position("token1", size=10.0, avg_entry_price=0.50)
 
         liability = manager.calculate_liability("token1")
         # 10 shares @ 0.50 = $5 max loss
         assert liability == pytest.approx(5.0)
 
-    def test_total_liability_single_market(self, manager, buy_fill):
+    def test_total_liability_single_market(self, manager):
         """Total liability with single market."""
-        manager.update_from_fill(buy_fill)
+        manager.set_position("token1", size=10.0, avg_entry_price=0.50)
 
         total = manager.calculate_total_liability()
         assert total == pytest.approx(5.0)
 
     def test_total_liability_multiple_markets(self, manager):
         """Total liability across multiple markets."""
-        fill1 = Fill(
-            order_id="order1",
-            token_id="token1",
-            side=OrderSide.BUY,
-            price=0.50,
-            size=10.0,  # $5 liability
-        )
-        fill2 = Fill(
-            order_id="order2",
-            token_id="token2",
-            side=OrderSide.BUY,
-            price=0.40,
-            size=20.0,  # $8 liability
-        )
-
-        manager.update_from_fill(fill1)
-        manager.update_from_fill(fill2)
+        manager.set_position("token1", size=10.0, avg_entry_price=0.50)  # $5 liability
+        manager.set_position("token2", size=20.0, avg_entry_price=0.40)  # $8 liability
 
         total = manager.calculate_total_liability()
         assert total == pytest.approx(13.0)
@@ -821,6 +807,42 @@ class TestPartialConfirmationReconciliation:
         assert len(pos.pending_fills) == 0  # Sell absorbed
         assert pos.effective_size == 80.0
 
+    def test_partial_absorption_reduces_fill_size(self, manager):
+        """API partially absorbing a large fill should reduce its size, not keep it whole."""
+        # Pending BUY of 100
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=100.0,
+            trade_id="big_fill",
+        )
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 0.0
+        assert pos.effective_size == 100.0
+
+        # API moves +50 (partial absorption)
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 50.0
+        # Pending fill should be reduced from 100 to 50
+        assert len(pos.pending_fills) == 1
+        assert pos.pending_fills["big_fill"].size == 50.0
+        assert pos.effective_size == 100.0  # 50 confirmed + 50 pending
+
+        # API moves another +50 (completes absorption)
+        manager.set_position("token1", size=100.0, avg_entry_price=0.50)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 100.0
+        # Remaining 50 should now be fully absorbed
+        assert len(pos.pending_fills) == 0
+        assert pos.effective_size == 100.0
+
 
 class TestAgeOutPendingFills:
     """Tests for age-out of old pending fills (Phase 2 requirement)."""
@@ -974,12 +996,12 @@ class TestEffectiveSizeUsedByConsumers:
         # get_inventory should return effective (60), not confirmed (50)
         assert manager.get_inventory("token1") == 60.0
 
-    def test_check_limits_uses_effective_size(self, manager):
-        """check_limits should use effective_size for limit checks."""
+    def test_check_limits_uses_confirmed_size(self, manager):
+        """check_limits should use confirmed_size for limit checks (Phase 2 behavior)."""
         # Set confirmed at 90 (below 100 limit)
         manager.set_position("token1", size=90.0, avg_entry_price=0.10)
 
-        # Add pending buy of 15 (effective = 105, over limit)
+        # Add pending buy of 15 (effective = 105, but limits use confirmed = 90)
         fill = Fill(
             order_id="order1",
             token_id="token1",
@@ -994,12 +1016,22 @@ class TestEffectiveSizeUsedByConsumers:
         assert pos.confirmed_size == 90.0
         assert pos.effective_size == 105.0
 
-        # Should block buys because effective_size > limit
+        # Should still allow buys because confirmed_size (90) < limit (100)
+        # Phase 3 will add conservative exposure formula
+        limits = manager.check_limits("token1")
+        assert limits.can_buy is True  # Pending fills don't affect limit checks yet
+
+    def test_check_limits_blocks_at_confirmed_limit(self, manager):
+        """check_limits should block when confirmed_size >= limit."""
+        # Set confirmed at limit
+        manager.set_position("token1", size=100.0, avg_entry_price=0.10)
+
         limits = manager.check_limits("token1")
         assert limits.can_buy is False
+        assert "Position 100" in limits.buy_limit_reason
 
-    def test_liability_uses_effective_size(self, manager):
-        """Liability calculation should use effective_size."""
+    def test_liability_uses_confirmed_size_for_limits(self, manager):
+        """Liability calculation uses confirmed_size for limit checks (Phase 2)."""
         manager.set_position("token1", size=50.0, avg_entry_price=0.50)
 
         fill = Fill(
@@ -1012,10 +1044,14 @@ class TestEffectiveSizeUsedByConsumers:
         )
         manager.update_from_fill(fill)
 
+        # calculate_liability uses confirmed_size for limit checks
+        # 50 * 0.50 = 25.0
+        liability = manager.calculate_liability("token1")
+        assert liability == pytest.approx(25.0)
+
+        # But TrackedPosition.max_liability uses effective_size
         pos = manager.get_position("token1")
-        # Liability should be based on effective_size (60), not confirmed (50)
-        # 60 * 0.50 = 30.0
-        assert pos.max_liability == pytest.approx(30.0)
+        assert pos.max_liability == pytest.approx(30.0)  # 60 * 0.50
 
     def test_skew_uses_effective_size(self, manager):
         """Skew calculation should use effective_size."""

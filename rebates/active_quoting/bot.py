@@ -1283,7 +1283,11 @@ class ActiveQuotingBot:
     async def _on_user_ws_disconnect(self) -> None:
         """Handle user WebSocket disconnect."""
         logger.error("User WebSocket disconnected - CRITICAL")
-        # Force reconcile all positions to trust API when WS reconnects
+        # Force reconcile clears pending fills - positions will be understated until
+        # next API sync. This is acceptable because:
+        # 1. Risk manager halts trading on user disconnect anyway
+        # 2. Next API poll (every few seconds) will restore accurate positions
+        # 3. Being conservative (understating) is safer than overstating
         self.inventory_manager.force_reconcile_all()
         await self.risk_manager.on_user_disconnect()
 

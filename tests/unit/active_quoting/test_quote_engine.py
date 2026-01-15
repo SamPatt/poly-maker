@@ -604,15 +604,9 @@ class TestQuoteEngineInventoryManagerIntegration:
 
     def test_calculate_quote_for_side_with_manager(self, engine_with_manager, basic_orderbook, inventory_manager):
         """Should calculate single side with manager."""
-        from rebates.active_quoting.models import Fill, OrderSide
-        fill = Fill(
-            order_id="order1",
-            token_id="token1",
-            side=OrderSide.BUY,
-            price=0.50,
-            size=10.0,
-        )
-        inventory_manager.update_from_fill(fill)
+        from rebates.active_quoting.models import OrderSide
+        # Use set_position to establish confirmed position (limit checks use confirmed_size)
+        inventory_manager.set_position("token1", size=10.0, avg_entry_price=0.50)
 
         price, reason = engine_with_manager.calculate_quote_for_side_with_manager(
             basic_orderbook, OrderSide.SELL

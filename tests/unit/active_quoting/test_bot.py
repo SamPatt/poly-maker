@@ -959,7 +959,7 @@ class TestFillProtection:
         assert (datetime.utcnow() - last_fill_time).total_seconds() < 5
 
     def test_api_sync_updates_position(self, bot):
-        """Test that API sync updates confirmed position (dual tracking)."""
+        """Test that API sync updates confirmed position (dual tracking with partial absorption)."""
         # Simulate a fill that adds 20 to pending_fills
         fill = Fill(
             order_id="order_1",
@@ -983,13 +983,14 @@ class TestFillProtection:
         assert not bot.inventory_manager.has_recent_fill("token_1")
 
         # API sync sets confirmed position to 10
-        # Partial fill (20) won't be absorbed since 20 > 10
+        # Partial absorption: pending fill (20) is reduced by 10 to become 10
         bot.inventory_manager.set_position("token_1", 10.0, 0.5)
 
         pos = bot.inventory_manager.get_position("token_1")
         assert pos.confirmed_size == 10.0  # API is source of truth for confirmed
-        # Pending fill (20) wasn't absorbed (too large), so effective = 10 + 20 = 30
-        assert pos.effective_size == 30.0
+        # Pending fill reduced from 20 to 10, effective = 10 + 10 = 20
+        assert pos.pending_fills["trade_1"].size == 10.0
+        assert pos.effective_size == 20.0
 
 
 # --- Order Update Handler Tests ---

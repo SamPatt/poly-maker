@@ -370,6 +370,7 @@ class InventoryManager:
         Calculate worst-case liability for a position.
 
         For binary options, max loss = shares x entry_price (if outcome goes to 0).
+        Uses confirmed_size for limit checks (Phase 3 will add conservative formula).
 
         Args:
             token_id: Token ID
@@ -378,17 +379,21 @@ class InventoryManager:
             Maximum liability in USDC
         """
         position = self.get_position(token_id)
-        return position.max_liability
+        # Use confirmed_size for limit checks (matches pre-Phase-2 behavior)
+        return abs(position.confirmed_size) * position.confirmed_avg_price
 
     def calculate_total_liability(self) -> float:
         """
         Calculate total liability across all positions.
 
+        Uses confirmed_size for limit checks (Phase 3 will add conservative formula).
+
         Returns:
             Total maximum liability in USDC
         """
         return sum(
-            pos.max_liability for pos in self._positions.values()
+            abs(pos.confirmed_size) * pos.confirmed_avg_price
+            for pos in self._positions.values()
         )
 
     def calculate_skew_factor(self, token_id: str) -> float:
@@ -440,17 +445,21 @@ class InventoryManager:
         """
         limits = InventoryLimits()
         position = self.get_position(token_id)
-        pending = self.get_pending_buy_size(token_id)
-        effective_position = position.size + pending
+        pending_orders = self.get_pending_buy_size(token_id)
 
-        # Check position size limit (including pending orders)
+        # Use confirmed_size for limit checks (Phase 3 will add conservative formula)
+        # This matches pre-Phase-2 behavior where API sync set position directly
+        confirmed = position.confirmed_size
+        effective_position = confirmed + pending_orders
+
+        # Check position size limit (confirmed + pending orders)
         if effective_position >= self.config.max_position_per_market:
             limits.can_buy = False
             limits.buy_limit_reason = (
-                f"Position {position.size:.0f} + pending {pending:.0f} >= max {self.config.max_position_per_market}"
+                f"Position {confirmed:.0f} + pending_orders {pending_orders:.0f} >= max {self.config.max_position_per_market}"
             )
 
-        # Check liability per market
+        # Check liability per market (uses confirmed_size)
         liability = self.calculate_liability(token_id)
         if liability >= self.config.max_liability_per_market_usdc:
             limits.can_buy = False
@@ -466,9 +475,9 @@ class InventoryManager:
                 f"Total liability ${total_liability:.2f} >= max ${self.config.max_total_liability_usdc:.2f}"
             )
 
-        # Selling is always allowed (reduces position)
-        # But if position is 0 or negative, can't sell
-        if position.size <= 0:
+        # Selling is allowed if we have confirmed position
+        # (effective_size could be higher due to pending fills, but we check confirmed)
+        if confirmed <= 0:
             limits.can_sell = False
             limits.sell_limit_reason = "No position to sell"
 
@@ -492,15 +501,16 @@ class InventoryManager:
             if not limits.can_buy:
                 return False, limits.buy_limit_reason
 
-            # Check if this buy would exceed limits (including pending orders)
+            # Check if this buy would exceed limits (using confirmed + pending orders)
             position = self.get_position(token_id)
-            pending = self.get_pending_buy_size(token_id)
-            projected_size = position.size + pending + size
+            pending_orders = self.get_pending_buy_size(token_id)
+            confirmed = position.confirmed_size
+            projected_size = confirmed + pending_orders + size
 
             if projected_size > self.config.max_position_per_market:
                 return False, (
                     f"Buy would exceed position limit: "
-                    f"{projected_size:.0f} (pos={position.size:.0f} + pending={pending:.0f} + order={size:.0f}) > {self.config.max_position_per_market}"
+                    f"{projected_size:.0f} (confirmed={confirmed:.0f} + pending_orders={pending_orders:.0f} + order={size:.0f}) > {self.config.max_position_per_market}"
                 )
         else:  # SELL
             if not limits.can_sell:
@@ -517,6 +527,8 @@ class InventoryManager:
         """
         Get adjusted order size respecting limits.
 
+        Uses confirmed_size for limit calculations (Phase 3 will add conservative formula).
+
         Args:
             token_id: Token ID
             side: Order side
@@ -525,22 +537,24 @@ class InventoryManager:
         Returns:
             Adjusted size (may be 0 if limits prevent ordering)
         """
-        if side == OrderSide.SELL:
-            # For sells, can only sell what we have
-            position = self.get_position(token_id)
-            return min(target_size, max(0, position.size))
-
-        # For buys, respect position limits INCLUDING pending orders
         position = self.get_position(token_id)
-        pending = self.get_pending_buy_size(token_id)
-        effective_position = position.size + pending
+        confirmed = position.confirmed_size
+
+        if side == OrderSide.SELL:
+            # For sells, can only sell confirmed position
+            # (pending fills haven't settled yet)
+            return min(target_size, max(0, confirmed))
+
+        # For buys, respect position limits using confirmed + pending orders
+        pending_orders = self.get_pending_buy_size(token_id)
+        effective_position = confirmed + pending_orders
         remaining_capacity = self.config.max_position_per_market - effective_position
 
         if remaining_capacity <= 0:
-            if pending > 0:
+            if pending_orders > 0:
                 logger.debug(
                     f"Buy blocked for {token_id[:20]}...: "
-                    f"position={position.size:.0f} + pending={pending:.0f} >= max={self.config.max_position_per_market}"
+                    f"confirmed={confirmed:.0f} + pending_orders={pending_orders:.0f} >= max={self.config.max_position_per_market}"
                 )
             return 0
 
@@ -619,11 +633,11 @@ class InventoryManager:
 
     def _reconcile_pending_fills(self, position: TrackedPosition, absorbed: float) -> None:
         """
-        Remove pending fills that have been absorbed by API, oldest first.
+        Remove or reduce pending fills that have been absorbed by API, oldest first.
 
         When the API position changes, we assume the oldest pending fills
-        are the ones that got absorbed. This removes them to prevent
-        double-counting.
+        are the ones that got absorbed. Fills are fully removed if completely
+        absorbed, or reduced in size if partially absorbed.
 
         Args:
             position: TrackedPosition to reconcile
@@ -640,8 +654,12 @@ class InventoryManager:
 
         remaining_to_absorb = absorbed
         fills_to_remove = []
+        fills_to_reduce = []  # (trade_id, new_size)
 
         for fill in fills_by_age:
+            if abs(remaining_to_absorb) < 0.01:
+                break  # Nothing left to absorb
+
             fill_delta = fill.size if fill.side == OrderSide.BUY else -fill.size
 
             # Only absorb fills that match the direction of API change
@@ -651,18 +669,32 @@ class InventoryManager:
                     fills_to_remove.append(fill.trade_id)
                     remaining_to_absorb -= fill_delta
                     logger.debug(
-                        f"Pending fill absorbed: {fill.trade_id[:16]}... "
+                        f"Pending fill fully absorbed: {fill.trade_id[:16]}... "
                         f"({fill.side.value} {fill.size:.2f})"
                     )
-                # else: partial - keep for now (complex partial handling deferred)
+                else:
+                    # Partially absorbed - reduce fill size
+                    absorbed_size = abs(remaining_to_absorb)
+                    new_size = fill.size - absorbed_size
+                    fills_to_reduce.append((fill.trade_id, new_size))
+                    logger.debug(
+                        f"Pending fill partially absorbed: {fill.trade_id[:16]}... "
+                        f"({fill.side.value} {fill.size:.2f} -> {new_size:.2f})"
+                    )
+                    remaining_to_absorb = 0.0
 
-        # Remove absorbed fills
+        # Remove fully absorbed fills
         for trade_id in fills_to_remove:
             del position.pending_fills[trade_id]
 
-        if fills_to_remove:
+        # Reduce partially absorbed fills
+        for trade_id, new_size in fills_to_reduce:
+            position.pending_fills[trade_id].size = new_size
+
+        if fills_to_remove or fills_to_reduce:
             logger.info(
-                f"Reconciled {len(fills_to_remove)} pending fills for {position.token_id[:20]}...: "
+                f"Reconciled pending fills for {position.token_id[:20]}...: "
+                f"removed={len(fills_to_remove)}, reduced={len(fills_to_reduce)}, "
                 f"absorbed={absorbed:+.2f}, remaining_pending={len(position.pending_fills)}"
             )
 
