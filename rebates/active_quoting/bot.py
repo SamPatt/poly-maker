@@ -1416,6 +1416,7 @@ class ActiveQuotingBot:
         Returns:
             True if quoting should be halted for this token.
         """
+        now = datetime.utcnow()
         position = self.inventory_manager.get_position(token_id)
         discrepancy = position.effective_size - position.confirmed_size
         abs_discrepancy = abs(discrepancy)
@@ -1439,7 +1440,6 @@ class ActiveQuotingBot:
             return False
 
         state = self._get_inventory_discrepancy_state(token_id)
-        now = datetime.utcnow()
 
         if state.first_seen is None:
             state.first_seen = now
