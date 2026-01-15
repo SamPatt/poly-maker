@@ -17,8 +17,10 @@ from .models import Fill, Position, OrderSide
 
 logger = logging.getLogger(__name__)
 
-# Don't allow API to reduce position if there was a fill within this window
-FILL_PROTECTION_SECONDS = 60.0
+# DEPRECATED: Fill protection has been removed. API is now trusted as source of truth.
+# The old approach blocked API sync for 60s after fills, causing position drift.
+# See docs/INVENTORY_TRACKING_PLAN.md for details.
+FILL_PROTECTION_SECONDS = 0.0  # Effectively disabled
 
 
 @dataclass
@@ -113,21 +115,21 @@ class InventoryManager:
 
     def has_recent_fill(self, token_id: str, seconds: float = FILL_PROTECTION_SECONDS) -> bool:
         """
-        Check if a token has had a recent fill.
+        DEPRECATED: Always returns False now.
 
-        Used to protect against stale API data overwriting recent fills.
+        Fill protection has been removed because it caused position drift.
+        API is now trusted as source of truth, with pending fills tracked separately.
+        See docs/INVENTORY_TRACKING_PLAN.md for the new architecture.
 
         Args:
             token_id: Token ID
-            seconds: Time window to consider "recent"
+            seconds: Time window (ignored)
 
         Returns:
-            True if there was a fill within the time window
+            Always False (fill protection disabled)
         """
-        if token_id not in self._last_fill_time:
-            return False
-        elapsed = (datetime.utcnow() - self._last_fill_time[token_id]).total_seconds()
-        return elapsed < seconds
+        # DEPRECATED: Fill protection disabled to prevent position drift
+        return False
 
     def get_last_fill_time(self, token_id: str) -> Optional[datetime]:
         """Get the last fill time for a token."""

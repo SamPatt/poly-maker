@@ -328,30 +328,27 @@ class ActiveQuotingBot:
 
                 # Only update if position changed
                 if abs(size - old_size) >= 0.01:
-                    # CRITICAL: Do not let stale API data CHANGE our position if:
-                    # 1. We have recent fills (API lags behind real-time WebSocket fills)
-                    # 2. We have pending buy orders (fills may be in flight)
-                    # NOTE: We block BOTH increases and decreases because stale API can
-                    # report either direction incorrectly after a recent fill.
-                    has_recent_fill = self.inventory_manager.has_recent_fill(token_id)
                     pending_buys = self.inventory_manager.get_pending_buy_size(token_id)
+                    discrepancy = old_size - size
 
-                    if has_recent_fill:
-                        logger.warning(
-                            f"Ignoring API position change for {token_id[:20]}...: "
-                            f"API says {size:.0f} but we have {old_size:.0f} with recent fills"
+                    # Log discrepancies for monitoring
+                    if abs(discrepancy) > 1.0:
+                        logger.info(
+                            f"Position sync for {token_id[:20]}...: "
+                            f"API={size:.2f}, internal={old_size:.2f}, "
+                            f"discrepancy={discrepancy:+.2f}, pending_orders={pending_buys:.0f}"
                         )
-                        continue
 
+                    # Only block reductions when we have pending buy orders
+                    # (pending orders may fill soon, causing position to increase)
                     if pending_buys > 0 and size < old_size:
-                        # Only block reductions when we have pending buys
-                        # (pending buys should only affect reductions, not increases)
                         logger.warning(
-                            f"Ignoring API position reduction for {token_id[:20]}...: "
-                            f"API says {size:.0f} but we have {old_size:.0f} with {pending_buys:.0f} pending buys"
+                            f"Blocking API position reduction for {token_id[:20]}...: "
+                            f"API says {size:.0f} but internal={old_size:.0f} with {pending_buys:.0f} pending orders"
                         )
                         continue
 
+                    # API is source of truth - sync position
                     self.inventory_manager.set_position(token_id, size, avg_price)
 
                     # Clear pending buys since API position already reflects fills

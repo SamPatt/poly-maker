@@ -911,14 +911,19 @@ class TestInventoryManagerClearPosition:
 # --- Fill Protection Tests ---
 
 class TestFillProtection:
-    """Tests for fill protection against stale API data."""
+    """Tests for fill protection (DEPRECATED - fill protection is now disabled).
 
-    def test_has_recent_fill_false_initially(self, bot):
-        """Test that has_recent_fill returns False with no fills."""
+    Fill protection was removed because it caused position drift.
+    API is now trusted as source of truth.
+    See docs/INVENTORY_TRACKING_PLAN.md for details.
+    """
+
+    def test_has_recent_fill_always_false(self, bot):
+        """Test that has_recent_fill always returns False (deprecated)."""
+        # Fill protection is disabled - always returns False
         assert not bot.inventory_manager.has_recent_fill("token_1")
 
-    def test_has_recent_fill_true_after_fill(self, bot):
-        """Test that has_recent_fill returns True after a fill."""
+        # Even after a fill, should return False
         fill = Fill(
             order_id="order_1",
             token_id="token_1",
@@ -931,7 +936,8 @@ class TestFillProtection:
         )
         bot.inventory_manager.update_from_fill(fill)
 
-        assert bot.inventory_manager.has_recent_fill("token_1")
+        # Still False - fill protection disabled
+        assert not bot.inventory_manager.has_recent_fill("token_1")
 
     def test_get_last_fill_time(self, bot):
         """Test that get_last_fill_time returns the fill time."""
@@ -952,8 +958,8 @@ class TestFillProtection:
         # Should be within last few seconds
         assert (datetime.utcnow() - last_fill_time).total_seconds() < 5
 
-    def test_fill_protection_blocks_position_reduction(self, bot):
-        """Test that API sync doesn't reduce position with recent fills."""
+    def test_api_sync_updates_position(self, bot):
+        """Test that API sync updates position (fill protection disabled)."""
         # Simulate a fill that updated position to 20
         fill = Fill(
             order_id="order_1",
@@ -970,21 +976,12 @@ class TestFillProtection:
         # Position should be 20
         assert bot.inventory_manager.get_position("token_1").size == 20.0
 
-        # Now if API tries to say position is 0 (stale data), it should be ignored
-        # The has_recent_fill check will return True, blocking the reduction
-        assert bot.inventory_manager.has_recent_fill("token_1")
+        # Fill protection is disabled - has_recent_fill always returns False
+        assert not bot.inventory_manager.has_recent_fill("token_1")
 
-        # Manually test the protection logic
-        old_size = 20.0
-        api_size = 0.0
-        if api_size < old_size and bot.inventory_manager.has_recent_fill("token_1"):
-            # Should skip the update
-            pass
-        else:
-            bot.inventory_manager.set_position("token_1", api_size, 0.5)
-
-        # Position should still be 20, not 0
-        assert bot.inventory_manager.get_position("token_1").size == 20.0
+        # API sync should update position (API is source of truth)
+        bot.inventory_manager.set_position("token_1", 10.0, 0.5)
+        assert bot.inventory_manager.get_position("token_1").size == 10.0
 
 
 # --- Order Update Handler Tests ---
@@ -1424,12 +1421,12 @@ class TestSyncPositionsFromApiAsync:
         # This is the core protection we added
 
     @pytest.mark.asyncio
-    async def test_sync_blocks_reduction_with_recent_fill(self, bot):
-        """API position reduction should be blocked when there are recent fills."""
+    async def test_api_sync_allowed_after_fill(self, bot):
+        """API position sync is allowed even after fills (fill protection disabled)."""
         # Setup: Set a position and record a fill
         bot.inventory_manager.set_position("token_1", size=100, avg_entry_price=0.50)
-        
-        # Record a fill to mark recent activity
+
+        # Record a fill
         from rebates.active_quoting.models import Fill
         fill = Fill(
             order_id="test_order",
@@ -1439,15 +1436,15 @@ class TestSyncPositionsFromApiAsync:
             size=10.0,
         )
         bot.inventory_manager.update_from_fill(fill)
-        
-        # Verify recent fill is detected
-        assert bot.inventory_manager.has_recent_fill("token_1") is True
+
+        # Fill protection is disabled - has_recent_fill always returns False
+        assert bot.inventory_manager.has_recent_fill("token_1") is False
 
     @pytest.mark.asyncio
-    async def test_fill_protection_window_is_60_seconds(self, bot):
-        """Fill protection window should be 60 seconds (increased from 30)."""
+    async def test_fill_protection_disabled(self, bot):
+        """Fill protection is disabled (was 60 seconds, now 0)."""
         from rebates.active_quoting.inventory_manager import FILL_PROTECTION_SECONDS
-        assert FILL_PROTECTION_SECONDS == 60.0
+        assert FILL_PROTECTION_SECONDS == 0.0  # Disabled
 
     @pytest.mark.asyncio  
     async def test_position_increase_allowed_with_pending_buys(self, bot):
@@ -1470,23 +1467,27 @@ class TestSyncPositionsFromApiAsync:
 
 
 class TestFillProtectionWindow:
-    """Tests for the fill protection window."""
+    """Tests for the fill protection window (DEPRECATED - disabled).
 
-    def test_has_recent_fill_within_window(self, bot):
-        """has_recent_fill should return True within the protection window."""
+    Fill protection has been removed. API is now trusted as source of truth.
+    See docs/INVENTORY_TRACKING_PLAN.md for details.
+    """
+
+    def test_has_recent_fill_always_false(self, bot):
+        """has_recent_fill always returns False (fill protection disabled)."""
         from rebates.active_quoting.models import Fill
-        
+
         fill = Fill(
             order_id="test",
-            token_id="token_1", 
+            token_id="token_1",
             side=OrderSide.BUY,
             price=0.50,
             size=10.0,
         )
         bot.inventory_manager.update_from_fill(fill)
-        
-        # Should be True immediately after fill
-        assert bot.inventory_manager.has_recent_fill("token_1") is True
+
+        # Fill protection disabled - always False
+        assert bot.inventory_manager.has_recent_fill("token_1") is False
 
     def test_has_recent_fill_no_fill(self, bot):
         """has_recent_fill should return False when no fill recorded."""
