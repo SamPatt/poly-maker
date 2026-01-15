@@ -1283,6 +1283,8 @@ class ActiveQuotingBot:
     async def _on_user_ws_disconnect(self) -> None:
         """Handle user WebSocket disconnect."""
         logger.error("User WebSocket disconnected - CRITICAL")
+        # Force reconcile all positions to trust API when WS reconnects
+        self.inventory_manager.force_reconcile_all()
         await self.risk_manager.on_user_disconnect()
 
     async def _on_momentum_detected(self, event) -> None:

@@ -2,10 +2,15 @@
 InventoryManager - Position tracking and skewing for active quoting.
 
 Handles:
-- Position tracking per market (authoritative from UserChannelManager fills)
+- Position tracking per market with dual tracking (confirmed + pending fills)
 - Liability calculation (worst-case loss = shares x entry_price)
 - Skew factor calculation based on position
 - Hard position limits enforcement (MAX_POSITION_PER_MARKET, MAX_LIABILITY_PER_MARKET_USDC)
+
+Phase 2: Dual Tracking Architecture
+- confirmed_size: Position from last API sync (authoritative)
+- pending_fills: WebSocket fills not yet confirmed by API (tracked by trade_id)
+- effective_size: confirmed_size + pending_fill_buys - pending_fill_sells
 """
 import logging
 from dataclasses import dataclass, field
@@ -22,6 +27,115 @@ logger = logging.getLogger(__name__)
 # See docs/INVENTORY_TRACKING_PLAN.md for details.
 FILL_PROTECTION_SECONDS = 0.0  # Effectively disabled
 
+# Pending fill age-out threshold
+PENDING_FILL_AGE_OUT_SECONDS = 30.0
+
+
+def _sign(x: float) -> int:
+    """Return sign of x: 1 for positive, -1 for negative, 0 for zero."""
+    if x > 0:
+        return 1
+    elif x < 0:
+        return -1
+    return 0
+
+
+@dataclass
+class PendingFill:
+    """A fill received via WebSocket that hasn't been confirmed by API yet."""
+    trade_id: str  # Primary key for reconciliation
+    side: OrderSide
+    size: float
+    price: float
+    timestamp: datetime
+
+    @property
+    def delta(self) -> float:
+        """Position delta from this fill (positive for BUY, negative for SELL)."""
+        return self.size if self.side == OrderSide.BUY else -self.size
+
+
+@dataclass
+class TrackedPosition:
+    """
+    Position with dual tracking: confirmed (API) and pending (WebSocket) fills.
+
+    The effective_size property combines both to give the best estimate of
+    actual position, while confirmed_size is the last known API snapshot.
+    """
+    token_id: str
+    confirmed_size: float = 0.0
+    confirmed_avg_price: float = 0.0  # Avg entry price from API
+    confirmed_at: Optional[datetime] = None
+    pending_fills: Dict[str, PendingFill] = field(default_factory=dict)
+    # Legacy Position fields for compatibility
+    realized_pnl: float = 0.0
+    total_fees_paid: float = 0.0
+
+    @property
+    def pending_fill_buys(self) -> float:
+        """Sum of pending BUY fill sizes."""
+        return sum(
+            f.size for f in self.pending_fills.values()
+            if f.side == OrderSide.BUY
+        )
+
+    @property
+    def pending_fill_sells(self) -> float:
+        """Sum of pending SELL fill sizes."""
+        return sum(
+            f.size for f in self.pending_fills.values()
+            if f.side == OrderSide.SELL
+        )
+
+    @property
+    def pending_delta(self) -> float:
+        """Net position delta from pending fills."""
+        return self.pending_fill_buys - self.pending_fill_sells
+
+    @property
+    def effective_size(self) -> float:
+        """
+        Best estimate of actual position size.
+
+        Combines confirmed API position with pending WebSocket fills.
+        """
+        return self.confirmed_size + self.pending_fill_buys - self.pending_fill_sells
+
+    @property
+    def size(self) -> float:
+        """Alias for effective_size for backwards compatibility."""
+        return self.effective_size
+
+    @property
+    def avg_entry_price(self) -> float:
+        """
+        Approximate average entry price.
+
+        Uses confirmed avg price as base. A more accurate calculation would
+        weight by size, but for risk/skew purposes this is sufficient.
+        """
+        if self.effective_size <= 0:
+            return 0.0
+        # Use confirmed price, or calculate weighted avg if we have pending buys
+        if not self.pending_fills:
+            return self.confirmed_avg_price
+
+        # Weighted average of confirmed + pending buys
+        total_cost = self.confirmed_size * self.confirmed_avg_price
+        total_size = self.confirmed_size
+        for f in self.pending_fills.values():
+            if f.side == OrderSide.BUY:
+                total_cost += f.size * f.price
+                total_size += f.size
+
+        return total_cost / total_size if total_size > 0 else self.confirmed_avg_price
+
+    @property
+    def max_liability(self) -> float:
+        """Maximum liability using effective size."""
+        return abs(self.effective_size) * self.avg_entry_price
+
 
 @dataclass
 class InventoryLimits:
@@ -37,10 +151,15 @@ class InventoryManager:
     Manages inventory/position tracking for active quoting.
 
     This class:
-    1. Tracks positions per token from fills (authoritative source)
+    1. Tracks positions per token using dual tracking (confirmed + pending)
     2. Calculates worst-case liability (max loss if position goes to 0)
     3. Computes skew factor to encourage position rebalancing
     4. Enforces hard position limits to control risk
+
+    Phase 2: Dual Tracking Architecture
+    - confirmed_size: Position from last API sync (authoritative)
+    - pending_fills: WebSocket fills not yet confirmed by API
+    - effective_size: Combined view for quoting decisions
     """
 
     def __init__(self, config: ActiveQuotingConfig):
@@ -51,16 +170,16 @@ class InventoryManager:
             config: Active quoting configuration
         """
         self.config = config
-        self._positions: Dict[str, Position] = {}  # token_id -> Position
-        self._pending_buys: Dict[str, float] = {}  # token_id -> pending buy size
+        self._positions: Dict[str, TrackedPosition] = {}  # token_id -> TrackedPosition
+        self._pending_buys: Dict[str, float] = {}  # token_id -> pending buy ORDER size (open orders)
         self._last_fill_time: Dict[str, datetime] = {}  # token_id -> last fill timestamp
 
     @property
-    def positions(self) -> Dict[str, Position]:
+    def positions(self) -> Dict[str, TrackedPosition]:
         """Get all positions."""
         return self._positions
 
-    def get_position(self, token_id: str) -> Position:
+    def get_position(self, token_id: str) -> TrackedPosition:
         """
         Get position for a token, creating if not exists.
 
@@ -68,48 +187,94 @@ class InventoryManager:
             token_id: Token ID
 
         Returns:
-            Position for the token
+            TrackedPosition for the token (use .effective_size for best estimate)
         """
         if token_id not in self._positions:
-            self._positions[token_id] = Position(token_id=token_id)
+            self._positions[token_id] = TrackedPosition(token_id=token_id)
         return self._positions[token_id]
 
     def get_inventory(self, token_id: str) -> float:
         """
-        Get current inventory (position size) for a token.
+        Get current inventory (effective position size) for a token.
 
         Args:
             token_id: Token ID
 
         Returns:
-            Inventory size (positive = long)
+            Inventory size (positive = long) - uses effective_size
         """
-        return self.get_position(token_id).size
+        return self.get_position(token_id).effective_size
+
+    def _synthesize_trade_id(self, fill: Fill) -> str:
+        """
+        Synthesize a fallback trade_id when one is missing.
+
+        Uses order_id + timestamp to create a unique key that won't collide
+        with other fills from the same order.
+
+        Args:
+            fill: Fill that may be missing trade_id
+
+        Returns:
+            Synthesized trade_id string
+        """
+        if fill.trade_id:
+            return fill.trade_id
+        # Synthesize: order_id_timestamp_size (size helps differentiate partials)
+        ts_ms = int(fill.timestamp.timestamp() * 1000)
+        return f"{fill.order_id}_{ts_ms}_{fill.size:.2f}"
 
     def update_from_fill(self, fill: Fill) -> None:
         """
-        Update position based on a fill event.
+        Update position based on a fill event from WebSocket.
 
-        This is the authoritative source for position updates.
+        Phase 2: Adds fill to pending_fills rather than updating confirmed_size.
+        The confirmed_size is only updated via API sync (set_position).
 
         Args:
             fill: Fill from UserChannelManager
         """
         position = self.get_position(fill.token_id)
-        old_size = position.size
+        old_effective = position.effective_size
 
-        position.update_from_fill(fill)
+        # Synthesize trade_id if missing
+        trade_id = self._synthesize_trade_id(fill)
+        if not fill.trade_id:
+            logger.debug(
+                f"Fill missing trade_id, synthesized: {trade_id} "
+                f"(order={fill.order_id[:12]}...)"
+            )
 
-        # Record fill time to protect against stale API data
+        # Add to pending fills (don't update confirmed_size)
+        pending_fill = PendingFill(
+            trade_id=trade_id,
+            side=fill.side,
+            size=fill.size,
+            price=fill.price,
+            timestamp=fill.timestamp,
+        )
+        position.pending_fills[trade_id] = pending_fill
+
+        # Track fees and realized PnL (these are immediate, not pending)
+        position.total_fees_paid += fill.fee
+
+        # For sells, calculate realized PnL against confirmed avg price
+        if fill.side == OrderSide.SELL and position.confirmed_size > 0:
+            pnl_per_share = fill.price - position.confirmed_avg_price
+            shares_sold = min(fill.size, position.confirmed_size)
+            position.realized_pnl += pnl_per_share * shares_sold
+
+        # Record fill time
         self._last_fill_time[fill.token_id] = datetime.utcnow()
 
         logger.info(
-            f"Position updated: {fill.token_id} "
-            f"{old_size:.2f} -> {position.size:.2f} "
-            f"(fill: {fill.side.value} {fill.size:.2f} @ {fill.price:.4f})"
+            f"Position updated (pending): {fill.token_id[:20]}... "
+            f"{old_effective:.2f} -> {position.effective_size:.2f} "
+            f"(fill: {fill.side.value} {fill.size:.2f} @ {fill.price:.4f}, "
+            f"trade_id={trade_id[:16]}..., pending_count={len(position.pending_fills)})"
         )
 
-        # Release pending buy capacity when fill comes in
+        # Release pending buy ORDER capacity when fill comes in
         if fill.side == OrderSide.BUY:
             self.release_pending_buy(fill.token_id, fill.size)
 
@@ -402,8 +567,9 @@ class InventoryManager:
         """
         if token_id in self._positions:
             position = self._positions[token_id]
-            position.size = 0.0
-            position.avg_entry_price = 0.0
+            position.confirmed_size = 0.0
+            position.confirmed_avg_price = 0.0
+            position.pending_fills.clear()
             # Keep realized_pnl and total_fees_paid for session tracking
 
     def reset_all(self) -> None:
@@ -417,16 +583,166 @@ class InventoryManager:
         avg_entry_price: float = 0.5
     ) -> None:
         """
-        Set position directly (for reconciliation with external state).
+        Set confirmed position from API sync.
+
+        Phase 2: Updates confirmed_size and reconciles pending fills.
+        Pending fills that have been absorbed by the API position change
+        are removed (oldest first).
 
         Args:
             token_id: Token ID
-            size: Position size
-            avg_entry_price: Average entry price
+            size: Position size from API
+            avg_entry_price: Average entry price from API
         """
         position = self.get_position(token_id)
-        position.size = size
-        position.avg_entry_price = avg_entry_price
+        old_confirmed = position.confirmed_size
+
+        # Calculate how much the API position absorbed
+        absorbed = size - old_confirmed
+
+        # Update confirmed position
+        position.confirmed_size = size
+        position.confirmed_avg_price = avg_entry_price
+        position.confirmed_at = datetime.utcnow()
+
+        # Reconcile pending fills against API change
+        self._reconcile_pending_fills(position, absorbed)
+
+        # Age out old pending fills
+        self._age_out_pending_fills(position)
+
+        logger.debug(
+            f"Position confirmed from API: {token_id[:20]}... "
+            f"confirmed={size:.2f}, pending_delta={position.pending_delta:+.2f}, "
+            f"effective={position.effective_size:.2f}"
+        )
+
+    def _reconcile_pending_fills(self, position: TrackedPosition, absorbed: float) -> None:
+        """
+        Remove pending fills that have been absorbed by API, oldest first.
+
+        When the API position changes, we assume the oldest pending fills
+        are the ones that got absorbed. This removes them to prevent
+        double-counting.
+
+        Args:
+            position: TrackedPosition to reconcile
+            absorbed: Change in confirmed_size from API (positive = buys absorbed)
+        """
+        if abs(absorbed) < 0.01:
+            return  # No significant change
+
+        # Sort pending fills by timestamp (oldest first)
+        fills_by_age = sorted(
+            position.pending_fills.values(),
+            key=lambda f: f.timestamp
+        )
+
+        remaining_to_absorb = absorbed
+        fills_to_remove = []
+
+        for fill in fills_by_age:
+            fill_delta = fill.size if fill.side == OrderSide.BUY else -fill.size
+
+            # Only absorb fills that match the direction of API change
+            if _sign(fill_delta) == _sign(remaining_to_absorb):
+                if abs(fill_delta) <= abs(remaining_to_absorb):
+                    # Fully absorbed - mark for removal
+                    fills_to_remove.append(fill.trade_id)
+                    remaining_to_absorb -= fill_delta
+                    logger.debug(
+                        f"Pending fill absorbed: {fill.trade_id[:16]}... "
+                        f"({fill.side.value} {fill.size:.2f})"
+                    )
+                # else: partial - keep for now (complex partial handling deferred)
+
+        # Remove absorbed fills
+        for trade_id in fills_to_remove:
+            del position.pending_fills[trade_id]
+
+        if fills_to_remove:
+            logger.info(
+                f"Reconciled {len(fills_to_remove)} pending fills for {position.token_id[:20]}...: "
+                f"absorbed={absorbed:+.2f}, remaining_pending={len(position.pending_fills)}"
+            )
+
+    def _age_out_pending_fills(self, position: TrackedPosition) -> None:
+        """
+        Remove pending fills older than the age-out threshold.
+
+        Fills that weren't absorbed by API after 30s are likely:
+        - Duplicate/stale WebSocket messages
+        - Fills for a different session
+        - WebSocket/API synchronization issues
+
+        Args:
+            position: TrackedPosition to age out
+        """
+        now = datetime.utcnow()
+        cutoff = now - timedelta(seconds=PENDING_FILL_AGE_OUT_SECONDS)
+
+        old_fills = {
+            trade_id: fill
+            for trade_id, fill in position.pending_fills.items()
+            if fill.timestamp < cutoff
+        }
+
+        if not old_fills:
+            return
+
+        # Calculate net delta being removed
+        net_delta = sum(
+            f.size if f.side == OrderSide.BUY else -f.size
+            for f in old_fills.values()
+        )
+
+        # Remove old fills
+        for trade_id in old_fills:
+            del position.pending_fills[trade_id]
+
+        logger.warning(
+            f"Aging out pending fills for {position.token_id[:20]}...: "
+            f"trade_ids={list(old_fills.keys())}, net_delta={net_delta:+.2f}, "
+            f"confirmed={position.confirmed_size:.2f}"
+        )
+
+    def force_reconcile(self, token_id: str) -> None:
+        """
+        Force reconciliation by trusting API and clearing all pending fills.
+
+        Called on WebSocket reconnect or when gaps are detected.
+        Logs any discrepancy before clearing.
+
+        Args:
+            token_id: Token ID to force reconcile
+        """
+        position = self.get_position(token_id)
+
+        if not position.pending_fills:
+            return
+
+        # Log the discrepancy
+        pending_delta = position.pending_delta
+        trade_ids = list(position.pending_fills.keys())
+
+        logger.warning(
+            f"Force reconcile for {token_id[:20]}...: "
+            f"clearing {len(trade_ids)} pending fills, "
+            f"discarding delta={pending_delta:+.2f}, "
+            f"trade_ids={trade_ids}"
+        )
+
+        # Clear all pending fills - trust API
+        position.pending_fills.clear()
+
+    def force_reconcile_all(self) -> None:
+        """
+        Force reconcile all positions.
+
+        Called on WebSocket disconnect/reconnect or major gaps.
+        """
+        for token_id in self._positions:
+            self.force_reconcile(token_id)
 
     def get_summary(self) -> Dict[str, dict]:
         """
@@ -437,12 +753,15 @@ class InventoryManager:
         """
         return {
             token_id: {
-                "size": pos.size,
+                "size": pos.effective_size,
+                "confirmed_size": pos.confirmed_size,
+                "pending_delta": pos.pending_delta,
+                "pending_fills_count": len(pos.pending_fills),
                 "avg_entry": pos.avg_entry_price,
                 "liability": pos.max_liability,
                 "realized_pnl": pos.realized_pnl,
                 "skew_factor": self.calculate_skew_factor(token_id),
             }
             for token_id, pos in self._positions.items()
-            if pos.size != 0
+            if pos.effective_size != 0 or len(pos.pending_fills) > 0
         }

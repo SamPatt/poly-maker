@@ -2,9 +2,16 @@
 Unit tests for InventoryManager.
 """
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
-from rebates.active_quoting.inventory_manager import InventoryManager, InventoryLimits
+from rebates.active_quoting.inventory_manager import (
+    InventoryManager,
+    InventoryLimits,
+    TrackedPosition,
+    PendingFill,
+    PENDING_FILL_AGE_OUT_SECONDS,
+)
 from rebates.active_quoting.config import ActiveQuotingConfig
 from rebates.active_quoting.models import Fill, OrderSide, Position
 
@@ -412,18 +419,11 @@ class TestInventoryManagerSummary:
         assert summary["token1"]["liability"] == pytest.approx(5.0)
         assert summary["token1"]["skew_factor"] == pytest.approx(1.0)
 
-    def test_summary_excludes_zero_positions(self, manager, buy_fill, sell_fill):
-        """Should exclude zero positions from summary."""
-        # Buy then sell all
-        sell_fill_full = Fill(
-            order_id="order2",
-            token_id="token1",
-            side=OrderSide.SELL,
-            price=0.55,
-            size=10.0,  # Sell all
-        )
-        manager.update_from_fill(buy_fill)
-        manager.update_from_fill(sell_fill_full)
+    def test_summary_excludes_zero_positions(self, manager):
+        """Should exclude zero positions from summary after reconciliation."""
+        # Set confirmed position, then API confirms it's zero (fully sold)
+        manager.set_position("token1", size=10.0, avg_entry_price=0.50)
+        manager.set_position("token1", size=0.0, avg_entry_price=0.0)
 
         summary = manager.get_summary()
         assert "token1" not in summary
@@ -432,24 +432,31 @@ class TestInventoryManagerSummary:
 class TestInventoryManagerRealizedPnL:
     """Tests for realized PnL tracking."""
 
-    def test_realized_pnl_on_profitable_sale(self, manager, buy_fill, sell_fill):
-        """Should track realized PnL on profitable sale."""
-        manager.update_from_fill(buy_fill)  # Buy 10 @ 0.50
-        manager.update_from_fill(sell_fill)  # Sell 5 @ 0.55
+    def test_realized_pnl_on_profitable_sale(self, manager):
+        """Should track realized PnL on profitable sale against confirmed position."""
+        # First, establish confirmed position via API sync
+        manager.set_position("token1", size=10.0, avg_entry_price=0.50)
+
+        # Then sell (via WebSocket fill)
+        sell_fill = Fill(
+            order_id="order2",
+            token_id="token1",
+            side=OrderSide.SELL,
+            price=0.55,
+            size=5.0,
+        )
+        manager.update_from_fill(sell_fill)
 
         pos = manager.get_position("token1")
         # PnL: (0.55 - 0.50) * 5 = $0.25
         assert pos.realized_pnl == pytest.approx(0.25)
 
     def test_realized_pnl_on_loss(self, manager):
-        """Should track realized PnL on losing sale."""
-        buy = Fill(
-            order_id="order1",
-            token_id="token1",
-            side=OrderSide.BUY,
-            price=0.60,
-            size=10.0,
-        )
+        """Should track realized PnL on losing sale against confirmed position."""
+        # First, establish confirmed position via API sync
+        manager.set_position("token1", size=10.0, avg_entry_price=0.60)
+
+        # Then sell at a loss (via WebSocket fill)
         sell = Fill(
             order_id="order2",
             token_id="token1",
@@ -457,7 +464,6 @@ class TestInventoryManagerRealizedPnL:
             price=0.50,
             size=10.0,
         )
-        manager.update_from_fill(buy)
         manager.update_from_fill(sell)
 
         pos = manager.get_position("token1")
@@ -555,3 +561,498 @@ class TestInventoryManagerEdgeCases:
         assert manager.get_inventory("token2") == 20.0
         assert manager.calculate_skew_factor("token1") == pytest.approx(1.0)
         assert manager.calculate_skew_factor("token2") == pytest.approx(2.0)
+
+
+# =============================================================================
+# Phase 2: Dual Tracking Tests
+# =============================================================================
+
+
+class TestTrackedPositionDataclass:
+    """Tests for TrackedPosition dataclass properties."""
+
+    def test_effective_size_with_no_pending(self):
+        """Effective size should equal confirmed when no pending fills."""
+        pos = TrackedPosition(token_id="token1", confirmed_size=50.0)
+        assert pos.effective_size == 50.0
+        assert pos.size == 50.0  # Alias should work
+
+    def test_effective_size_with_pending_buys(self):
+        """Effective size should include pending buy fills."""
+        pos = TrackedPosition(token_id="token1", confirmed_size=50.0)
+        pos.pending_fills["t1"] = PendingFill(
+            trade_id="t1",
+            side=OrderSide.BUY,
+            size=10.0,
+            price=0.50,
+            timestamp=datetime.utcnow(),
+        )
+        assert pos.effective_size == 60.0
+        assert pos.pending_fill_buys == 10.0
+        assert pos.pending_fill_sells == 0.0
+
+    def test_effective_size_with_pending_sells(self):
+        """Effective size should subtract pending sell fills."""
+        pos = TrackedPosition(token_id="token1", confirmed_size=50.0)
+        pos.pending_fills["t1"] = PendingFill(
+            trade_id="t1",
+            side=OrderSide.SELL,
+            size=10.0,
+            price=0.55,
+            timestamp=datetime.utcnow(),
+        )
+        assert pos.effective_size == 40.0
+        assert pos.pending_fill_buys == 0.0
+        assert pos.pending_fill_sells == 10.0
+
+    def test_effective_size_mixed_pending(self):
+        """Effective size should handle mixed buy/sell pending fills."""
+        pos = TrackedPosition(token_id="token1", confirmed_size=50.0)
+        pos.pending_fills["t1"] = PendingFill(
+            trade_id="t1",
+            side=OrderSide.BUY,
+            size=20.0,
+            price=0.50,
+            timestamp=datetime.utcnow(),
+        )
+        pos.pending_fills["t2"] = PendingFill(
+            trade_id="t2",
+            side=OrderSide.SELL,
+            size=5.0,
+            price=0.55,
+            timestamp=datetime.utcnow(),
+        )
+        # 50 + 20 - 5 = 65
+        assert pos.effective_size == 65.0
+        assert pos.pending_delta == 15.0
+
+    def test_pending_fill_delta(self):
+        """PendingFill delta should be positive for buys, negative for sells."""
+        buy_fill = PendingFill(
+            trade_id="t1",
+            side=OrderSide.BUY,
+            size=10.0,
+            price=0.50,
+            timestamp=datetime.utcnow(),
+        )
+        sell_fill = PendingFill(
+            trade_id="t2",
+            side=OrderSide.SELL,
+            size=5.0,
+            price=0.55,
+            timestamp=datetime.utcnow(),
+        )
+        assert buy_fill.delta == 10.0
+        assert sell_fill.delta == -5.0
+
+
+class TestDualTrackingFillHandling:
+    """Tests for Phase 2 fill handling (pending fills)."""
+
+    def test_fill_adds_to_pending_not_confirmed(self, manager, buy_fill):
+        """WebSocket fill should add to pending, not confirmed."""
+        manager.update_from_fill(buy_fill)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 0.0  # Not updated
+        assert len(pos.pending_fills) == 1  # Has pending
+        assert pos.effective_size == 10.0  # Combined is correct
+
+    def test_multiple_fills_accumulate_in_pending(self, manager):
+        """Multiple fills should accumulate in pending_fills."""
+        fill1 = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="trade1",
+        )
+        fill2 = Fill(
+            order_id="order2",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.52,
+            size=20.0,
+            trade_id="trade2",
+        )
+
+        manager.update_from_fill(fill1)
+        manager.update_from_fill(fill2)
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 2
+        assert pos.effective_size == 30.0
+
+
+class TestMissingTradeIdSynthesis:
+    """Tests for synthesized trade_id when missing (Phase 2 requirement)."""
+
+    def test_missing_trade_id_uses_synthesized_key(self, manager):
+        """Fill without trade_id should get a synthesized unique key."""
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id=None,  # Missing!
+        )
+
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 1
+
+        # Get the synthesized key
+        trade_id = list(pos.pending_fills.keys())[0]
+        assert trade_id.startswith("order1_")  # Contains order_id
+        assert "10.00" in trade_id  # Contains size
+
+    def test_multiple_fills_without_trade_id_dont_collide(self, manager):
+        """Multiple fills without trade_id should get unique keys."""
+        fill1 = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id=None,
+            timestamp=datetime.utcnow(),
+        )
+        fill2 = Fill(
+            order_id="order1",  # Same order, different fill
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=5.0,  # Different size
+            trade_id=None,
+            timestamp=datetime.utcnow() + timedelta(milliseconds=1),
+        )
+
+        manager.update_from_fill(fill1)
+        manager.update_from_fill(fill2)
+
+        pos = manager.get_position("token1")
+        # Both fills should be present (unique keys)
+        assert len(pos.pending_fills) == 2
+        assert pos.effective_size == 15.0
+
+
+class TestPartialConfirmationReconciliation:
+    """Tests for partial confirmation reconciliation (Phase 2 requirement)."""
+
+    def test_partial_confirmation_removes_oldest_fills_first(self, manager):
+        """API absorbs 50 of 80 pending, verify oldest fills removed, newest kept."""
+        # Create 3 fills with different timestamps
+        now = datetime.utcnow()
+        fill1 = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=30.0,
+            trade_id="oldest",
+            timestamp=now - timedelta(seconds=10),
+        )
+        fill2 = Fill(
+            order_id="order2",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=20.0,
+            trade_id="middle",
+            timestamp=now - timedelta(seconds=5),
+        )
+        fill3 = Fill(
+            order_id="order3",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=30.0,
+            trade_id="newest",
+            timestamp=now,
+        )
+
+        # Add all fills to pending
+        manager.update_from_fill(fill1)
+        manager.update_from_fill(fill2)
+        manager.update_from_fill(fill3)
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 3
+        assert pos.effective_size == 80.0
+
+        # API sync: confirmed moves from 0 to 50 (absorbs 50)
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        pos = manager.get_position("token1")
+        # Should have absorbed oldest (30) + middle (20) = 50
+        # Only newest (30) should remain
+        assert pos.confirmed_size == 50.0
+        assert len(pos.pending_fills) == 1
+        assert "newest" in pos.pending_fills
+        assert pos.effective_size == 80.0  # 50 confirmed + 30 pending
+
+    def test_reconciliation_handles_sell_fills(self, manager):
+        """Reconciliation should handle sell fills correctly."""
+        # Start with confirmed position
+        manager.set_position("token1", size=100.0, avg_entry_price=0.50)
+
+        # Add pending sell
+        sell_fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.SELL,
+            price=0.55,
+            size=20.0,
+            trade_id="sell1",
+        )
+        manager.update_from_fill(sell_fill)
+
+        pos = manager.get_position("token1")
+        assert pos.effective_size == 80.0  # 100 - 20
+
+        # API sync: confirmed drops to 80 (absorbed the sell)
+        manager.set_position("token1", size=80.0, avg_entry_price=0.50)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 80.0
+        assert len(pos.pending_fills) == 0  # Sell absorbed
+        assert pos.effective_size == 80.0
+
+
+class TestAgeOutPendingFills:
+    """Tests for age-out of old pending fills (Phase 2 requirement)."""
+
+    def test_age_out_logs_trade_ids_and_delta(self, manager, caplog):
+        """Fills older than 30s should be removed with proper logging."""
+        import logging
+        caplog.set_level(logging.WARNING)
+
+        # Create an old fill (older than age-out threshold)
+        old_timestamp = datetime.utcnow() - timedelta(seconds=PENDING_FILL_AGE_OUT_SECONDS + 5)
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=25.0,
+            trade_id="old_fill",
+            timestamp=old_timestamp,
+        )
+
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 1
+
+        # Trigger age-out via set_position (which calls _age_out_pending_fills)
+        manager.set_position("token1", size=0.0, avg_entry_price=0.50)
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 0
+
+        # Check logging
+        assert "Aging out pending fills" in caplog.text
+        assert "old_fill" in caplog.text
+        assert "+25.00" in caplog.text or "25.00" in caplog.text
+
+    def test_recent_fills_not_aged_out(self, manager):
+        """Fills newer than threshold should not be aged out."""
+        # Recent fill
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="recent",
+            timestamp=datetime.utcnow(),
+        )
+
+        manager.update_from_fill(fill)
+
+        # Trigger age-out check
+        manager.set_position("token1", size=0.0, avg_entry_price=0.50)
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 1  # Still there
+        assert "recent" in pos.pending_fills
+
+
+class TestForceReconciliation:
+    """Tests for force reconciliation on WS reconnect/gaps."""
+
+    def test_force_reconcile_clears_pending_fills(self, manager):
+        """Force reconcile should clear all pending fills."""
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 1
+
+        manager.force_reconcile("token1")
+
+        pos = manager.get_position("token1")
+        assert len(pos.pending_fills) == 0
+
+    def test_force_reconcile_all(self, manager):
+        """Force reconcile all should clear pending for all tokens."""
+        fill1 = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        fill2 = Fill(
+            order_id="order2",
+            token_id="token2",
+            side=OrderSide.BUY,
+            price=0.40,
+            size=20.0,
+            trade_id="fill2",
+        )
+
+        manager.update_from_fill(fill1)
+        manager.update_from_fill(fill2)
+
+        manager.force_reconcile_all()
+
+        assert len(manager.get_position("token1").pending_fills) == 0
+        assert len(manager.get_position("token2").pending_fills) == 0
+
+    def test_force_reconcile_logs_discrepancy(self, manager, caplog):
+        """Force reconcile should log discrepancy before clearing."""
+        import logging
+        caplog.set_level(logging.WARNING)
+
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        manager.force_reconcile("token1")
+
+        assert "Force reconcile" in caplog.text
+        assert "fill1" in caplog.text
+
+
+class TestEffectiveSizeUsedByConsumers:
+    """Tests to verify effective_size is used consistently."""
+
+    def test_get_inventory_returns_effective_size(self, manager):
+        """get_inventory should return effective_size not confirmed_size."""
+        # Set confirmed position
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        # Add pending buy
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        # get_inventory should return effective (60), not confirmed (50)
+        assert manager.get_inventory("token1") == 60.0
+
+    def test_check_limits_uses_effective_size(self, manager):
+        """check_limits should use effective_size for limit checks."""
+        # Set confirmed at 90 (below 100 limit)
+        manager.set_position("token1", size=90.0, avg_entry_price=0.10)
+
+        # Add pending buy of 15 (effective = 105, over limit)
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.10,
+            size=15.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 90.0
+        assert pos.effective_size == 105.0
+
+        # Should block buys because effective_size > limit
+        limits = manager.check_limits("token1")
+        assert limits.can_buy is False
+
+    def test_liability_uses_effective_size(self, manager):
+        """Liability calculation should use effective_size."""
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        pos = manager.get_position("token1")
+        # Liability should be based on effective_size (60), not confirmed (50)
+        # 60 * 0.50 = 30.0
+        assert pos.max_liability == pytest.approx(30.0)
+
+    def test_skew_uses_effective_size(self, manager):
+        """Skew calculation should use effective_size."""
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        # Skew should use effective_size (60)
+        # 60 * 0.1 coefficient = 6.0
+        skew = manager.calculate_skew_factor("token1")
+        assert skew == pytest.approx(6.0)
+
+    def test_summary_includes_both_confirmed_and_effective(self, manager):
+        """get_summary should include both confirmed and effective sizes."""
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50)
+
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        summary = manager.get_summary()
+        assert "token1" in summary
+        assert summary["token1"]["size"] == 60.0  # effective
+        assert summary["token1"]["confirmed_size"] == 50.0
+        assert summary["token1"]["pending_delta"] == 10.0
+        assert summary["token1"]["pending_fills_count"] == 1

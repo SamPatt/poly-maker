@@ -959,8 +959,8 @@ class TestFillProtection:
         assert (datetime.utcnow() - last_fill_time).total_seconds() < 5
 
     def test_api_sync_updates_position(self, bot):
-        """Test that API sync updates position (fill protection disabled)."""
-        # Simulate a fill that updated position to 20
+        """Test that API sync updates confirmed position (dual tracking)."""
+        # Simulate a fill that adds 20 to pending_fills
         fill = Fill(
             order_id="order_1",
             token_id="token_1",
@@ -973,15 +973,23 @@ class TestFillProtection:
         )
         bot.inventory_manager.update_from_fill(fill)
 
-        # Position should be 20
-        assert bot.inventory_manager.get_position("token_1").size == 20.0
+        # Effective position should be 20 (0 confirmed + 20 pending)
+        pos = bot.inventory_manager.get_position("token_1")
+        assert pos.effective_size == 20.0
+        assert pos.confirmed_size == 0.0
+        assert len(pos.pending_fills) == 1
 
         # Fill protection is disabled - has_recent_fill always returns False
         assert not bot.inventory_manager.has_recent_fill("token_1")
 
-        # API sync should update position (API is source of truth)
+        # API sync sets confirmed position to 10
+        # Partial fill (20) won't be absorbed since 20 > 10
         bot.inventory_manager.set_position("token_1", 10.0, 0.5)
-        assert bot.inventory_manager.get_position("token_1").size == 10.0
+
+        pos = bot.inventory_manager.get_position("token_1")
+        assert pos.confirmed_size == 10.0  # API is source of truth for confirmed
+        # Pending fill (20) wasn't absorbed (too large), so effective = 10 + 20 = 30
+        assert pos.effective_size == 30.0
 
 
 # --- Order Update Handler Tests ---
