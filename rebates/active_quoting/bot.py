@@ -339,16 +339,9 @@ class ActiveQuotingBot:
                             f"discrepancy={discrepancy:+.2f}, pending_orders={pending_buys:.0f}"
                         )
 
-                    # Only block reductions when we have pending buy orders
-                    # (pending orders may fill soon, causing position to increase)
-                    if pending_buys > 0 and size < old_size:
-                        logger.warning(
-                            f"Blocking API position reduction for {token_id[:20]}...: "
-                            f"API says {size:.0f} but internal={old_size:.0f} with {pending_buys:.0f} pending orders"
-                        )
-                        continue
-
-                    # API is source of truth - sync position
+                    # API is source of truth - always sync position
+                    # No blocking for pending_buys - that caused deadlock where
+                    # pending wasn't cleared because sync was blocked
                     self.inventory_manager.set_position(token_id, size, avg_price)
 
                     # Clear pending buys since API position already reflects fills

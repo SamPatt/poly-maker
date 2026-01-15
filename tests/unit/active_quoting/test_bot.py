@@ -1395,30 +1395,24 @@ class TestSyncPositionsFromApiAsync:
     """Tests for async _sync_positions_from_api with enhanced protections."""
 
     @pytest.mark.asyncio
-    async def test_sync_blocks_reduction_with_pending_buys(self, bot):
-        """API position reduction should be blocked when there are pending buys."""
+    async def test_sync_allowed_with_pending_buys(self, bot):
+        """API position sync is allowed even with pending buys (API is truth)."""
         # Setup: Set a position and reserve pending buys
         bot.inventory_manager.set_position("token_1", size=100, avg_entry_price=0.50)
         bot.inventory_manager.reserve_pending_buy("token_1", 20.0)
-        
-        # Mock poly_client
-        bot._poly_client = MagicMock()
-        bot._poly_client.browser_wallet = "0xtest"
-        
-        # The sync would try to reduce position (API says 80, we have 100)
-        # But we have pending buys, so it should be blocked
-        
-        # Since we cannot easily mock aiohttp, we test the logic directly
-        # by checking the inventory_manager state
-        old_size = bot.inventory_manager.get_position("token_1").size
-        pending = bot.inventory_manager.get_pending_buy_size("token_1")
-        
-        # Verify our test setup
-        assert old_size == 100
-        assert pending == 20.0
-        
-        # The protection logic would check: if api_size < old_size and pending > 0, skip
-        # This is the core protection we added
+
+        # Verify setup
+        assert bot.inventory_manager.get_position("token_1").size == 100
+        assert bot.inventory_manager.get_pending_buy_size("token_1") == 20.0
+
+        # API sync should update position regardless of pending buys
+        # (pending_buys blocking was removed to prevent deadlock)
+        bot.inventory_manager.set_position("token_1", size=80, avg_entry_price=0.50)
+        bot.inventory_manager.clear_pending_buys("token_1")
+
+        # Position should now be 80 (API wins)
+        assert bot.inventory_manager.get_position("token_1").size == 80
+        assert bot.inventory_manager.get_pending_buy_size("token_1") == 0
 
     @pytest.mark.asyncio
     async def test_api_sync_allowed_after_fill(self, bot):
@@ -1493,35 +1487,29 @@ class TestFillProtectionWindow:
         """has_recent_fill should return False when no fill recorded."""
         assert bot.inventory_manager.has_recent_fill("token_1") is False
 
-    def test_pending_buys_blocks_position_reduction_logic(self, bot):
-        """Verify the logic that blocks position reduction with pending buys."""
+    def test_api_always_wins_even_with_pending_buys(self, bot):
+        """API sync should update position even with pending buys (no blocking)."""
         # Setup
         bot.inventory_manager.set_position("token_1", size=100, avg_entry_price=0.50)
         bot.inventory_manager.reserve_pending_buy("token_1", 20.0)
-        
-        old_size = bot.inventory_manager.get_position("token_1").size
-        api_size = 80  # API says less
-        pending = bot.inventory_manager.get_pending_buy_size("token_1")
-        
-        # This is the protection logic from _sync_positions_from_api
-        should_skip = (api_size < old_size) and (pending > 0)
-        
-        assert should_skip is True, "Should skip position reduction when pending buys exist"
 
-    def test_no_pending_buys_allows_position_reduction(self, bot):
-        """Position reduction should be allowed when no pending buys and no recent fills."""
-        # Setup: position but no pending buys, no recent fills
+        # Old logic would block; new logic allows API to win
+        # Simulate what sync does: set position and clear pending
+        bot.inventory_manager.set_position("token_1", size=80, avg_entry_price=0.50)
+        bot.inventory_manager.clear_pending_buys("token_1")
+
+        assert bot.inventory_manager.get_position("token_1").size == 80
+        assert bot.inventory_manager.get_pending_buy_size("token_1") == 0
+
+    def test_position_reduction_always_allowed(self, bot):
+        """Position reduction is always allowed - API is source of truth."""
+        # Setup: position with no pending buys
         bot.inventory_manager.set_position("token_1", size=100, avg_entry_price=0.50)
-        
-        old_size = bot.inventory_manager.get_position("token_1").size
-        api_size = 80  # API says less
-        pending = bot.inventory_manager.get_pending_buy_size("token_1")
-        has_recent = bot.inventory_manager.has_recent_fill("token_1")
-        
-        # Should allow reduction when no protections apply
-        should_skip = (api_size < old_size) and (pending > 0 or has_recent)
-        
-        assert should_skip is False, "Should allow reduction when no protections apply"
+
+        # API says 80 - should be allowed (no blocking)
+        bot.inventory_manager.set_position("token_1", size=80, avg_entry_price=0.50)
+
+        assert bot.inventory_manager.get_position("token_1").size == 80
 
 
 # --- Phase 4: Order Reconciliation Tests ---
