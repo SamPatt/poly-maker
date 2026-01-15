@@ -101,6 +101,7 @@ class InventoryDiscrepancyState:
     first_seen: Optional[datetime] = None
     last_seen: Optional[datetime] = None
     last_reconcile: Optional[datetime] = None
+    clear_since: Optional[datetime] = None
     active: bool = False
 
 
@@ -1422,6 +1423,12 @@ class ActiveQuotingBot:
 
         if abs_discrepancy < threshold:
             state = self._inventory_discrepancy_states.get(token_id)
+            if state and state.first_seen:
+                if state.clear_since is None:
+                    state.clear_since = now
+                clear_elapsed = (now - state.clear_since).total_seconds()
+                if clear_elapsed < self.config.inventory_discrepancy_clear_seconds:
+                    return False
             if state and state.active:
                 logger.info(
                     f"Inventory discrepancy cleared for {token_id[:20]}... "
@@ -1437,6 +1444,7 @@ class ActiveQuotingBot:
         if state.first_seen is None:
             state.first_seen = now
         state.last_seen = now
+        state.clear_since = None
 
         duration = (now - state.first_seen).total_seconds()
         if not state.active and duration < self.config.inventory_discrepancy_duration_seconds:

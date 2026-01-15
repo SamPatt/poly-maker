@@ -37,6 +37,7 @@ class ActiveQuotingConfig:
     inventory_discrepancy_threshold: float = 2.0  # Shares before halt checks
     inventory_discrepancy_duration_seconds: float = 30.0  # Seconds over threshold before halt
     inventory_discrepancy_reconcile_interval_seconds: float = 30.0  # Interval between reconcile attempts
+    inventory_discrepancy_clear_seconds: float = 15.0  # Seconds below threshold before reset
 
     # --- Risk Management ---
     max_drawdown_per_market_usdc: float = 20.0  # Stop quoting that market
@@ -112,6 +113,7 @@ class ActiveQuotingConfig:
             inventory_discrepancy_threshold=float(os.getenv("AQ_INVENTORY_DISCREPANCY_THRESHOLD", "2.0")),
             inventory_discrepancy_duration_seconds=float(os.getenv("AQ_INVENTORY_DISCREPANCY_DURATION_SECONDS", "30.0")),
             inventory_discrepancy_reconcile_interval_seconds=float(os.getenv("AQ_INVENTORY_DISCREPANCY_RECONCILE_INTERVAL_SECONDS", "30.0")),
+            inventory_discrepancy_clear_seconds=float(os.getenv("AQ_INVENTORY_DISCREPANCY_CLEAR_SECONDS", "15.0")),
             # Risk Management
             max_drawdown_per_market_usdc=float(os.getenv("AQ_MAX_DRAWDOWN_PER_MARKET_USDC", "20.0")),
             max_drawdown_global_usdc=float(os.getenv("AQ_MAX_DRAWDOWN_GLOBAL_USDC", "100.0")),
@@ -202,6 +204,8 @@ class ActiveQuotingConfig:
             errors.append("inventory_discrepancy_duration_seconds must be > 0")
         if self.inventory_discrepancy_reconcile_interval_seconds <= 0:
             errors.append("inventory_discrepancy_reconcile_interval_seconds must be > 0")
+        if self.inventory_discrepancy_clear_seconds <= 0:
+            errors.append("inventory_discrepancy_clear_seconds must be > 0")
 
         # Risk validation
         if self.max_drawdown_per_market_usdc <= 0:
@@ -235,8 +239,8 @@ class ActiveQuotingConfig:
             errors.append("balance_error_threshold must be >= 1")
         if self.balance_error_window_seconds <= 0:
             errors.append("balance_error_window_seconds must be > 0")
-        if self.balance_error_cooldown_seconds < 0:
-            errors.append("balance_error_cooldown_seconds must be >= 0")
+        if self.balance_error_cooldown_seconds <= 0:
+            errors.append("balance_error_cooldown_seconds must be > 0")
 
         # Fee validation
         if self.fee_cache_ttl_seconds < 0:
