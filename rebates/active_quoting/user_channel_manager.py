@@ -445,7 +445,16 @@ class UserChannelManager:
                     else:
                         logger.warning(f"Could not find size field in maker_order, using total trade size: {size}")
                     price = float(maker_order.get("price", price))
-                    logger.info(f"Verified our maker order: {order_id} size={size}")
+
+                    # CRITICAL: Use the maker_order's side, not the trade event's side!
+                    # The trade event side is from the TAKER's perspective
+                    # Our maker_order side tells us what WE are doing
+                    maker_side_str = maker_order.get("side", "").upper()
+                    if maker_side_str in ("BUY", "SELL"):
+                        side = side_map.get(maker_side_str, side)
+                        logger.info(f"Using maker_order side: {maker_side_str}")
+
+                    logger.info(f"Verified our maker order: {order_id} size={size} side={side.value}")
                     break
 
             # If we have wallet address configured and this isn't our fill, skip it
