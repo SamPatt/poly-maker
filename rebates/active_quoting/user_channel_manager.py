@@ -76,6 +76,7 @@ class UserChannelManager:
         self._reconnect_attempts: int = 0
         self._last_message_time: Optional[datetime] = None
         self._authenticated: bool = False
+        self._processed_trade_ids: Set[str] = set()  # Dedup fills by trade_id
 
     @property
     def orders(self) -> Dict[str, OrderState]:
@@ -370,6 +371,13 @@ class UserChannelManager:
 
         # Get trade ID - Polymarket uses 'id', not 'trade_id'
         trade_id = data.get("id") or data.get("trade_id")
+
+        # Deduplicate fills - WebSocket can replay the same fill multiple times
+        if trade_id and trade_id in self._processed_trade_ids:
+            logger.debug(f"Skipping duplicate fill: trade_id={trade_id}")
+            return
+        if trade_id:
+            self._processed_trade_ids.add(trade_id)
 
         # Get token ID
         token_id = data.get("asset_id") or data.get("token_id")
