@@ -184,25 +184,32 @@ def force_reconcile(self, token_id: str, api_size: float):
 
 ## Migration Path
 
-### Phase 1: Remove Fill Protection + Add Logging (IMMEDIATE)
-- Remove `has_recent_fill()` checks that block API sync
-- Remove `FILL_PROTECTION_SECONDS` constant
-- Add logging to show discrepancies between internal and API
+### Phase 1: Remove Fill Protection + Add Logging (IMMEDIATE) ✅ COMPLETED
+- ✅ Remove `has_recent_fill()` checks that block API sync
+- ✅ Remove `FILL_PROTECTION_SECONDS` constant
+- ✅ Remove pending_buys blocking that caused sync deadlock
+- ✅ Add logging to show discrepancies between internal and API
 - **This alone should fix the drift issue**
 
-### Phase 2: Implement Dual Tracking
-- Add `TrackedPosition` with `confirmed_size` + `pending_fills`
-- Track fills by trade_id for precise reconciliation
-- Keep existing `pending_order_buys` separate
+### Phase 2: Implement Dual Tracking ✅ COMPLETED
+- ✅ Add `PendingFill` and `TrackedPosition` dataclasses
+- ✅ Track fills by trade_id for precise reconciliation (with synthesized fallback)
+- ✅ `update_from_fill()` adds to pending_fills instead of updating confirmed_size
+- ✅ `set_position()` updates confirmed_size and reconciles pending fills (oldest-first)
+- ✅ Age out stale pending fills after 30s with detailed logging
+- ✅ Force reconcile all positions on WebSocket disconnect
+- ✅ All consumers use `effective_size` via `.size` property alias
+- ✅ Comprehensive tests for dual tracking behavior (673 tests passing)
 
-### Phase 3: Conservative Limit Checks
-- Update `can_buy()` to use conservative exposure formula
-- Ensures position limits are never exceeded
+### Phase 3: Conservative Limit Checks ✅ COMPLETED (as part of Phase 2)
+- ✅ `check_limits()` uses `effective_size` for position limit checks
+- ✅ Ensures position limits account for pending fills
 
-### Phase 4: Update PnL/Risk
-- Update risk manager to use `effective_size`
-- Update PnL tracker to use `effective_size`
-- Alerts use `effective_size`
+### Phase 4: Update PnL/Risk ✅ COMPLETED (as part of Phase 2)
+- ✅ Risk manager uses `effective_size` (via `.size` alias)
+- ✅ PnL tracker uses `effective_size` (via `.size` alias)
+- ✅ Alerts use `effective_size` (via `.size` alias)
+- ✅ `get_summary()` includes both `confirmed_size` and `effective_size`
 
 ## Critical Fix: Remove Fill Protection
 
