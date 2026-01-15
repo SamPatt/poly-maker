@@ -151,6 +151,46 @@ class UserChannelManager:
 
         return False
 
+    def is_valid_for_fill(self, order_id: str, fill_size: float) -> tuple[bool, str]:
+        """
+        Strict validation for accepting a fill.
+
+        This is stricter than is_known_order() - it requires:
+        1. Order must be in _placed_order_ids (we placed it THIS session)
+        2. Order must not be in terminal state
+        3. Order must have sufficient remaining_size for the fill
+
+        This prevents phantom fills from:
+        - Orders placed in previous sessions
+        - Orders that have already been fully filled
+        - Stale WS notifications for already-completed orders
+
+        Args:
+            order_id: The order ID to validate
+            fill_size: The size of the proposed fill
+
+        Returns:
+            Tuple of (is_valid, reason_if_invalid)
+        """
+        # STRICT: Must be an order we placed this session
+        if order_id not in self._placed_order_ids:
+            return False, "order not placed this session"
+
+        # Check order state if we have it
+        order = self._orders.get(order_id)
+        if order:
+            # Reject terminal orders
+            if order.is_done():
+                return False, f"order in terminal state ({order.status.value})"
+
+            # Check remaining size - reject if fill would exceed remaining
+            if order.remaining_size is not None and order.remaining_size < fill_size:
+                return False, (
+                    f"fill size {fill_size:.2f} exceeds remaining size {order.remaining_size:.2f}"
+                )
+
+        return True, ""
+
     def is_connected(self) -> bool:
         """Check if WebSocket is connected and authenticated."""
         if self._websocket is None or not self._authenticated:
@@ -473,35 +513,38 @@ class UserChannelManager:
                            f"amount={mo.get('amount', 'N/A')}, "
                            f"match_size={mo.get('match_size', 'N/A')}")
 
-            # Find our order in maker_orders by checking maker_address AND order tracking
+            # Find our order in maker_orders by checking maker_address AND strict validation
             for maker_order in maker_orders:
                 maker_address = maker_order.get("maker_address", "").lower()
                 maker_order_id = maker_order.get("order_id")
 
-                # Check if this is our order: must match wallet AND be a known order
-                # This prevents accepting fills for orders we didn't place
+                # Check if this is our order: must match wallet
                 if self._wallet_address and maker_address == self._wallet_address:
-                    # Verify we actually placed this order (if order_id is available)
-                    if maker_order_id and not self.is_known_order(maker_order_id):
-                        logger.warning(
-                            f"Skipping fill - maker_address matches but order_id {maker_order_id[:20]}... "
-                            f"is not a known order (trade_id={trade_id})"
-                        )
-                        continue  # Check other maker_orders
-
-                    is_our_fill = True
-                    if maker_order_id:
-                        order_id = maker_order_id
-                    # Get matched amount for this specific maker order
-                    # Try multiple possible field names
+                    # Get fill size first (needed for validation)
                     our_size = (
                         maker_order.get("matched_amount") or
                         maker_order.get("match_size") or
                         maker_order.get("size") or
                         maker_order.get("amount")
                     )
+                    fill_size = float(our_size) if our_size is not None else size
+
+                    # STRICT validation: order must be placed this session with sufficient remaining size
+                    if maker_order_id:
+                        is_valid, reject_reason = self.is_valid_for_fill(maker_order_id, fill_size)
+                        if not is_valid:
+                            logger.warning(
+                                f"Skipping fill - {reject_reason} "
+                                f"(order_id={maker_order_id[:20]}..., trade_id={trade_id}, size={fill_size:.2f})"
+                            )
+                            continue  # Check other maker_orders
+
+                    is_our_fill = True
+                    if maker_order_id:
+                        order_id = maker_order_id
+
                     if our_size is not None:
-                        size = float(our_size)
+                        size = fill_size
                         logger.info(f"Found our fill size: {size} (from maker_order)")
                     else:
                         logger.warning(f"Could not find size field in maker_order, using total trade size: {size}")
@@ -524,12 +567,20 @@ class UserChannelManager:
                 return
         else:
             # No maker_orders in message - this might be a different format
-            # Check if it's an order we're tracking (either from WS or from placement)
-            if order_id and self.is_known_order(order_id):
-                is_our_fill = True
+            # Use strict validation: order must be placed this session
+            if order_id:
+                is_valid, reject_reason = self.is_valid_for_fill(order_id, size)
+                if is_valid:
+                    is_our_fill = True
+                elif self._wallet_address:
+                    logger.debug(
+                        f"Skipping fill (no maker_orders) - {reject_reason}: "
+                        f"order_id={order_id[:20]}..., trade_id={trade_id}"
+                    )
+                    return
             elif self._wallet_address:
                 # We have wallet configured but can't verify this fill - skip it
-                logger.debug(f"Skipping unverified fill (no maker_orders, unknown order): trade_id={trade_id}")
+                logger.debug(f"Skipping unverified fill (no maker_orders, no order_id): trade_id={trade_id}")
                 return
 
         # Use trade_id as fallback for order_id if still not found
