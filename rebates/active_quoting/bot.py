@@ -1274,6 +1274,7 @@ class ActiveQuotingBot:
             fill=fill,
             position=position_after,
             position_before_fill=position_size_before,
+            avg_entry_before=avg_entry_before,
         )
 
         # Get mid price at fill time (fallback to fill.price if unavailable)

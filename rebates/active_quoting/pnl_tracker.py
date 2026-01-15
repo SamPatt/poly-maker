@@ -281,6 +281,7 @@ class PnLTracker:
         fill: Fill,
         position: Position,
         position_before_fill: float,
+        avg_entry_before: Optional[float] = None,
     ) -> Optional[TradeResult]:
         """
         Record a fill and handle P&L calculation.
@@ -291,6 +292,7 @@ class PnLTracker:
             fill: The Fill object
             position: Position AFTER the fill (with updated avg_entry_price)
             position_before_fill: Position size BEFORE the fill
+            avg_entry_before: Average entry price BEFORE the fill (for accurate P&L on sells)
 
         Returns:
             TradeResult if this was a sell, None for buys
@@ -299,12 +301,12 @@ class PnLTracker:
             self.record_buy(fill)
             return None
         else:
-            # For sells, we need the avg entry price before the fill
-            # Since position is updated, we need to back-calculate or store it
-            # The position.avg_entry_price is what we bought at
+            # For sells, use avg_entry_before if provided (more accurate when selling entire position)
+            # Falls back to position.avg_entry_price which may be 0 if position is now empty
+            entry_price = avg_entry_before if avg_entry_before is not None else position.avg_entry_price
             return self.record_sell(
                 fill=fill,
-                avg_entry_price=position.avg_entry_price,
+                avg_entry_price=entry_price,
                 position_before=position_before_fill,
             )
 
