@@ -412,6 +412,16 @@ class UserChannelManager:
             side = self._orders[order_id].side
 
         if maker_orders:
+            # Log maker_orders structure to understand field names
+            logger.info(f"Trade {trade_id}: maker_orders count={len(maker_orders)}, total_size={size}")
+            for i, mo in enumerate(maker_orders):
+                logger.info(f"  maker_order[{i}] keys: {list(mo.keys())}")
+                logger.info(f"  maker_order[{i}] data: maker_address={mo.get('maker_address', 'N/A')[:20]}..., "
+                           f"matched_amount={mo.get('matched_amount', 'N/A')}, "
+                           f"size={mo.get('size', 'N/A')}, "
+                           f"amount={mo.get('amount', 'N/A')}, "
+                           f"match_size={mo.get('match_size', 'N/A')}")
+
             # Find our order in maker_orders by checking maker_address
             for maker_order in maker_orders:
                 maker_address = maker_order.get("maker_address", "").lower()
@@ -422,9 +432,20 @@ class UserChannelManager:
                     if "order_id" in maker_order:
                         order_id = maker_order["order_id"]
                     # Get matched amount for this specific maker order
-                    size = float(maker_order.get("matched_amount", size))
+                    # Try multiple possible field names
+                    our_size = (
+                        maker_order.get("matched_amount") or
+                        maker_order.get("match_size") or
+                        maker_order.get("size") or
+                        maker_order.get("amount")
+                    )
+                    if our_size is not None:
+                        size = float(our_size)
+                        logger.info(f"Found our fill size: {size} (from maker_order)")
+                    else:
+                        logger.warning(f"Could not find size field in maker_order, using total trade size: {size}")
                     price = float(maker_order.get("price", price))
-                    logger.debug(f"Found our maker order: {order_id} size={size}")
+                    logger.info(f"Verified our maker order: {order_id} size={size}")
                     break
 
             # If we have wallet address configured and this isn't our fill, skip it

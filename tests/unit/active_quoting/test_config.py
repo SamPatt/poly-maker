@@ -39,7 +39,7 @@ class TestActiveQuotingConfigDefaults:
         assert config.max_position_per_market == 100
         assert config.max_liability_per_market_usdc == 50.0
         assert config.max_total_liability_usdc == 500.0
-        assert config.inventory_skew_coefficient == 0.1
+        assert config.inventory_skew_coefficient == 0.02
 
     def test_default_risk_management(self):
         """Default risk parameters should match research doc."""
