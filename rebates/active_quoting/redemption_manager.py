@@ -193,7 +193,7 @@ class RedemptionManager:
 
         # Check if we have a position to redeem
         if current_position_size <= 0:
-            logger.info(f"No position to redeem for {token_id[:20]}... (size: {current_position_size})")
+            logger.debug(f"No position to redeem for {token_id[:20]}... (size: {current_position_size})")
             state.state = RedemptionState.SKIPPED
             self._completed_redemptions.add(token_id)
             return False

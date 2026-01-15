@@ -1912,14 +1912,9 @@ class ActiveQuotingBot:
             position = self.inventory_manager.get_position(token_id)
             current_size = position.size
 
-            # Update redemption manager with current position
-            self.redemption_manager.update_position_size(token_id, current_size)
-
-            # Skip if no position
-            if current_size <= 0:
-                logger.info(
-                    f"No position to redeem for {token_id[:20]}... (size: {current_size})"
-                )
+            # Update redemption manager with current position - this marks as SKIPPED if no position
+            # Returns False if no position to redeem (already logs internally)
+            if not self.redemption_manager.update_position_size(token_id, current_size):
                 continue
 
             # Cancel any open orders for this market before redemption
