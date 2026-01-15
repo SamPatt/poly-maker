@@ -32,7 +32,7 @@ class ActiveQuotingConfig:
     max_position_per_market: int = 100  # Shares
     max_liability_per_market_usdc: float = 50.0  # Worst-case loss
     max_total_liability_usdc: float = 500.0  # Across all markets
-    inventory_skew_coefficient: float = 0.1  # Linear: skew = coef * inventory
+    inventory_skew_coefficient: float = 0.02  # Linear: skew = coef * inventory
 
     # --- Risk Management ---
     max_drawdown_per_market_usdc: float = 20.0  # Stop quoting that market
@@ -97,7 +97,7 @@ class ActiveQuotingConfig:
             max_position_per_market=int(os.getenv("AQ_MAX_POSITION_PER_MARKET", "100")),
             max_liability_per_market_usdc=float(os.getenv("AQ_MAX_LIABILITY_PER_MARKET_USDC", "50.0")),
             max_total_liability_usdc=float(os.getenv("AQ_MAX_TOTAL_LIABILITY_USDC", "500.0")),
-            inventory_skew_coefficient=float(os.getenv("AQ_INVENTORY_SKEW_COEFFICIENT", "0.1")),
+            inventory_skew_coefficient=float(os.getenv("AQ_INVENTORY_SKEW_COEFFICIENT", "0.02")),
             # Risk Management
             max_drawdown_per_market_usdc=float(os.getenv("AQ_MAX_DRAWDOWN_PER_MARKET_USDC", "20.0")),
             max_drawdown_global_usdc=float(os.getenv("AQ_MAX_DRAWDOWN_GLOBAL_USDC", "100.0")),
