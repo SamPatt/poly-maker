@@ -99,8 +99,8 @@ class QuoteEngine:
         Returns:
             QuoteDecision with action and optional new quote
         """
-        # Check if in momentum cooldown
-        if momentum_state and momentum_state.in_cooldown():
+        # Check if in momentum cooldown (skip in fixed spread mode)
+        if not self.config.fixed_spread_mode and momentum_state and momentum_state.in_cooldown():
             return QuoteDecision(
                 action=QuoteAction.CANCEL_ALL,
                 reason="In momentum cooldown"
@@ -383,8 +383,8 @@ class QuoteEngine:
         Returns:
             Tuple of (price, reason) - price is None if shouldn't quote
         """
-        # Check momentum
-        if momentum_state and momentum_state.in_cooldown():
+        # Check momentum (skip in fixed spread mode)
+        if not self.config.fixed_spread_mode and momentum_state and momentum_state.in_cooldown():
             return None, "In momentum cooldown"
 
         # Check orderbook
