@@ -1039,9 +1039,11 @@ class ActiveQuotingBot:
         if wind_down.phase != WindDownPhase.NORMAL:
             if wind_down.phase == WindDownPhase.MARKET_ENDED:
                 # Market has ended, skip processing
+                logger.debug(f"Skipping {token_id[:20]}...: market ended")
                 return
             # Handle wind-down (returns True if it handled the market)
             if await self._process_wind_down(token_id, wind_down):
+                logger.debug(f"Skipping {token_id[:20]}...: wind-down handling")
                 return
 
         # Check if we can place orders for this market
@@ -1053,29 +1055,34 @@ class ActiveQuotingBot:
         # Get market state
         market = self._markets.get(token_id)
         if not market:
+            logger.debug(f"Skipping {token_id[:20]}...: market state missing")
             return
 
         if self._is_balance_throttled(token_id):
             if market.is_quoting:
-                await self._cancel_market_quotes(token_id)
+                await self._cancel_market_quotes(token_id, reason="balance_throttled")
+            logger.debug(f"Skipping {token_id[:20]}...: balance throttled")
             return
 
         if await self._check_inventory_discrepancy(token_id):
             if market.is_quoting:
-                await self._cancel_market_quotes(token_id)
+                await self._cancel_market_quotes(token_id, reason="inventory_discrepancy")
+            logger.debug(f"Skipping {token_id[:20]}...: inventory discrepancy")
             return
 
         # Get orderbook
         orderbook = self.orderbook_manager.get_orderbook(token_id)
         if not orderbook or not orderbook.is_valid():
+            logger.debug(f"Skipping {token_id[:20]}...: invalid orderbook")
             return
 
         if orderbook.last_update_time is None:
+            logger.debug(f"Skipping {token_id[:20]}...: orderbook missing timestamp")
             return
         quote_age = (datetime.utcnow() - orderbook.last_update_time).total_seconds()
         if quote_age > self.config.max_quote_age_seconds:
             if market.is_quoting:
-                await self._cancel_market_quotes(token_id)
+                await self._cancel_market_quotes(token_id, reason="stale_orderbook")
             logger.debug(
                 f"Skipping quote for {token_id[:20]}...: orderbook age "
                 f"{quote_age:.2f}s > {self.config.max_quote_age_seconds:.2f}s"
@@ -1115,7 +1122,7 @@ class ActiveQuotingBot:
         # Handle quote decision
         if decision.action == QuoteAction.CANCEL_ALL:
             if market.is_quoting:
-                await self._cancel_market_quotes(token_id)
+                await self._cancel_market_quotes(token_id, reason=f"quote_decision:{decision.reason}")
                 market.is_quoting = False
         elif decision.action == QuoteAction.PLACE_QUOTE:
             await self._place_or_update_quote(token_id, decision.quote)
@@ -1162,6 +1169,10 @@ class ActiveQuotingBot:
         if market and market.last_quote:
             # Cancel existing orders - pending buy reservations will be released
             # when _on_order_update receives CANCELLED confirmation from exchange
+            logger.info(
+                f"Refreshing quote for {token_id[:20]}...: "
+                "cancelling existing orders before re-quote"
+            )
             await self.order_manager.cancel_all_for_token(token_id)
             # Wait for exchange to process cancellation
             await asyncio.sleep(0.2)
@@ -1174,6 +1185,7 @@ class ActiveQuotingBot:
 
         best_bid = orderbook.best_bid
         best_ask = orderbook.best_ask
+        tick_size = orderbook.tick_size or 0.01
 
         if adjusted_quote.bid_size >= min_size and adjusted_quote.bid_price >= best_ask:
             logger.warning(
@@ -1188,6 +1200,27 @@ class ActiveQuotingBot:
                 f"<= best_bid {best_bid:.4f} (post-only would cross)"
             )
             adjusted_quote.ask_size = 0
+
+        # Final safety buffer at placement time to avoid TOCTOU crossings.
+        if adjusted_quote.bid_size >= min_size:
+            safe_bid = min(adjusted_quote.bid_price, best_bid - tick_size)
+            safe_bid = max(safe_bid, tick_size)
+            if safe_bid != adjusted_quote.bid_price:
+                logger.debug(
+                    f"Adjusting bid for {token_id[:20]}...: {adjusted_quote.bid_price:.4f} -> "
+                    f"{safe_bid:.4f} (best_bid={best_bid:.4f})"
+                )
+                adjusted_quote.bid_price = safe_bid
+
+        if adjusted_quote.ask_size >= min_size:
+            safe_ask = max(adjusted_quote.ask_price, best_ask + tick_size)
+            safe_ask = min(safe_ask, 1.0 - tick_size)
+            if safe_ask != adjusted_quote.ask_price:
+                logger.debug(
+                    f"Adjusting ask for {token_id[:20]}...: {adjusted_quote.ask_price:.4f} -> "
+                    f"{safe_ask:.4f} (best_ask={best_ask:.4f})"
+                )
+                adjusted_quote.ask_price = safe_ask
 
         if adjusted_quote.bid_size < min_size and adjusted_quote.ask_size < min_size:
             return
@@ -1258,12 +1291,17 @@ class ActiveQuotingBot:
                 if has_hard_error:
                     self.risk_manager.record_error()
 
-    async def _cancel_market_quotes(self, token_id: str) -> None:
+    async def _cancel_market_quotes(self, token_id: str, reason: Optional[str] = None) -> None:
         """Cancel all quotes for a market."""
         # NOTE: Pending buy reservations will be released when _on_order_update
         # receives CANCELLED confirmation from exchange (not cleared optimistically)
         cancelled = await self.order_manager.cancel_all_for_token(token_id)
-        logger.info(f"Cancelled {cancelled} orders for {token_id[:20]}...")
+        if reason:
+            logger.info(
+                f"Cancelled {cancelled} orders for {token_id[:20]}... (reason: {reason})"
+            )
+        else:
+            logger.info(f"Cancelled {cancelled} orders for {token_id[:20]}...")
 
         market = self._markets.get(token_id)
         if market:
@@ -2037,11 +2075,11 @@ class ActiveQuotingBot:
                 logger.warning(f"WIND-DOWN ENTRY {market_name}: Cancelling all orders for market pair")
 
                 # Cancel orders for this token
-                await self._cancel_market_quotes(token_id)
+                await self._cancel_market_quotes(token_id, reason="wind_down_entry")
 
                 # Cancel orders for paired token too
                 if wind_down.paired_token_id:
-                    await self._cancel_market_quotes(wind_down.paired_token_id)
+                    await self._cancel_market_quotes(wind_down.paired_token_id, reason="wind_down_entry")
 
                 self._wind_down_orders_cancelled.add(condition_id)
 
@@ -2056,7 +2094,7 @@ class ActiveQuotingBot:
             # Cancel any existing quotes
             market = self._markets.get(token_id)
             if market and market.is_quoting:
-                await self._cancel_market_quotes(token_id)
+                await self._cancel_market_quotes(token_id, reason="wind_down_taker_exit")
 
             # Check if taker exit already executed for this market pair
             condition_id = self.risk_manager._token_to_condition.get(token_id)
