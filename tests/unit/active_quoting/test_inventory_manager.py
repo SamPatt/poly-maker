@@ -10,6 +10,7 @@ from rebates.active_quoting.inventory_manager import (
     InventoryLimits,
     TrackedPosition,
     PendingFill,
+    PositionSource,
     PENDING_FILL_AGE_OUT_SECONDS,
     PENDING_FILL_MAX_AGE_SECONDS,
 )
@@ -1538,3 +1539,104 @@ class TestPhase3ConservativeBuyLimits:
         # At limit, should return 0
         adjusted = manager.get_adjusted_order_size("token1", OrderSide.BUY, 10)
         assert adjusted == 0.0
+
+
+# =============================================================================
+# Phase 2: Position Source Tracking Tests
+# =============================================================================
+
+
+class TestPositionSourceTracking:
+    """Tests for Phase 2 position source tracking (on-chain vs API)."""
+
+    def test_position_source_default_is_unknown(self, manager):
+        """New positions should have UNKNOWN source."""
+        pos = manager.get_position("token1")
+        assert pos.confirmed_source == PositionSource.UNKNOWN
+
+    def test_set_position_with_api_source(self, manager):
+        """set_position with API source should track it."""
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50, source=PositionSource.API)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 50.0
+        assert pos.confirmed_source == PositionSource.API
+
+    def test_set_position_with_onchain_source(self, manager):
+        """set_position with ONCHAIN source should track it."""
+        manager.set_position("token1", size=100.0, avg_entry_price=0.45, source=PositionSource.ONCHAIN)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_size == 100.0
+        assert pos.confirmed_source == PositionSource.ONCHAIN
+
+    def test_set_position_default_source_is_api(self, manager):
+        """set_position without source should default to API."""
+        manager.set_position("token1", size=25.0, avg_entry_price=0.60)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_source == PositionSource.API
+
+    def test_source_updated_on_subsequent_sync(self, manager):
+        """Source should update when position is synced again."""
+        # First sync from API
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50, source=PositionSource.API)
+        assert manager.get_position("token1").confirmed_source == PositionSource.API
+
+        # Second sync from on-chain
+        manager.set_position("token1", size=60.0, avg_entry_price=0.50, source=PositionSource.ONCHAIN)
+        assert manager.get_position("token1").confirmed_source == PositionSource.ONCHAIN
+
+    def test_summary_includes_confirmed_source(self, manager):
+        """get_summary should include confirmed_source."""
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50, source=PositionSource.ONCHAIN)
+
+        summary = manager.get_summary()
+        assert "token1" in summary
+        assert summary["token1"]["confirmed_source"] == "onchain"
+
+    def test_source_preserved_during_fill_updates(self, manager):
+        """Position source should be preserved when fills are added."""
+        # Set position from on-chain
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50, source=PositionSource.ONCHAIN)
+
+        # Add a WebSocket fill
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.52,
+            size=10.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        # Source should still be on-chain (fills don't change confirmed_source)
+        pos = manager.get_position("token1")
+        assert pos.confirmed_source == PositionSource.ONCHAIN
+        assert pos.confirmed_size == 50.0  # Unchanged
+        assert pos.effective_size == 60.0  # Includes pending
+
+    def test_reconciliation_preserves_source(self, manager):
+        """Reconciliation from same source should keep the source."""
+        # Initial sync from on-chain
+        manager.set_position("token1", size=50.0, avg_entry_price=0.50, source=PositionSource.ONCHAIN)
+
+        # Add pending fill
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.52,
+            size=10.0,
+            trade_id="fill1",
+        )
+        manager.update_from_fill(fill)
+
+        # Reconcile from on-chain again (fill absorbed)
+        manager.set_position("token1", size=60.0, avg_entry_price=0.51, source=PositionSource.ONCHAIN)
+
+        pos = manager.get_position("token1")
+        assert pos.confirmed_source == PositionSource.ONCHAIN
+        assert pos.confirmed_size == 60.0
+        assert len(pos.pending_fills) == 0  # Absorbed

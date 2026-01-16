@@ -12,6 +12,11 @@ Phase 2: Dual Tracking Architecture
 - pending_fills: WebSocket fills not yet confirmed by API (tracked by trade_id)
 - effective_size: confirmed_size + pending_fill_buys - pending_fill_sells
 
+Phase 2 On-Chain Inventory:
+- confirmed_size can now come from on-chain ERC-1155 balances (authoritative)
+- REST API becomes fallback when on-chain provider is unavailable
+- confirmed_source tracks whether position came from "onchain" or "api"
+
 Phase 3: Conservative Buy Limit Checks
 - Buy limits use conservative_exposure = confirmed + pending_fill_buys + pending_order_buys
 - This prevents exceeding position limits even with rapid WS fills before API sync
@@ -20,10 +25,18 @@ Phase 3: Conservative Buy Limit Checks
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Dict, Optional
 
 from .config import ActiveQuotingConfig
 from .models import Fill, Position, OrderSide
+
+
+class PositionSource(Enum):
+    """Source of the confirmed position data."""
+    UNKNOWN = "unknown"  # Initial state or unset
+    API = "api"  # REST API sync
+    ONCHAIN = "onchain"  # On-chain ERC-1155 balance
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +80,18 @@ class PendingFill:
 @dataclass
 class TrackedPosition:
     """
-    Position with dual tracking: confirmed (API) and pending (WebSocket) fills.
+    Position with dual tracking: confirmed (API/on-chain) and pending (WebSocket) fills.
 
     The effective_size property combines both to give the best estimate of
-    actual position, while confirmed_size is the last known API snapshot.
+    actual position, while confirmed_size is the last known authoritative snapshot.
+
+    Phase 2: confirmed_source tracks whether the position came from on-chain or API.
     """
     token_id: str
     confirmed_size: float = 0.0
     confirmed_avg_price: float = 0.0  # Avg entry price from API
     confirmed_at: Optional[datetime] = None
+    confirmed_source: PositionSource = PositionSource.UNKNOWN  # Phase 2: track source
     pending_fills: Dict[str, PendingFill] = field(default_factory=dict)
     # Legacy Position fields for compatibility
     realized_pnl: float = 0.0
@@ -622,39 +638,44 @@ class InventoryManager:
         self,
         token_id: str,
         size: float,
-        avg_entry_price: float = 0.5
+        avg_entry_price: float = 0.5,
+        source: PositionSource = PositionSource.API,
     ) -> None:
         """
-        Set confirmed position from API sync.
+        Set confirmed position from API or on-chain sync.
 
         Phase 2: Updates confirmed_size and reconciles pending fills.
-        Pending fills that have been absorbed by the API position change
+        Pending fills that have been absorbed by the position change
         are removed (oldest first).
 
         Args:
             token_id: Token ID
-            size: Position size from API
-            avg_entry_price: Average entry price from API
+            size: Position size from authoritative source
+            avg_entry_price: Average entry price (from API or estimated)
+            source: Source of the position data (API or ONCHAIN)
         """
         position = self.get_position(token_id)
         old_confirmed = position.confirmed_size
+        old_source = position.confirmed_source
 
-        # Calculate how much the API position absorbed
+        # Calculate how much the position absorbed
         absorbed = size - old_confirmed
 
         # Update confirmed position
         position.confirmed_size = size
         position.confirmed_avg_price = avg_entry_price
         position.confirmed_at = datetime.utcnow()
+        position.confirmed_source = source
 
-        # Reconcile pending fills against API change
+        # Reconcile pending fills against position change
         self._reconcile_pending_fills(position, absorbed)
 
         # Age out old pending fills
         self._age_out_pending_fills(position)
 
+        source_label = source.value if source != PositionSource.UNKNOWN else "unknown"
         logger.debug(
-            f"Position confirmed from API: {token_id[:20]}... "
+            f"Position confirmed from {source_label}: {token_id[:20]}... "
             f"confirmed={size:.2f}, pending_delta={position.pending_delta:+.2f}, "
             f"effective={position.effective_size:.2f}"
         )
@@ -853,6 +874,7 @@ class InventoryManager:
             token_id: {
                 "size": pos.effective_size,
                 "confirmed_size": pos.confirmed_size,
+                "confirmed_source": pos.confirmed_source.value,
                 "pending_delta": pos.pending_delta,
                 "pending_fills_count": len(pos.pending_fills),
                 "avg_entry": pos.avg_entry_price,

@@ -42,7 +42,8 @@ from .orderbook_manager import OrderbookManager
 from .user_channel_manager import UserChannelManager
 from .quote_engine import QuoteEngine, QuoteAction
 from .order_manager import OrderManager
-from .inventory_manager import InventoryManager
+from .inventory_manager import InventoryManager, PositionSource
+from .onchain_position_provider import OnChainPositionProvider
 from .momentum_detector import MomentumDetector
 from .risk_manager import RiskManager, CircuitBreakerState, HaltReason
 from .fill_analytics import FillAnalytics
@@ -227,6 +228,12 @@ class ActiveQuotingBot:
         # Core managers
         self.inventory_manager = InventoryManager(self.config)
 
+        # On-chain position provider (Phase 2)
+        # Initialized lazily when on-chain sync is enabled
+        self._onchain_provider: Optional[OnChainPositionProvider] = None
+        self._onchain_degraded: bool = False  # True when on-chain is unavailable, using API fallback
+        self._last_onchain_sync: float = 0.0  # Last on-chain sync timestamp
+
         self.quote_engine = QuoteEngine(
             config=self.config,
             inventory_manager=self.inventory_manager,
@@ -370,10 +377,15 @@ class ActiveQuotingBot:
                             f"discrepancy={discrepancy:+.2f}, pending_orders={pending_buys:.0f}"
                         )
 
-                    # API is source of truth - always sync position
+                    # API is source of truth (fallback when on-chain not enabled)
                     # No blocking for pending_buys - that caused deadlock where
                     # pending wasn't cleared because sync was blocked
-                    self.inventory_manager.set_position(token_id, size, avg_price)
+                    self.inventory_manager.set_position(
+                        token_id,
+                        size,
+                        avg_price,
+                        source=PositionSource.API,
+                    )
 
                     # Clear pending buys since API position already reflects fills
                     # This prevents double-counting filled orders as both position AND pending
@@ -407,6 +419,168 @@ class ActiveQuotingBot:
             logger.error(f"Error syncing positions from API: {e}")
             return 0
 
+    def _ensure_onchain_provider(self) -> Optional[OnChainPositionProvider]:
+        """
+        Lazily initialize the on-chain position provider.
+
+        Returns:
+            OnChainPositionProvider if initialized successfully, None otherwise
+        """
+        if not self.config.onchain_enabled:
+            return None
+
+        if self._onchain_provider is not None:
+            return self._onchain_provider
+
+        if not self._poly_client:
+            logger.warning("No poly_client available, cannot initialize on-chain provider")
+            return None
+
+        try:
+            wallet_address = self._poly_client.browser_wallet
+            if not wallet_address:
+                logger.error("No wallet address available for on-chain provider")
+                return None
+
+            self._onchain_provider = OnChainPositionProvider(
+                wallet_address=wallet_address,
+                rpc_url=self.config.onchain_provider_url,
+                timeout_seconds=self.config.onchain_sync_timeout_seconds,
+            )
+            logger.info(
+                f"On-chain position provider initialized: "
+                f"wallet={wallet_address[:10]}..., rpc={self.config.onchain_provider_url}"
+            )
+            return self._onchain_provider
+
+        except Exception as e:
+            logger.error(f"Failed to initialize on-chain provider: {e}")
+            return None
+
+    async def _sync_positions_from_chain(self, token_ids: Set[str]) -> int:
+        """
+        Sync positions from on-chain ERC-1155 balances (Phase 2).
+
+        This fetches actual token balances from the Polygon blockchain
+        and updates the inventory manager with on-chain as the authoritative source.
+
+        Falls back to API sync if on-chain provider is unavailable.
+
+        Args:
+            token_ids: Set of token IDs to sync positions for
+
+        Returns:
+            Number of positions synced (or -1 if fell back to API)
+        """
+        provider = self._ensure_onchain_provider()
+        if provider is None:
+            # On-chain not enabled or failed to initialize - fall back to API
+            if self.config.onchain_enabled:
+                logger.warning("On-chain provider unavailable, falling back to API sync")
+                self._onchain_degraded = True
+            return await self._sync_positions_from_api(token_ids)
+
+        try:
+            # Fetch on-chain balances
+            result = provider.fetch_balances(list(token_ids))
+
+            if not result.success:
+                logger.error(f"On-chain sync failed: {result.error}")
+                self._onchain_degraded = True
+                # Fall back to API
+                logger.warning("Falling back to API sync due to on-chain failure")
+                return await self._sync_positions_from_api(token_ids)
+
+            # On-chain sync succeeded - clear degraded flag
+            if self._onchain_degraded:
+                logger.info("On-chain sync recovered from degraded state")
+                self._onchain_degraded = False
+
+            synced_count = 0
+            for token_id in token_ids:
+                old_position = self.inventory_manager.get_position(token_id)
+                old_confirmed = old_position.confirmed_size
+
+                # Get on-chain balance
+                if token_id in result.balances:
+                    onchain_balance = result.balances[token_id].balance
+                else:
+                    onchain_balance = 0.0
+
+                # Log discrepancies between on-chain and effective_size (for debugging)
+                effective = old_position.effective_size
+                if self.config.onchain_log_discrepancies and abs(effective - onchain_balance) > 0.01:
+                    logger.info(
+                        f"On-chain vs effective discrepancy for {token_id[:20]}...: "
+                        f"onchain={onchain_balance:.2f}, effective={effective:.2f}, "
+                        f"confirmed={old_confirmed:.2f}, pending_delta={old_position.pending_delta:+.2f}"
+                    )
+
+                # Only update if on-chain balance differs from confirmed
+                if abs(onchain_balance - old_confirmed) >= 0.01:
+                    pending_buys = self.inventory_manager.get_pending_buy_size(token_id)
+
+                    # Use on-chain balance as confirmed_size
+                    # Note: On-chain doesn't give us avg_entry_price, so preserve existing or use 0.5
+                    avg_price = old_position.confirmed_avg_price if old_position.confirmed_avg_price > 0 else 0.5
+
+                    self.inventory_manager.set_position(
+                        token_id,
+                        onchain_balance,
+                        avg_price,
+                        source=PositionSource.ONCHAIN,
+                    )
+
+                    # Clear pending buys since on-chain position reflects filled orders
+                    self.inventory_manager.clear_pending_buys(token_id)
+
+                    # Persist to DB
+                    if self.persistence.is_enabled:
+                        position = self.inventory_manager.get_position(token_id)
+                        if onchain_balance > 0:
+                            self.persistence.save_position(position)
+                        else:
+                            self.persistence.clear_position(token_id)
+
+                    # Log significant changes
+                    if abs(onchain_balance - old_confirmed) >= 1.0:
+                        logger.info(
+                            f"Position synced from on-chain for {token_id[:20]}...: "
+                            f"{old_confirmed:.0f} -> {onchain_balance:.0f} shares (block={result.block_number})"
+                        )
+                    synced_count += 1
+
+            if synced_count > 0:
+                logger.debug(
+                    f"Synced {synced_count} position updates from on-chain "
+                    f"(block={result.block_number}, {result.duration_ms:.0f}ms)"
+                )
+            return synced_count
+
+        except Exception as e:
+            logger.error(f"Error syncing positions from on-chain: {e}")
+            self._onchain_degraded = True
+            # Fall back to API
+            logger.warning("Falling back to API sync due to on-chain error")
+            return await self._sync_positions_from_api(token_ids)
+
+    async def _sync_positions(self, token_ids: Set[str]) -> int:
+        """
+        Sync positions using the appropriate source (on-chain or API).
+
+        Phase 2: Uses on-chain sync when AQ_ONCHAIN_ENABLED=true,
+        falls back to API sync when on-chain is unavailable.
+
+        Args:
+            token_ids: Set of token IDs to sync positions for
+
+        Returns:
+            Number of positions synced
+        """
+        if self.config.onchain_enabled:
+            return await self._sync_positions_from_chain(token_ids)
+        else:
+            return await self._sync_positions_from_api(token_ids)
 
     async def _reconcile_orders(self) -> None:
         """
@@ -585,9 +759,9 @@ class ActiveQuotingBot:
             for token_id, (start_time, end_time) in market_times.items():
                 self._market_end_times[token_id] = end_time
 
-        # Sync positions from Polymarket API (authoritative source)
+        # Sync positions from authoritative source (on-chain when enabled, else API)
         # This ensures we know about positions from previous sessions or manual trades
-        await self._sync_positions_from_api(self._active_tokens)
+        await self._sync_positions(self._active_tokens)
 
         # Load from database for additional state (realized PnL, fees)
         # NOTE: API is authoritative for position SIZE - DB is only for metadata
@@ -965,11 +1139,16 @@ class ActiveQuotingBot:
 
         while self._running:
             try:
-                # Periodic position sync from REST API (fallback for WebSocket fill issues)
+                # Periodic position sync (on-chain when enabled, else API)
                 # This ensures we have accurate position data even if fills aren't received
                 now = time.time()
-                if now - self._last_position_sync >= self._position_sync_interval:
-                    await self._sync_positions_from_api(self._active_tokens)
+                sync_interval = (
+                    self.config.onchain_sync_interval_seconds
+                    if self.config.onchain_enabled
+                    else self._position_sync_interval
+                )
+                if now - self._last_position_sync >= sync_interval:
+                    await self._sync_positions(self._active_tokens)
                     self._last_position_sync = now
 
                 # Periodic order reconciliation to catch missed WebSocket messages
@@ -1402,7 +1581,7 @@ class ActiveQuotingBot:
         )
 
         await self._cancel_market_quotes(token_id)
-        await self._sync_positions_from_api({token_id})
+        await self._sync_positions({token_id})
 
     def _maybe_log_market_performance(self, force: bool = False) -> bool:
         """Log per-market performance at a fixed interval."""
@@ -1462,16 +1641,22 @@ class ActiveQuotingBot:
 
     async def _check_inventory_discrepancy(self, token_id: str) -> bool:
         """
-        Halt quoting if inventory discrepancy persists beyond threshold.
+        Check for inventory discrepancy and handle based on mode.
+
+        Phase 2 (on-chain enabled): Log discrepancies but do NOT halt quoting.
+        Legacy (API only): Halt quoting if discrepancy persists beyond threshold.
 
         Returns:
-            True if quoting should be halted for this token.
+            True if quoting should be halted for this token (Phase 2: always False).
         """
         now = datetime.utcnow()
         position = self.inventory_manager.get_position(token_id)
         discrepancy = position.effective_size - position.confirmed_size
         abs_discrepancy = abs(discrepancy)
         threshold = self.config.inventory_discrepancy_threshold
+
+        # Phase 2: When on-chain is enabled, never halt - just log and reconcile
+        phase2_mode = self.config.onchain_enabled
 
         if abs_discrepancy < threshold:
             state = self._inventory_discrepancy_states.get(token_id)
@@ -1485,7 +1670,8 @@ class ActiveQuotingBot:
                 logger.info(
                     f"Inventory discrepancy cleared for {token_id[:20]}... "
                     f"(confirmed={position.confirmed_size:.2f}, "
-                    f"effective={position.effective_size:.2f})"
+                    f"effective={position.effective_size:.2f}, "
+                    f"source={position.confirmed_source.value})"
                 )
             self._clear_inventory_discrepancy_state(token_id)
             return False
@@ -1506,24 +1692,37 @@ class ActiveQuotingBot:
             details = {
                 "token_id": token_id,
                 "confirmed_size": round(position.confirmed_size, 4),
+                "confirmed_source": position.confirmed_source.value,
                 "effective_size": round(position.effective_size, 4),
                 "pending_delta": round(position.pending_delta, 4),
                 "pending_fills": len(position.pending_fills),
                 "discrepancy": round(discrepancy, 4),
                 "threshold": threshold,
                 "duration_seconds": round(duration, 2),
+                "phase2_mode": phase2_mode,
             }
-            logger.warning(f"Inventory discrepancy halt: {details}")
 
-            if self._enable_alerts:
-                market_name = self._market_names.get(token_id, token_id[:20] + "...")
-                reason = (
-                    f"Inventory discrepancy {discrepancy:+.2f} "
-                    f"for {duration:.0f}s (threshold {threshold:.2f})"
-                )
-                send_active_quoting_market_halt_alert(market_name, reason)
+            if phase2_mode:
+                # Phase 2: Log only, no halt
+                logger.warning(f"Inventory discrepancy (Phase 2 - no halt): {details}")
+            else:
+                # Legacy: Log and halt
+                logger.warning(f"Inventory discrepancy halt: {details}")
+                if self._enable_alerts:
+                    market_name = self._market_names.get(token_id, token_id[:20] + "...")
+                    reason = (
+                        f"Inventory discrepancy {discrepancy:+.2f} "
+                        f"for {duration:.0f}s (threshold {threshold:.2f})"
+                    )
+                    send_active_quoting_market_halt_alert(market_name, reason)
 
+        # Always attempt reconciliation
         await self._reconcile_inventory_discrepancy(token_id, state)
+
+        # Phase 2: Never halt quoting, on-chain sync will eventually resolve
+        if phase2_mode:
+            return False
+
         return True
 
     async def _reconcile_inventory_discrepancy(
@@ -1531,7 +1730,7 @@ class ActiveQuotingBot:
         token_id: str,
         state: InventoryDiscrepancyState,
     ) -> None:
-        """Force reconciliation steps while a discrepancy halt is active."""
+        """Force reconciliation steps while a discrepancy is active."""
         now = datetime.utcnow()
         if state.last_reconcile is not None:
             elapsed = (now - state.last_reconcile).total_seconds()
@@ -1540,7 +1739,8 @@ class ActiveQuotingBot:
 
         state.last_reconcile = now
         await self._reconcile_orders()
-        await self._sync_positions_from_api({token_id})
+        # Use on-chain sync when enabled, otherwise API
+        await self._sync_positions({token_id})
 
     # --- Markout Processing ---
 

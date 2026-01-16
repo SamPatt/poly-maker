@@ -1896,6 +1896,260 @@ class TestReconcilePendingBuysLogic:
         bot._active_tokens = {"token_1"}
         
         await bot._reconcile_orders()
-        
+
         # Remaining unfilled is 100 - 20 = 80
         assert bot.inventory_manager.get_pending_buy_size("token_1") == 80.0
+
+
+# =============================================================================
+# Phase 2: On-Chain Sync Tests
+# =============================================================================
+
+
+class TestPhase2OnChainSync:
+    """Tests for Phase 2 on-chain position sync functionality."""
+
+    @pytest.fixture
+    def onchain_config(self):
+        """Config with on-chain enabled."""
+        return ActiveQuotingConfig(
+            order_size_usdc=10.0,
+            dry_run=True,
+            onchain_enabled=True,
+            onchain_provider_url="https://polygon-rpc.com",
+            onchain_sync_interval_seconds=5.0,
+            onchain_sync_timeout_seconds=10.0,
+            onchain_log_discrepancies=True,
+        )
+
+    @pytest.fixture
+    def onchain_bot(self, onchain_config, valid_orderbook):
+        """Create bot with on-chain enabled."""
+        bot = ActiveQuotingBot(
+            config=onchain_config,
+            api_key="test_key",
+            api_secret="test_secret",
+            api_passphrase="test_passphrase",
+            enable_persistence=False,
+            enable_alerts=False,
+        )
+
+        # Mock components
+        bot.orderbook_manager = MagicMock()
+        bot.orderbook_manager.get_orderbook = MagicMock(return_value=valid_orderbook)
+        bot.user_channel_manager = MagicMock()
+        bot.order_manager.close = AsyncMock()
+        bot.order_manager.cancel_all = AsyncMock(return_value=0)
+
+        return bot
+
+    @pytest.mark.asyncio
+    async def test_sync_positions_uses_chain_when_enabled(self, onchain_bot):
+        """_sync_positions should use on-chain sync when enabled."""
+        onchain_bot._sync_positions_from_chain = AsyncMock(return_value=2)
+        onchain_bot._sync_positions_from_api = AsyncMock(return_value=1)
+
+        result = await onchain_bot._sync_positions({"token1", "token2"})
+
+        onchain_bot._sync_positions_from_chain.assert_called_once()
+        onchain_bot._sync_positions_from_api.assert_not_called()
+        assert result == 2
+
+    @pytest.mark.asyncio
+    async def test_sync_positions_uses_api_when_disabled(self, bot):
+        """_sync_positions should use API sync when on-chain disabled."""
+        bot._sync_positions_from_chain = AsyncMock(return_value=2)
+        bot._sync_positions_from_api = AsyncMock(return_value=1)
+
+        result = await bot._sync_positions({"token1", "token2"})
+
+        bot._sync_positions_from_api.assert_called_once()
+        bot._sync_positions_from_chain.assert_not_called()
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_sync_from_chain_falls_back_on_failure(self, onchain_bot):
+        """On-chain sync should fall back to API on failure."""
+        from rebates.active_quoting.onchain_position_provider import OnChainSyncResult
+
+        # Mock provider that fails
+        mock_provider = MagicMock()
+        mock_provider.fetch_balances.return_value = OnChainSyncResult(
+            balances={},
+            success=False,
+            error="RPC error",
+        )
+        onchain_bot._onchain_provider = mock_provider
+        onchain_bot._sync_positions_from_api = AsyncMock(return_value=1)
+
+        result = await onchain_bot._sync_positions_from_chain({"token1"})
+
+        assert onchain_bot._onchain_degraded is True
+        onchain_bot._sync_positions_from_api.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sync_from_chain_updates_position_with_onchain_source(self, onchain_bot):
+        """On-chain sync should set position with ONCHAIN source."""
+        from rebates.active_quoting.onchain_position_provider import (
+            OnChainSyncResult,
+            OnChainBalance,
+        )
+        from rebates.active_quoting.inventory_manager import PositionSource
+        from datetime import datetime
+
+        # Mock provider with successful result
+        mock_provider = MagicMock()
+        mock_provider.fetch_balances.return_value = OnChainSyncResult(
+            balances={
+                "token1": OnChainBalance(
+                    token_id="token1",
+                    balance=50.0,
+                    raw_balance=50_000_000,
+                    fetched_at=datetime.utcnow(),
+                    block_number=12345,
+                )
+            },
+            success=True,
+            block_number=12345,
+            duration_ms=100.0,
+        )
+        onchain_bot._onchain_provider = mock_provider
+        onchain_bot._poly_client = MagicMock()
+        onchain_bot._poly_client.browser_wallet = "0x1234567890123456789012345678901234567890"
+        onchain_bot._active_tokens = {"token1"}
+
+        await onchain_bot._sync_positions_from_chain({"token1"})
+
+        pos = onchain_bot.inventory_manager.get_position("token1")
+        assert pos.confirmed_size == 50.0
+        assert pos.confirmed_source == PositionSource.ONCHAIN
+
+
+class TestPhase2DiscrepancyHandling:
+    """Tests for Phase 2 discrepancy handling (no halt mode)."""
+
+    @pytest.fixture
+    def onchain_config(self):
+        """Config with on-chain enabled."""
+        return ActiveQuotingConfig(
+            order_size_usdc=10.0,
+            dry_run=True,
+            onchain_enabled=True,
+            inventory_discrepancy_threshold=2.0,
+            inventory_discrepancy_duration_seconds=0.001,  # Near-immediate for testing
+        )
+
+    @pytest.fixture
+    def onchain_bot(self, onchain_config, valid_orderbook):
+        """Create bot with on-chain enabled."""
+        bot = ActiveQuotingBot(
+            config=onchain_config,
+            api_key="test_key",
+            api_secret="test_secret",
+            api_passphrase="test_passphrase",
+            enable_persistence=False,
+            enable_alerts=False,
+        )
+        bot.orderbook_manager = MagicMock()
+        bot.orderbook_manager.get_orderbook = MagicMock(return_value=valid_orderbook)
+        bot.user_channel_manager = MagicMock()
+        bot.order_manager.close = AsyncMock()
+        return bot
+
+    @pytest.mark.asyncio
+    async def test_discrepancy_does_not_halt_in_phase2(self, onchain_bot):
+        """In Phase 2 (on-chain enabled), discrepancy should not halt quoting."""
+        from rebates.active_quoting.models import Fill, OrderSide
+        import time
+
+        # Set confirmed position
+        onchain_bot.inventory_manager.set_position("token1", 50.0, 0.5)
+
+        # Add pending fill to create discrepancy
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,  # Creates discrepancy of 10 > threshold 2
+            trade_id="fill1",
+        )
+        onchain_bot.inventory_manager.update_from_fill(fill)
+
+        # Mock reconciliation
+        onchain_bot._reconcile_orders = AsyncMock()
+        onchain_bot._sync_positions = AsyncMock()
+
+        # First call sets first_seen, second call after duration threshold triggers action
+        await onchain_bot._check_inventory_discrepancy("token1")
+        time.sleep(0.002)  # Wait longer than duration threshold (0.001s)
+        should_halt = await onchain_bot._check_inventory_discrepancy("token1")
+
+        assert should_halt is False  # Phase 2: no halt
+
+    @pytest.mark.asyncio
+    async def test_discrepancy_still_halts_without_onchain(self, bot):
+        """Without on-chain enabled, discrepancy should still halt quoting."""
+        from rebates.active_quoting.models import Fill, OrderSide
+        import time
+
+        # Make duration near-immediate for testing
+        bot.config.inventory_discrepancy_duration_seconds = 0.001
+
+        # Set confirmed position
+        bot.inventory_manager.set_position("token1", 50.0, 0.5)
+
+        # Add pending fill to create discrepancy
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,  # Creates discrepancy of 10 > threshold 2
+            trade_id="fill1",
+        )
+        bot.inventory_manager.update_from_fill(fill)
+
+        # Mock reconciliation
+        bot._reconcile_orders = AsyncMock()
+        bot._sync_positions_from_api = AsyncMock()
+
+        # First call sets first_seen, second call after duration threshold triggers action
+        await bot._check_inventory_discrepancy("token1")
+        time.sleep(0.002)  # Wait longer than duration threshold (0.001s)
+        should_halt = await bot._check_inventory_discrepancy("token1")
+
+        assert should_halt is True  # Legacy: halt
+
+    @pytest.mark.asyncio
+    async def test_discrepancy_triggers_reconciliation_in_phase2(self, onchain_bot):
+        """Phase 2 should still trigger reconciliation on discrepancy."""
+        from rebates.active_quoting.models import Fill, OrderSide
+        import time
+
+        # Set confirmed position
+        onchain_bot.inventory_manager.set_position("token1", 50.0, 0.5)
+
+        # Add pending fill
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        onchain_bot.inventory_manager.update_from_fill(fill)
+
+        # Mock reconciliation
+        onchain_bot._reconcile_orders = AsyncMock()
+        onchain_bot._sync_positions = AsyncMock()
+
+        # First call sets first_seen, second call after duration threshold triggers action
+        await onchain_bot._check_inventory_discrepancy("token1")
+        time.sleep(0.002)  # Wait longer than duration threshold (0.001s)
+        await onchain_bot._check_inventory_discrepancy("token1")
+
+        # Reconciliation should still be triggered
+        onchain_bot._reconcile_orders.assert_called_once()
+        onchain_bot._sync_positions.assert_called_once()
