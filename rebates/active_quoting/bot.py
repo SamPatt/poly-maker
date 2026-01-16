@@ -106,6 +106,27 @@ class InventoryDiscrepancyState:
     active: bool = False
 
 
+@dataclass
+class DegradeState:
+    """
+    Track degrade mode state for Phase 3.
+
+    When on-chain is healthy but discrepancy persists beyond threshold,
+    we enter degrade mode instead of halting. In degrade mode:
+    - Size is reduced by a multiplier
+    - Only quote the side that reduces inventory
+    - Quotes are widened by extra ticks
+    """
+    active: bool = False
+    since: Optional[datetime] = None
+    last_log: Optional[datetime] = None
+    reason: str = ""
+    # Snapshot of state when degrade was activated
+    discrepancy: float = 0.0
+    confirmed_size: float = 0.0
+    effective_size: float = 0.0
+
+
 class ActiveQuotingBot:
     """
     Main orchestration class for active two-sided quoting.
@@ -199,6 +220,9 @@ class ActiveQuotingBot:
 
         # Inventory discrepancy halts (Phase 7)
         self._inventory_discrepancy_states: Dict[str, InventoryDiscrepancyState] = {}
+
+        # Degrade mode states (Phase 3: On-Chain Inventory)
+        self._degrade_states: Dict[str, DegradeState] = {}
 
         # Per-market performance tracking
         self._order_reject_counts: Dict[str, int] = {}
@@ -1328,16 +1352,55 @@ class ActiveQuotingBot:
         buy_size *= multiplier
         sell_size *= multiplier
 
+        # Phase 3: Apply degrade mode adjustments
+        bid_price = quote.bid_price
+        ask_price = quote.ask_price
+        degrade_state = self._degrade_states.get(token_id)
+        if degrade_state and degrade_state.active:
+            # Apply size reduction
+            buy_size *= self.config.degrade_size_multiplier
+            sell_size *= self.config.degrade_size_multiplier
+
+            # Enforce minimum size floor
+            min_degrade_size = self.config.degrade_min_size_usdc
+            if buy_size > 0 and buy_size < min_degrade_size:
+                buy_size = min_degrade_size
+            if sell_size > 0 and sell_size < min_degrade_size:
+                sell_size = min_degrade_size
+
+            # One-sided quoting: only quote the side that reduces inventory
+            if self.config.degrade_one_sided:
+                position = self.inventory_manager.get_position(token_id)
+                effective = position.effective_size
+                if effective > 0:
+                    # Long position: only sell to reduce
+                    buy_size = 0
+                elif effective < 0:
+                    # Short position: only buy to reduce
+                    sell_size = 0
+                # If position is 0, allow both sides
+
+            # Widen quotes by degrade_widen_ticks
+            if self.config.degrade_widen_ticks > 0:
+                orderbook = self.orderbook_manager.get_orderbook(token_id)
+                tick_size = orderbook.tick_size if orderbook else 0.01
+                widen_amount = self.config.degrade_widen_ticks * tick_size
+                bid_price = bid_price - widen_amount
+                ask_price = ask_price + widen_amount
+                # Clamp to valid range
+                bid_price = max(bid_price, tick_size)
+                ask_price = min(ask_price, 1.0 - tick_size)
+
         # Check if we have meaningful sizes
         min_size = 5.0  # Polymarket minimum is 5 shares
         if buy_size < min_size and sell_size < min_size:
             return
 
-        # Adjust quote with new sizes
+        # Adjust quote with new sizes and potentially widened prices
         adjusted_quote = Quote(
             token_id=quote.token_id,
-            bid_price=quote.bid_price,
-            ask_price=quote.ask_price,
+            bid_price=bid_price,
+            ask_price=ask_price,
             bid_size=max(buy_size, min_size) if buy_size >= min_size else 0,
             ask_size=max(sell_size, min_size) if sell_size >= min_size else 0,
             timestamp=quote.timestamp,
@@ -1638,15 +1701,81 @@ class ActiveQuotingBot:
         if token_id in self._inventory_discrepancy_states:
             self._inventory_discrepancy_states[token_id] = InventoryDiscrepancyState()
 
+    def _get_degrade_state(self, token_id: str) -> DegradeState:
+        """Get or initialize degrade mode state for a token."""
+        if token_id not in self._degrade_states:
+            self._degrade_states[token_id] = DegradeState()
+        return self._degrade_states[token_id]
+
+    def _clear_degrade_state(self, token_id: str) -> None:
+        """Clear degrade mode state for a token with logging."""
+        state = self._degrade_states.get(token_id)
+        if state and state.active:
+            duration = (datetime.utcnow() - state.since).total_seconds() if state.since else 0
+            logger.info(
+                f"Degrade mode cleared for {token_id[:20]}... "
+                f"(was active for {duration:.1f}s, reason: {state.reason})"
+            )
+        if token_id in self._degrade_states:
+            self._degrade_states[token_id] = DegradeState()
+
+    def _is_in_degrade_mode(self, token_id: str) -> bool:
+        """Check if a token is in degrade mode."""
+        state = self._degrade_states.get(token_id)
+        return state is not None and state.active
+
+    def _activate_degrade_mode(
+        self,
+        token_id: str,
+        reason: str,
+        discrepancy: float,
+        confirmed_size: float,
+        effective_size: float,
+    ) -> None:
+        """Activate degrade mode for a token with logging."""
+        state = self._get_degrade_state(token_id)
+        now = datetime.utcnow()
+
+        if not state.active:
+            # First activation - log detailed info
+            state.active = True
+            state.since = now
+            state.reason = reason
+            state.discrepancy = discrepancy
+            state.confirmed_size = confirmed_size
+            state.effective_size = effective_size
+            state.last_log = now
+
+            rules_applied = []
+            if self.config.degrade_one_sided:
+                direction = "SELL-only" if effective_size > 0 else "BUY-only"
+                rules_applied.append(direction)
+            rules_applied.append(f"size×{self.config.degrade_size_multiplier}")
+            if self.config.degrade_widen_ticks > 0:
+                rules_applied.append(f"+{self.config.degrade_widen_ticks} tick(s)")
+
+            logger.warning(
+                f"Entering degrade mode for {token_id[:20]}... | "
+                f"discrepancy={discrepancy:+.2f} confirmed={confirmed_size:.2f} "
+                f"effective={effective_size:.2f} | rules: {', '.join(rules_applied)}"
+            )
+        else:
+            # Update snapshot but don't spam logs
+            state.discrepancy = discrepancy
+            state.confirmed_size = confirmed_size
+            state.effective_size = effective_size
+
     async def _check_inventory_discrepancy(self, token_id: str) -> bool:
         """
         Check for inventory discrepancy and handle based on mode.
 
+        Phase 3 (on-chain enabled): Activate degrade mode instead of halting.
         Phase 2 (on-chain enabled): Log discrepancies but do NOT halt quoting.
-        Legacy (API only): Halt quoting if discrepancy persists beyond threshold.
+        Legacy (API only / on-chain degraded): Halt quoting if discrepancy persists.
 
         Returns:
-            True if quoting should be halted for this token (Phase 2: always False).
+            True if quoting should be halted for this token.
+            Phase 3 with on-chain healthy: always False (degrade mode instead).
         """
         now = datetime.utcnow()
         position = self.inventory_manager.get_position(token_id)
@@ -1654,9 +1783,9 @@ class ActiveQuotingBot:
         abs_discrepancy = abs(discrepancy)
         threshold = self.config.inventory_discrepancy_threshold
 
-        # Phase 2: When on-chain is enabled AND working, never halt - just log and reconcile
-        # If degraded (fallen back to API), use legacy halt behavior for safety
-        phase2_mode = self.config.onchain_enabled and not self._onchain_degraded
+        # Phase 3: When on-chain is enabled AND working, use degrade mode instead of halt
+        # If on-chain degraded (fallen back to API), use legacy halt behavior for safety
+        phase3_mode = self.config.onchain_enabled and not self._onchain_degraded
 
         if abs_discrepancy < threshold:
             state = self._inventory_discrepancy_states.get(token_id)
@@ -1674,6 +1803,8 @@ class ActiveQuotingBot:
                     f"source={position.confirmed_source.value})"
                 )
             self._clear_inventory_discrepancy_state(token_id)
+            # Phase 3: Also clear degrade mode when discrepancy is resolved
+            self._clear_degrade_state(token_id)
             return False
 
         state = self._get_inventory_discrepancy_state(token_id)
@@ -1699,12 +1830,12 @@ class ActiveQuotingBot:
                 "discrepancy": round(discrepancy, 4),
                 "threshold": threshold,
                 "duration_seconds": round(duration, 2),
-                "phase2_mode": phase2_mode,
+                "phase3_mode": phase3_mode,
             }
 
-            if phase2_mode:
-                # Phase 2: Log only, no halt
-                logger.warning(f"Inventory discrepancy (Phase 2 - no halt): {details}")
+            if phase3_mode:
+                # Phase 3: Activate degrade mode instead of halt
+                logger.warning(f"Inventory discrepancy (Phase 3 - degrade mode): {details}")
             else:
                 # Legacy: Log and halt
                 logger.warning(f"Inventory discrepancy halt: {details}")
@@ -1716,11 +1847,21 @@ class ActiveQuotingBot:
                     )
                     send_active_quoting_market_halt_alert(market_name, reason)
 
+        # Phase 3: Activate degrade mode when on-chain is healthy
+        if phase3_mode:
+            self._activate_degrade_mode(
+                token_id=token_id,
+                reason=f"discrepancy {discrepancy:+.2f} > threshold {threshold:.2f}",
+                discrepancy=discrepancy,
+                confirmed_size=position.confirmed_size,
+                effective_size=position.effective_size,
+            )
+
         # Always attempt reconciliation
         await self._reconcile_inventory_discrepancy(token_id, state)
 
-        # Phase 2: Never halt quoting, on-chain sync will eventually resolve
-        if phase2_mode:
+        # Phase 3: Never halt quoting when on-chain is healthy - use degrade mode
+        if phase3_mode:
             return False
 
         return True

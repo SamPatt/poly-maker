@@ -41,6 +41,13 @@ class ActiveQuotingConfig:
     inventory_discrepancy_reconcile_interval_seconds: float = 30.0  # Interval between reconcile attempts
     inventory_discrepancy_clear_seconds: float = 15.0  # Seconds below threshold before reset
 
+    # --- Degrade Mode (Phase 3: On-Chain Inventory) ---
+    # When on-chain is healthy but discrepancy persists, enter degrade mode instead of halting
+    degrade_size_multiplier: float = 0.5  # Reduce order size by this factor (e.g., 0.5 = 50% of normal)
+    degrade_widen_ticks: int = 1  # Widen quotes by this many ticks in degrade mode
+    degrade_one_sided: bool = True  # Only quote the side that reduces inventory
+    degrade_min_size_usdc: float = 5.0  # Minimum size floor (Polymarket minimum is 5 shares)
+
     # --- Risk Management ---
     max_drawdown_per_market_usdc: float = 20.0  # Stop quoting that market
     max_drawdown_global_usdc: float = 100.0  # Kill switch
@@ -127,6 +134,11 @@ class ActiveQuotingConfig:
             inventory_discrepancy_duration_seconds=float(os.getenv("AQ_INVENTORY_DISCREPANCY_DURATION_SECONDS", "30.0")),
             inventory_discrepancy_reconcile_interval_seconds=float(os.getenv("AQ_INVENTORY_DISCREPANCY_RECONCILE_INTERVAL_SECONDS", "30.0")),
             inventory_discrepancy_clear_seconds=float(os.getenv("AQ_INVENTORY_DISCREPANCY_CLEAR_SECONDS", "15.0")),
+            # Degrade Mode (Phase 3)
+            degrade_size_multiplier=float(os.getenv("AQ_DEGRADE_SIZE_MULTIPLIER", "0.5")),
+            degrade_widen_ticks=int(os.getenv("AQ_DEGRADE_WIDEN_TICKS", "1")),
+            degrade_one_sided=os.getenv("AQ_DEGRADE_ONE_SIDED", "true").lower() == "true",
+            degrade_min_size_usdc=float(os.getenv("AQ_DEGRADE_MIN_SIZE_USDC", "5.0")),
             # Risk Management
             max_drawdown_per_market_usdc=float(os.getenv("AQ_MAX_DRAWDOWN_PER_MARKET_USDC", "20.0")),
             max_drawdown_global_usdc=float(os.getenv("AQ_MAX_DRAWDOWN_GLOBAL_USDC", "100.0")),
@@ -231,6 +243,14 @@ class ActiveQuotingConfig:
             errors.append("inventory_discrepancy_reconcile_interval_seconds must be > 0")
         if self.inventory_discrepancy_clear_seconds <= 0:
             errors.append("inventory_discrepancy_clear_seconds must be > 0")
+
+        # Degrade Mode validation (Phase 3)
+        if not 0 < self.degrade_size_multiplier <= 1:
+            errors.append("degrade_size_multiplier must be in (0, 1]")
+        if self.degrade_widen_ticks < 0:
+            errors.append("degrade_widen_ticks must be >= 0")
+        if self.degrade_min_size_usdc < 0:
+            errors.append("degrade_min_size_usdc must be >= 0")
 
         # Risk validation
         if self.max_drawdown_per_market_usdc <= 0:

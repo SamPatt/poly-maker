@@ -2153,3 +2153,304 @@ class TestPhase2DiscrepancyHandling:
         # Reconciliation should still be triggered
         onchain_bot._reconcile_orders.assert_called_once()
         onchain_bot._sync_positions.assert_called_once()
+
+
+class TestPhase3DegradeMode:
+    """Tests for Phase 3 degrade mode (replace halt with conservative quoting)."""
+
+    @pytest.fixture
+    def degrade_config(self):
+        """Config with on-chain enabled and degrade mode settings."""
+        return ActiveQuotingConfig(
+            order_size_usdc=10.0,
+            dry_run=True,
+            onchain_enabled=True,
+            inventory_discrepancy_threshold=2.0,
+            inventory_discrepancy_duration_seconds=0.001,  # Near-immediate for testing
+            degrade_size_multiplier=0.5,
+            degrade_widen_ticks=1,
+            degrade_one_sided=True,
+            degrade_min_size_usdc=5.0,
+        )
+
+    @pytest.fixture
+    def degrade_bot(self, degrade_config, valid_orderbook):
+        """Create bot with on-chain enabled and degrade mode."""
+        bot = ActiveQuotingBot(
+            config=degrade_config,
+            api_key="test_key",
+            api_secret="test_secret",
+            api_passphrase="test_passphrase",
+            enable_persistence=False,
+            enable_alerts=False,
+        )
+        bot.orderbook_manager = MagicMock()
+        bot.orderbook_manager.get_orderbook = MagicMock(return_value=valid_orderbook)
+        bot.user_channel_manager = MagicMock()
+        bot.order_manager.close = AsyncMock()
+        bot._reconcile_orders = AsyncMock()
+        bot._sync_positions = AsyncMock()
+        return bot
+
+    @pytest.mark.asyncio
+    async def test_degrade_mode_activates_on_discrepancy(self, degrade_bot):
+        """Degrade mode should activate when discrepancy persists in Phase 3."""
+        from rebates.active_quoting.models import Fill, OrderSide
+        import time
+
+        # Set confirmed position
+        degrade_bot.inventory_manager.set_position("token1", 50.0, 0.5)
+
+        # Add pending fill to create discrepancy
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,  # Creates discrepancy of 10 > threshold 2
+            trade_id="fill1",
+        )
+        degrade_bot.inventory_manager.update_from_fill(fill)
+
+        # Verify not in degrade mode initially
+        assert not degrade_bot._is_in_degrade_mode("token1")
+
+        # First call sets first_seen, second call after duration threshold activates degrade
+        await degrade_bot._check_inventory_discrepancy("token1")
+        time.sleep(0.002)  # Wait longer than duration threshold (0.001s)
+        should_halt = await degrade_bot._check_inventory_discrepancy("token1")
+
+        # Should not halt (Phase 3)
+        assert should_halt is False
+        # Should be in degrade mode
+        assert degrade_bot._is_in_degrade_mode("token1")
+
+        # Check degrade state details
+        state = degrade_bot._degrade_states.get("token1")
+        assert state is not None
+        assert state.active is True
+        assert state.discrepancy == 10.0  # effective - confirmed
+        assert state.confirmed_size == 50.0
+        assert state.effective_size == 60.0
+
+    @pytest.mark.asyncio
+    async def test_degrade_mode_clears_when_discrepancy_resolved(self, degrade_bot):
+        """Degrade mode should clear when discrepancy is resolved."""
+        from rebates.active_quoting.models import Fill, OrderSide
+        import time
+
+        # Set confirmed position and activate degrade mode
+        degrade_bot.inventory_manager.set_position("token1", 50.0, 0.5)
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        degrade_bot.inventory_manager.update_from_fill(fill)
+
+        await degrade_bot._check_inventory_discrepancy("token1")
+        time.sleep(0.002)
+        await degrade_bot._check_inventory_discrepancy("token1")
+
+        assert degrade_bot._is_in_degrade_mode("token1")
+
+        # Now resolve discrepancy by updating confirmed position
+        degrade_bot.inventory_manager.set_position("token1", 60.0, 0.5)
+
+        # Need to wait for clear duration
+        degrade_bot.config.inventory_discrepancy_clear_seconds = 0.001
+        await degrade_bot._check_inventory_discrepancy("token1")
+        time.sleep(0.002)
+        await degrade_bot._check_inventory_discrepancy("token1")
+
+        # Degrade mode should be cleared
+        assert not degrade_bot._is_in_degrade_mode("token1")
+
+    @pytest.mark.asyncio
+    async def test_degrade_mode_not_active_when_onchain_disabled(self, bot):
+        """Degrade mode should not activate when on-chain is disabled."""
+        from rebates.active_quoting.models import Fill, OrderSide
+        import time
+
+        # Ensure on-chain is disabled
+        assert bot.config.onchain_enabled is False
+
+        bot.config.inventory_discrepancy_duration_seconds = 0.001
+
+        # Set confirmed position and create discrepancy
+        bot.inventory_manager.set_position("token1", 50.0, 0.5)
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        bot.inventory_manager.update_from_fill(fill)
+
+        bot._reconcile_orders = AsyncMock()
+        bot._sync_positions_from_api = AsyncMock()
+
+        await bot._check_inventory_discrepancy("token1")
+        time.sleep(0.002)
+        should_halt = await bot._check_inventory_discrepancy("token1")
+
+        # Should halt (legacy mode)
+        assert should_halt is True
+        # Should NOT be in degrade mode
+        assert not bot._is_in_degrade_mode("token1")
+
+    @pytest.mark.asyncio
+    async def test_degrade_mode_halts_when_onchain_degraded(self, degrade_bot):
+        """When on-chain is degraded (fallen back to API), should use legacy halt."""
+        from rebates.active_quoting.models import Fill, OrderSide
+        import time
+
+        # Simulate on-chain provider degraded (fallen back to API)
+        degrade_bot._onchain_degraded = True
+
+        # Set confirmed position and create discrepancy
+        degrade_bot.inventory_manager.set_position("token1", 50.0, 0.5)
+        fill = Fill(
+            order_id="order1",
+            token_id="token1",
+            side=OrderSide.BUY,
+            price=0.50,
+            size=10.0,
+            trade_id="fill1",
+        )
+        degrade_bot.inventory_manager.update_from_fill(fill)
+
+        await degrade_bot._check_inventory_discrepancy("token1")
+        time.sleep(0.002)
+        should_halt = await degrade_bot._check_inventory_discrepancy("token1")
+
+        # Should halt (on-chain degraded = legacy mode)
+        assert should_halt is True
+        # Should NOT be in degrade mode
+        assert not degrade_bot._is_in_degrade_mode("token1")
+
+    def test_degrade_size_reduction(self, degrade_bot, valid_orderbook):
+        """Degrade mode should reduce order sizes."""
+        from rebates.active_quoting.bot import DegradeState
+        from datetime import datetime
+
+        # Activate degrade mode manually
+        degrade_bot._degrade_states["token1"] = DegradeState(
+            active=True,
+            since=datetime.utcnow(),
+            discrepancy=10.0,
+            confirmed_size=50.0,
+            effective_size=60.0,
+        )
+
+        # Normal size would be 10 (config.order_size_usdc)
+        # With multiplier 0.5, should be 5
+        base_size = degrade_bot.config.order_size_usdc  # 10
+        expected_reduced = base_size * degrade_bot.config.degrade_size_multiplier  # 5
+
+        assert expected_reduced == 5.0
+        assert degrade_bot.config.degrade_size_multiplier == 0.5
+
+    def test_degrade_one_sided_long_position(self, degrade_bot, valid_orderbook):
+        """With long position, degrade mode should only allow sells."""
+        from rebates.active_quoting.bot import DegradeState
+        from datetime import datetime
+
+        # Set long position
+        degrade_bot.inventory_manager.set_position("token1", 60.0, 0.5)
+
+        # Activate degrade mode
+        degrade_bot._degrade_states["token1"] = DegradeState(
+            active=True,
+            since=datetime.utcnow(),
+            discrepancy=10.0,
+            confirmed_size=50.0,
+            effective_size=60.0,  # Long position
+        )
+
+        position = degrade_bot.inventory_manager.get_position("token1")
+        effective = position.effective_size
+
+        # Long position: should only sell
+        assert effective > 0
+        # When degrade_one_sided is True and position is positive,
+        # buy_size should be 0 (enforced in _place_or_update_quote)
+        assert degrade_bot.config.degrade_one_sided is True
+
+    def test_degrade_one_sided_short_position(self, degrade_bot, valid_orderbook):
+        """With short position, degrade mode should only allow buys."""
+        from rebates.active_quoting.bot import DegradeState
+        from datetime import datetime
+
+        # Set short position (negative)
+        degrade_bot.inventory_manager.set_position("token1", -10.0, 0.5)
+
+        # Activate degrade mode
+        degrade_bot._degrade_states["token1"] = DegradeState(
+            active=True,
+            since=datetime.utcnow(),
+            discrepancy=-5.0,
+            confirmed_size=-5.0,
+            effective_size=-10.0,  # Short position
+        )
+
+        position = degrade_bot.inventory_manager.get_position("token1")
+        effective = position.effective_size
+
+        # Short position: should only buy
+        assert effective < 0
+        # When degrade_one_sided is True and position is negative,
+        # sell_size should be 0 (enforced in _place_or_update_quote)
+        assert degrade_bot.config.degrade_one_sided is True
+
+    def test_degrade_widen_ticks(self, degrade_bot, valid_orderbook):
+        """Degrade mode should widen quotes by configured ticks."""
+        from rebates.active_quoting.bot import DegradeState
+        from datetime import datetime
+
+        # Activate degrade mode
+        degrade_bot._degrade_states["token1"] = DegradeState(
+            active=True,
+            since=datetime.utcnow(),
+            discrepancy=10.0,
+            confirmed_size=50.0,
+            effective_size=60.0,
+        )
+
+        tick_size = valid_orderbook.tick_size  # 0.01
+        widen_ticks = degrade_bot.config.degrade_widen_ticks  # 1
+
+        # Expected widening: bid - 1 tick, ask + 1 tick
+        expected_widen = widen_ticks * tick_size  # 0.01
+        assert expected_widen == 0.01
+
+    def test_degrade_helper_methods(self, degrade_bot):
+        """Test degrade mode helper methods."""
+        from rebates.active_quoting.bot import DegradeState
+        from datetime import datetime
+
+        # Initially not in degrade mode
+        assert not degrade_bot._is_in_degrade_mode("token1")
+
+        # Get state (initializes if needed)
+        state = degrade_bot._get_degrade_state("token1")
+        assert state.active is False
+
+        # Activate degrade mode
+        degrade_bot._activate_degrade_mode(
+            token_id="token1",
+            reason="test",
+            discrepancy=10.0,
+            confirmed_size=50.0,
+            effective_size=60.0,
+        )
+        assert degrade_bot._is_in_degrade_mode("token1")
+
+        # Clear degrade mode
+        degrade_bot._clear_degrade_state("token1")
+        assert not degrade_bot._is_in_degrade_mode("token1")
