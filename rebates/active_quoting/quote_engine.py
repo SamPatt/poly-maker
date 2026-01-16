@@ -129,7 +129,9 @@ class QuoteEngine:
                 action=QuoteAction.CANCEL_ALL,
                 reason="Unable to calculate spread"
             )
-        if spread_ticks < self.config.min_spread_ticks_to_quote:
+        # In fixed spread mode, always quote regardless of market spread
+        # In dynamic mode, skip quoting when spread is too tight
+        if not self.config.fixed_spread_mode and spread_ticks < self.config.min_spread_ticks_to_quote:
             return QuoteDecision(
                 action=QuoteAction.CANCEL_ALL,
                 reason=(
@@ -229,6 +231,8 @@ class QuoteEngine:
         # Fixed spread mode: quote at mid ± fixed ticks
         if self.config.fixed_spread_mode:
             mid_price = (best_bid + best_ask) / 2
+            # Snap mid to tick grid to avoid half-tick prices when spread is odd
+            mid_price = round(mid_price / tick_size) * tick_size
             spread_amount = self.config.fixed_spread_ticks * tick_size
             my_bid = mid_price - spread_amount
             my_ask = mid_price + spread_amount
@@ -397,7 +401,8 @@ class QuoteEngine:
         spread_ticks = orderbook.spread_ticks()
         if spread_ticks is None:
             return None, "Unable to calculate spread"
-        if spread_ticks < self.config.min_spread_ticks_to_quote:
+        # In fixed spread mode, always quote regardless of market spread
+        if not self.config.fixed_spread_mode and spread_ticks < self.config.min_spread_ticks_to_quote:
             return None, (
                 f"Spread {spread_ticks} ticks < min "
                 f"{self.config.min_spread_ticks_to_quote}"
