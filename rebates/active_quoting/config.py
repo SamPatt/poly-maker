@@ -86,6 +86,13 @@ class ActiveQuotingConfig:
     ws_reconnect_delay_seconds: float = 5.0
     ws_max_reconnect_attempts: int = 10
 
+    # --- On-Chain Inventory (Phase 1: Read-Only) ---
+    onchain_enabled: bool = False  # Enable on-chain balance fetching
+    onchain_provider_url: str = "https://polygon-rpc.com"  # Polygon RPC endpoint
+    onchain_sync_interval_seconds: float = 5.0  # How often to fetch on-chain balances
+    onchain_sync_timeout_seconds: float = 10.0  # Timeout for RPC calls
+    onchain_log_discrepancies: bool = True  # Log differences between on-chain and API
+
     # --- General ---
     dry_run: bool = True
     assets: List[str] = field(default_factory=lambda: ["btc", "eth", "sol"])
@@ -157,6 +164,12 @@ class ActiveQuotingConfig:
             ws_ping_interval=int(os.getenv("AQ_WS_PING_INTERVAL", "5")),
             ws_reconnect_delay_seconds=float(os.getenv("AQ_WS_RECONNECT_DELAY_SECONDS", "5.0")),
             ws_max_reconnect_attempts=int(os.getenv("AQ_WS_MAX_RECONNECT_ATTEMPTS", "10")),
+            # On-Chain Inventory (Phase 1)
+            onchain_enabled=os.getenv("AQ_ONCHAIN_ENABLED", "false").lower() == "true",
+            onchain_provider_url=os.getenv("AQ_ONCHAIN_PROVIDER_URL", "https://polygon-rpc.com"),
+            onchain_sync_interval_seconds=float(os.getenv("AQ_ONCHAIN_SYNC_INTERVAL_SECONDS", "5.0")),
+            onchain_sync_timeout_seconds=float(os.getenv("AQ_ONCHAIN_SYNC_TIMEOUT_SECONDS", "10.0")),
+            onchain_log_discrepancies=os.getenv("AQ_ONCHAIN_LOG_DISCREPANCIES", "true").lower() == "true",
             # General
             dry_run=os.getenv("AQ_DRY_RUN", "true").lower() == "true",
             assets=os.getenv("AQ_ASSETS", "btc,eth,sol").split(","),
@@ -269,6 +282,14 @@ class ActiveQuotingConfig:
             errors.append("ws_reconnect_delay_seconds must be >= 0")
         if self.ws_max_reconnect_attempts < 1:
             errors.append("ws_max_reconnect_attempts must be >= 1")
+
+        # On-Chain Inventory validation
+        if self.onchain_sync_interval_seconds <= 0:
+            errors.append("onchain_sync_interval_seconds must be > 0")
+        if self.onchain_sync_timeout_seconds <= 0:
+            errors.append("onchain_sync_timeout_seconds must be > 0")
+        if not self.onchain_provider_url:
+            errors.append("onchain_provider_url must not be empty")
 
         # General validation
         if not self.assets:
