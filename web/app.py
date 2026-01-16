@@ -221,6 +221,7 @@ async def markets_list(
                         SELECT {base_cols}
                         FROM all_markets
                         WHERE LOWER(question) LIKE LOWER(%(search)s)
+                        AND end_date >= CURRENT_DATE
                         {'AND volatility_sum <= %(max_vol)s' if max_vol_float else ''}
                         ORDER BY {order_by}
                         LIMIT %(limit)s
@@ -244,7 +245,7 @@ async def markets_list(
                     query = f"""
                         SELECT {base_cols}
                         FROM all_markets
-                        WHERE 1=1
+                        WHERE end_date >= CURRENT_DATE
                         {'AND volatility_sum <= %(max_vol)s' if max_vol_float else ''}
                         ORDER BY {order_by}
                         LIMIT %(limit)s
