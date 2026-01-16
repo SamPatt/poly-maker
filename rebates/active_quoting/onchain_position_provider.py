@@ -21,6 +21,9 @@ CTF_CONTRACT_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 # Default Polygon RPC endpoints (public, may have rate limits)
 DEFAULT_RPC_URL = "https://polygon-rpc.com"
 
+# CTF token decimals (same as USDC collateral)
+DEFAULT_TOKEN_DECIMALS = 6
+
 # Minimal ABI for balanceOf and balanceOfBatch
 CTF_BALANCE_ABI = [
     {
@@ -54,7 +57,7 @@ CTF_BALANCE_ABI = [
 class OnChainBalance:
     """Result of an on-chain balance query."""
     token_id: str
-    balance: float  # In shares (raw / 1e6)
+    balance: float  # In shares (raw / 10^decimals)
     raw_balance: int  # Raw token amount
     fetched_at: datetime
     block_number: Optional[int] = None
@@ -85,6 +88,7 @@ class OnChainPositionProvider:
         wallet_address: str,
         rpc_url: str = DEFAULT_RPC_URL,
         timeout_seconds: float = 10.0,
+        token_decimals: int = DEFAULT_TOKEN_DECIMALS,
     ):
         """
         Initialize the on-chain position provider.
@@ -93,10 +97,13 @@ class OnChainPositionProvider:
             wallet_address: The wallet address that holds inventory (checksummed or not)
             rpc_url: Polygon RPC endpoint URL
             timeout_seconds: Request timeout for RPC calls
+            token_decimals: Decimal places for CTF tokens (default 6, same as USDC)
         """
         self._rpc_url = rpc_url
         self._timeout_seconds = timeout_seconds
         self._wallet_address = Web3.to_checksum_address(wallet_address)
+        self._token_decimals = token_decimals
+        self._decimal_divisor = 10 ** token_decimals
 
         # Initialize Web3 connection
         self._web3: Optional[Web3] = None
@@ -176,8 +183,8 @@ class OnChainPositionProvider:
                 int(token_id)
             ).call()
 
-            # Convert to shares (6 decimals)
-            balance = float(raw_balance) / 1e6
+            # Convert to shares
+            balance = float(raw_balance) / self._decimal_divisor
 
             result = OnChainBalance(
                 token_id=token_id,
@@ -221,6 +228,15 @@ class OnChainPositionProvider:
                 duration_ms=0.0,
             )
 
+        # Deduplicate token_ids to avoid masking issues upstream
+        unique_token_ids = list(dict.fromkeys(token_ids))  # Preserves order
+        if len(unique_token_ids) < len(token_ids):
+            logger.warning(
+                f"fetch_balances received {len(token_ids) - len(unique_token_ids)} "
+                f"duplicate token_ids, deduplicating to {len(unique_token_ids)}"
+            )
+            token_ids = unique_token_ids
+
         if not self._ensure_initialized():
             return OnChainSyncResult(
                 balances={},
@@ -250,7 +266,7 @@ class OnChainPositionProvider:
             balances: Dict[str, OnChainBalance] = {}
 
             for token_id, raw_balance in zip(token_ids, raw_balances):
-                balance = float(raw_balance) / 1e6
+                balance = float(raw_balance) / self._decimal_divisor
                 balances[token_id] = OnChainBalance(
                     token_id=token_id,
                     balance=balance,

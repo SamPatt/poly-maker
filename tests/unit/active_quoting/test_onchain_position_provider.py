@@ -22,8 +22,8 @@ class TestOnChainPositionProviderInit:
         provider = OnChainPositionProvider(
             wallet_address="0x1234567890123456789012345678901234567890"
         )
-        # Web3 checksums addresses
-        assert provider._wallet_address == "0x1234567890123456789012345678901234567890"
+        # Web3 checksums addresses per EIP-55 (mixed case)
+        assert provider._wallet_address.lower() == "0x1234567890123456789012345678901234567890".lower()
 
     def test_init_stores_rpc_url(self):
         """Should store custom RPC URL."""
@@ -57,6 +57,23 @@ class TestOnChainPositionProviderInit:
         assert provider._initialized is False
         assert provider._web3 is None
         assert provider._contract is None
+
+    def test_init_default_decimals(self):
+        """Should use default 6 decimals for CTF tokens."""
+        provider = OnChainPositionProvider(
+            wallet_address="0x1234567890123456789012345678901234567890"
+        )
+        assert provider._token_decimals == 6
+        assert provider._decimal_divisor == 1_000_000
+
+    def test_init_custom_decimals(self):
+        """Should allow custom decimals configuration."""
+        provider = OnChainPositionProvider(
+            wallet_address="0x1234567890123456789012345678901234567890",
+            token_decimals=18,
+        )
+        assert provider._token_decimals == 18
+        assert provider._decimal_divisor == 10 ** 18
 
 
 class TestOnChainPositionProviderWithMockedWeb3:
@@ -204,6 +221,25 @@ class TestOnChainPositionProviderWithMockedWeb3:
         assert result.success is True
         assert len(result.balances) == 0
         assert result.duration_ms == 0.0
+
+    def test_fetch_balances_deduplicates_token_ids(self, provider, mock_web3):
+        """Should deduplicate token IDs and log warning."""
+        mock_class, mock_instance = mock_web3
+        # Duplicate token ID in list
+        token_ids = ["111111111111111111", "222222222222222222", "111111111111111111"]
+
+        mock_contract = MagicMock()
+        # Only 2 unique tokens, so only 2 balances returned
+        mock_contract.functions.balanceOfBatch.return_value.call.return_value = [
+            100_000_000,
+            50_000_000,
+        ]
+        mock_instance.eth.contract.return_value = mock_contract
+
+        result = provider.fetch_balances(token_ids)
+
+        assert result.success is True
+        assert len(result.balances) == 2  # Deduplicated
 
     def test_fetch_balances_returns_error_on_failure(self, provider, mock_web3):
         """Should return error result on batch fetch failure."""
