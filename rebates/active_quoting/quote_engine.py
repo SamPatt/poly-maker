@@ -215,8 +215,8 @@ class QuoteEngine:
         """
         Calculate base quote prices before skew.
 
-        Default: Quote at best bid/ask.
-        Improve by 1 tick only when spread is wide enough.
+        In fixed spread mode: Quote at mid ± fixed_spread_ticks.
+        In dynamic mode: Quote at best bid/ask, improve by 1 tick when spread wide enough.
 
         Args:
             best_bid: Current best bid price
@@ -226,6 +226,15 @@ class QuoteEngine:
         Returns:
             Tuple of (my_bid, my_ask)
         """
+        # Fixed spread mode: quote at mid ± fixed ticks
+        if self.config.fixed_spread_mode:
+            mid_price = (best_bid + best_ask) / 2
+            spread_amount = self.config.fixed_spread_ticks * tick_size
+            my_bid = mid_price - spread_amount
+            my_ask = mid_price + spread_amount
+            return my_bid, my_ask
+
+        # Dynamic mode (original behavior)
         spread_ticks = int(round((best_ask - best_bid) / tick_size))
 
         # Default: quote AT best bid/ask
@@ -252,6 +261,8 @@ class QuoteEngine:
         Positive inventory (long) -> less aggressive buying, more aggressive selling
         Negative inventory (short) -> more aggressive buying, less aggressive selling
 
+        In fixed spread mode with fixed_spread_disable_skew=True, skew is disabled.
+
         Args:
             my_bid: Current bid price
             my_ask: Current ask price
@@ -261,6 +272,10 @@ class QuoteEngine:
         Returns:
             Tuple of (skewed_bid, skewed_ask)
         """
+        # Skip skew in fixed spread mode if disabled
+        if self.config.fixed_spread_mode and self.config.fixed_spread_disable_skew:
+            return my_bid, my_ask
+
         if self.config.inventory_skew_coefficient == 0 or inventory == 0:
             return my_bid, my_ask
 

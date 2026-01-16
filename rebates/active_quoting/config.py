@@ -18,6 +18,12 @@ class ActiveQuotingConfig:
     improve_when_spread_ticks: int = 4  # Only improve by 1 tick if spread >= 4 ticks
     max_spread_ticks: int = 10  # Widen to this during momentum
 
+    # --- Fixed Spread Mode ---
+    # When enabled, quotes at mid ± fixed_spread_ticks instead of dynamic pricing
+    fixed_spread_mode: bool = False  # Enable fixed spread market making
+    fixed_spread_ticks: int = 2  # Quote at mid ± this many ticks (e.g., 2 ticks = 0.02 spread on each side)
+    fixed_spread_disable_skew: bool = True  # Disable inventory skew in fixed spread mode
+
     # --- Quote Refresh (Hysteresis) ---
     refresh_threshold_ticks: int = 2  # Only refresh if quote is >= 2 ticks from target
     refresh_on_mid_move_ticks: int = 1  # Force refresh if mid moves this many ticks
@@ -114,6 +120,10 @@ class ActiveQuotingConfig:
             min_spread_ticks_to_quote=int(os.getenv("AQ_MIN_SPREAD_TICKS_TO_QUOTE", "2")),
             improve_when_spread_ticks=int(os.getenv("AQ_IMPROVE_WHEN_SPREAD_TICKS", "4")),
             max_spread_ticks=int(os.getenv("AQ_MAX_SPREAD_TICKS", "10")),
+            # Fixed Spread Mode
+            fixed_spread_mode=os.getenv("AQ_FIXED_SPREAD_MODE", "false").lower() == "true",
+            fixed_spread_ticks=int(os.getenv("AQ_FIXED_SPREAD_TICKS", "2")),
+            fixed_spread_disable_skew=os.getenv("AQ_FIXED_SPREAD_DISABLE_SKEW", "true").lower() == "true",
             # Quote Refresh
             refresh_threshold_ticks=int(os.getenv("AQ_REFRESH_THRESHOLD_TICKS", "2")),
             refresh_on_mid_move_ticks=int(os.getenv("AQ_REFRESH_ON_MID_MOVE_TICKS", "1")),
@@ -203,6 +213,10 @@ class ActiveQuotingConfig:
             errors.append("min_spread_ticks_to_quote must be <= max_spread_ticks")
         if self.max_spread_ticks < self.improve_when_spread_ticks:
             errors.append("max_spread_ticks must be >= improve_when_spread_ticks")
+
+        # Fixed spread mode validation
+        if self.fixed_spread_ticks < 1:
+            errors.append("fixed_spread_ticks must be >= 1")
 
         # Refresh validation
         if self.refresh_threshold_ticks < 1:
