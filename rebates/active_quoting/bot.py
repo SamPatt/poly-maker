@@ -481,8 +481,9 @@ class ActiveQuotingBot:
             return await self._sync_positions_from_api(token_ids)
 
         try:
-            # Fetch on-chain balances
-            result = provider.fetch_balances(list(token_ids))
+            # Fetch on-chain balances in a thread to avoid blocking the event loop
+            # Web3 uses synchronous HTTP calls which can block for up to timeout_seconds
+            result = await asyncio.to_thread(provider.fetch_balances, list(token_ids))
 
             if not result.success:
                 logger.error(f"On-chain sync failed: {result.error}")
@@ -518,8 +519,6 @@ class ActiveQuotingBot:
 
                 # Only update if on-chain balance differs from confirmed
                 if abs(onchain_balance - old_confirmed) >= 0.01:
-                    pending_buys = self.inventory_manager.get_pending_buy_size(token_id)
-
                     # Use on-chain balance as confirmed_size
                     # Note: On-chain doesn't give us avg_entry_price, so preserve existing or use 0.5
                     avg_price = old_position.confirmed_avg_price if old_position.confirmed_avg_price > 0 else 0.5
@@ -1655,8 +1654,9 @@ class ActiveQuotingBot:
         abs_discrepancy = abs(discrepancy)
         threshold = self.config.inventory_discrepancy_threshold
 
-        # Phase 2: When on-chain is enabled, never halt - just log and reconcile
-        phase2_mode = self.config.onchain_enabled
+        # Phase 2: When on-chain is enabled AND working, never halt - just log and reconcile
+        # If degraded (fallen back to API), use legacy halt behavior for safety
+        phase2_mode = self.config.onchain_enabled and not self._onchain_degraded
 
         if abs_discrepancy < threshold:
             state = self._inventory_discrepancy_states.get(token_id)
